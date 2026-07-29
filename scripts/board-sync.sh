@@ -46,6 +46,26 @@ if [[ -z "$option_id" ]]; then
   exit 1
 fi
 
+rank() {
+  case "$1" in
+    Backlog) echo 0 ;;
+    Ready) echo 1 ;;
+    "In progress") echo 2 ;;
+    Review) echo 3 ;;
+    Done) echo 4 ;;
+    Blocked) echo 5 ;;
+    *) echo -1 ;;
+  esac
+}
+
+current="$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" \
+  --limit 5000 --format json \
+  --jq ".items[] | select(.id == \"$item_id\") | .workflow // empty")"
+if (( $(rank "$target") <= $(rank "$current") )); then
+  echo "No forward transition needed: ${current:-unset} -> $target"
+  exit 0
+fi
+
 gh project item-edit --id "$item_id" --project-id "$project_id" \
   --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null
 echo "Moved $ITEM_URL to $target"
