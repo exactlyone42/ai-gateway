@@ -1,0 +1,25 @@
+name: Feature
+description: Track an implementation slice
+title: "[Feature] "
+labels: ["type:feature", "status:backlog"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe the user-visible or operational outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compliance impact
+    validations:
+      required: true

@@ -1,0 +1,33 @@
+name: Board sync
+
+on:
+  issues:
+    types: [opened, reopened, closed]
+  pull_request:
+    types: [opened, reopened, closed, converted_to_draft, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: board-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync issue and pull request state
+        env:
+          GH_TOKEN: ${{ secrets.BOARD_SYNC_TOKEN }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          FIELD_NAME: ${{ vars.FIELD_NAME }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ITEM_URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+        run: bash scripts/board-sync.sh
