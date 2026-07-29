@@ -5,7 +5,7 @@ on:
     types: [opened, reopened, closed]
   pull_request:
     types: [opened, reopened, closed, converted_to_draft, ready_for_review]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -29,5 +29,4 @@ jobs:
           FIELD_NAME: ${{ vars.FIELD_NAME }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
-          ITEM_URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
         run: bash scripts/board-sync.sh

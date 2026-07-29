@@ -6,6 +6,10 @@ set -euo pipefail
 : "${PROJECT_OWNER:=DnaBoss}"
 : "${FIELD_NAME:=Status}"
 
+if [[ -z "${ITEM_URL:-}" && -n "${GITHUB_EVENT_PATH:-}" ]]; then
+  ITEM_URL="$(jq -r '.issue.html_url // .pull_request.html_url // empty' "$GITHUB_EVENT_PATH")"
+fi
+
 if [[ -z "${ITEM_URL:-}" ]]; then
   echo "No event item; workflow dispatch is a permission/configuration check."
   gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" >/dev/null
