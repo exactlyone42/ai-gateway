@@ -1,7 +1,7 @@
 # LOOP: openai-native
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/openai-native`｜段落 `W06`
+> 卡 [#4](https://github.com/DnaBoss/agent-pool-gateway/issues/4)｜分支 `feature/openai-native`｜段落 `W06`
 
 | 欄位 | 值 |
 | --- | --- |

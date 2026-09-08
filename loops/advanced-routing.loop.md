@@ -1,7 +1,7 @@
 # LOOP: advanced-routing
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/advanced-routing`｜段落 `W17`
+> 卡 待開（開工時建；健康路由／fallback 原在作廢的 [#6](https://github.com/DnaBoss/agent-pool-gateway/issues/6)）｜分支 `feature/advanced-routing`｜段落 `W17`
 
 | 欄位 | 值 |
 | --- | --- |

@@ -18,13 +18,16 @@
 
 ## 完成判準
 - [x] `docs/work-breakdown.md`：18 段落、依賴圖、既有看板卡對照、明確不做清單。
-- [ ] `docs/feasibility.md`：每個 Client 一條結論，附官方 URL ＋ 查證日期 ＋ 邊界說明。
-- [ ] `loops/*.loop.md`：每段落一份，全部列進 `loops/README.md`。
-- [ ] `docs/engineering-standards.md`：每條規範可機器檢查，或寫明驗收動作。
-- [ ] `docs/task-ledger.md`：每段落一列（開始／結束／token／trade-off）。
-- [ ] `./scripts/check.sh all` 全綠。
-- [ ] **陰性對照**：把某個 loop 檔的 `## 證據` 段落刪掉，`./scripts/check.sh loops` 必須變紅。
-      （目前的 `loop files ok` 是在 0 個 loop 檔的情況下印的，那是橡皮圖章。）
+- [x] `docs/feasibility.md`：結論 ＋ 官方 URL ＋ 查證日期 ＋ 每條的邊界說明。
+      **VS Code／Cursor／Codex Desktop 三列仍是 `未查證`**，標成 pending 而不是猜。
+- [x] `loops/*.loop.md`：19 份，全部列進 `loops/README.md`，全部對映到看板卡或標「開工時建」。
+- [x] `docs/engineering-standards.md`：14 節，每條有機器檢查或寫明驗收動作。
+- [x] `docs/task-ledger.md`：記帳規則 ＋ token 實測分佈 ＋ 跨段落 trade-off 表。
+- [x] `./scripts/check.sh all` 全綠（fmt／clippy／test 1 passed 0 skipped／loops／bans）。
+- [x] **陰性對照（loop 檔關卡）三條全紅**：缺段落標題、主體超 200 行、沒進索引。
+- [x] **陰性對照（bans 關卡）五條全紅**：生產路徑 unwrap、硬編模型名、程式碼裡出現
+      可觀測性後端名稱、高基數 metric label、`mod.rs`。
+      加上一條**正對照**：同樣的構件放進 `#[cfg(test)]` 模組**不會**誤報。
 
 ## 已知
 - repo 非空。既有 4 支 Rust 檔共 241 行：`src/main.rs`（路由 ＋ JSON 日誌 ＋ request-id 層）、
@@ -49,6 +52,15 @@
 - `2026-09-08` 寫 `scripts/token-ledger.sh`：按時間窗、去重、分 Agent 統計 token。實測可用（見證據）。
 - `2026-09-08` 寫 `scripts/check.sh`：`gate`（快）／`all`（PR 前）／`loops`（loop 檔紀律）。
 - `2026-09-08` 寫 `docs/work-breakdown.md`：18 段落 ＋ 依賴圖 ＋ 既有 15 張卡的對照與作廢判定。
+- `2026-09-08` 寫 19 份 loop 檔 ＋ 索引，並把 loop 檔紀律做成機器檢查（三條陰性對照全紅）。
+- `2026-09-08` 自行覆核可行性關鍵四條，寫 `docs/feasibility.md`、重寫
+  `docs/client-compatibility.md`。查到 Anthropic 有官方閘道相容契約，直接變成 W05 的完成判準。
+- `2026-09-08` 寫 `docs/engineering-standards.md`，並把其中五條做成 `check.sh bans` 關卡。
+  這個關卡抓到既有程式碼的第一個真實違規（`src/gateway.rs` 生產路徑的 `.expect`），已修掉。
+- `2026-09-08` CI 改成呼叫 `./scripts/check.sh all`，本機與 CI 共用同一份關卡定義。
+- `2026-09-08` 改寫 `docs/architecture.md`（三個 Plane、五個概念不准混、故障模型）、
+  更新 `README.md`、修 `docs/security-and-compliance.md` 的 LiteLLM 敘述。
+- `2026-09-08` 看板整理：#6 作廢並關閉（附取代路徑），#16 拆兩段、#8 縮範圍、#4 改順序，各留說明。
 
 ## 已確定不可行
 - **沿用 `Status` 當看板欄位名**：這個 repo 的欄位實際叫 `Workflow`（repo variable `FIELD_NAME=Workflow`），
@@ -79,13 +91,16 @@
 | 整合分支 | 新建 `dev`，`main` 留給正式 | 直接在 `main` 上疊 18 段落 | 18 段落分批合，需要一個能反覆合併又不觸發部署的落點 |
 | 段落粒度 | 18 段（可獨立審查） | 7 段（照規格的 Phase 切） | Phase 太大，一份 loop 檔的主體會破 200 行，代表任務該拆 |
 | Phase 4–7 的 loop 檔 | 先建、內容從簡 | 等前置完成才建 | 建了才進得了索引與依賴圖；但不預寫還沒有事實依據的內容 |
+| 看板卡 | 只對映既有卡，缺的等開工才建 | 一次補開 9 張新卡 | 18 張躺在 backlog 的卡比沒有卡更糟——沒人看、還會被當成有人在做 |
+| 既有 `.expect` | 直接修掉 | 加白名單讓關卡先過 | 生產路徑的 panic 捷徑屬於安全性（收斂原則第①類），不是「順手撿的問題」 |
 | token 記帳 | 從對話紀錄實測 | 事後估算 | 估算不可稽核；實測有 `requestId` 可去重、可重跑 |
 
 ## 下一步
-1. 收 `compat-research` 的查證結果 → 寫 `docs/feasibility.md`、更新 `docs/client-compatibility.md`。
-2. 收 `quality-extract` 的三專案規範萃取 → 寫 `docs/engineering-standards.md`。
-3. 補完 18 份 loop 檔與 `loops/README.md` 索引。
-4. 做 `check.sh loops` 的陰性對照（刪一個段落標題，確認變紅）。
-5. 更新 `docs/architecture.md`：LiteLLM 從執行期依賴改成「不使用」，補三個 Plane 的邊界。
-6. `./scripts/check.sh all` 全綠 → PR #21 轉 ready → 合 `dev`。
-7. 為 W01～W18 開卡並把卡號回填各 loop 檔。
+1. 收 `compat-research` 對 VS Code／Cursor／Codex Desktop 的查證，補進
+   `docs/client-compatibility.md`（目前是 `未查證`）。
+2. 收 `quality-extract` 的三專案規範萃取，比對 `docs/engineering-standards.md` 有沒有漏。
+3. **請 cash 決定範圍**：第一方 Claude apps gateway 已覆蓋 SSO／群組模型白名單／支出上限／
+   OTLP，是否把本專案收斂到它沒有的四項（多 Provider、排程、可查詢帳本、Admin UI）。
+   見 `docs/feasibility.md` 第四節。這個決定會改變 W08／W09 的範圍。
+4. PR #21 轉 ready → 合 `dev`。
+5. 開工 W02 `workspace-foundation`（無前置，關鍵路徑起點）。

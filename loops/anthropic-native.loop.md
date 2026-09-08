@@ -1,7 +1,7 @@
 # LOOP: anthropic-native
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/anthropic-native`｜段落 `W05`
+> 卡 待開（開工時建）｜分支 `feature/anthropic-native`｜段落 `W05`
 
 | 欄位 | 值 |
 | --- | --- |

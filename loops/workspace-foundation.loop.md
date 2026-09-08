@@ -1,7 +1,7 @@
 # LOOP: workspace-foundation
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/workspace-foundation`｜段落 `W02`
+> 卡 待開（開工時建；部分覆蓋於 [#1](https://github.com/DnaBoss/agent-pool-gateway/issues/1) [#19](https://github.com/DnaBoss/agent-pool-gateway/issues/19)）｜分支 `feature/workspace-foundation`｜段落 `W02`
 
 | 欄位 | 值 |
 | --- | --- |

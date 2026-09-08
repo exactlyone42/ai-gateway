@@ -1,7 +1,7 @@
 # LOOP: policy-engine
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/policy-engine`｜段落 `W11`
+> 卡 [#17](https://github.com/DnaBoss/agent-pool-gateway/issues/17)｜分支 `feature/policy-engine`｜段落 `W11`
 
 | 欄位 | 值 |
 | --- | --- |

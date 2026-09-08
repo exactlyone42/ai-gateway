@@ -1,7 +1,7 @@
 # LOOP: usage-ledger
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/usage-ledger`｜段落 `W04`
+> 卡 [#14](https://github.com/DnaBoss/agent-pool-gateway/issues/14)｜分支 `feature/usage-ledger`｜段落 `W04`
 
 | 欄位 | 值 |
 | --- | --- |

@@ -1,7 +1,7 @@
 # LOOP: client-compatibility
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/client-compatibility`｜段落 `W01`
+> 卡 [#18](https://github.com/DnaBoss/agent-pool-gateway/issues/18) [#15](https://github.com/DnaBoss/agent-pool-gateway/issues/15) [#5](https://github.com/DnaBoss/agent-pool-gateway/issues/5) [#7](https://github.com/DnaBoss/agent-pool-gateway/issues/7)｜分支 `feature/client-compatibility`｜段落 `W01`
 
 | 欄位 | 值 |
 | --- | --- |

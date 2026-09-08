@@ -1,7 +1,7 @@
 # LOOP: admin-web
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/admin-web`｜段落 `W09`
+> 卡 [#8](https://github.com/DnaBoss/agent-pool-gateway/issues/8)（縮小範圍：第一版不含 SSO／核准流程）｜分支 `feature/admin-web`｜段落 `W09`
 
 | 欄位 | 值 |
 | --- | --- |

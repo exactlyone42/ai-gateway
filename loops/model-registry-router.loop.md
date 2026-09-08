@@ -1,7 +1,7 @@
 # LOOP: model-registry-router
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/model-registry-router`｜段落 `W10`
+> 卡 待開（開工時建；取代作廢的 [#6](https://github.com/DnaBoss/agent-pool-gateway/issues/6)）｜分支 `feature/model-registry-router`｜段落 `W10`
 
 | 欄位 | 值 |
 | --- | --- |

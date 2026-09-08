@@ -1,7 +1,7 @@
 # LOOP: identity-credential
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 #TBD｜分支 `feature/identity-credential`｜段落 `W03`
+> 卡 [#16](https://github.com/DnaBoss/agent-pool-gateway/issues/16)（生命週期部分）｜分支 `feature/identity-credential`｜段落 `W03`
 
 | 欄位 | 值 |
 | --- | --- |
