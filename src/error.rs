@@ -14,6 +14,8 @@ pub enum GatewayError {
     ModelForbidden,
     #[error("upstream request failed")]
     Upstream(#[from] reqwest::Error),
+    #[error("failed to build the response")]
+    ResponseBuild(#[from] axum::http::Error),
 }
 
 impl IntoResponse for GatewayError {
@@ -22,6 +24,7 @@ impl IntoResponse for GatewayError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,

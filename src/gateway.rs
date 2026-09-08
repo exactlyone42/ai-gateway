@@ -69,9 +69,7 @@ pub async fn chat_completions(
     if let Some(value) = content_type {
         builder = builder.header(header::CONTENT_TYPE, value);
     }
-    Ok(builder
-        .body(axum::body::Body::from(bytes))
-        .expect("valid response"))
+    Ok(builder.body(axum::body::Body::from(bytes))?)
 }
 
 fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {

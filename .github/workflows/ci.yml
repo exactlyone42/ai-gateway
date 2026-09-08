@@ -17,6 +17,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all
+      # Single source of truth for the gates, shared with local development.
+      # See docs/engineering-standards.md section 0.
+      - run: ./scripts/check.sh all
