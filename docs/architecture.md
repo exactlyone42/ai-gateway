@@ -1,68 +1,148 @@
-# Architecture
+# 架構
 
-## Goals
+## 目標
 
-Issue a revocable virtual API key to each employee or service, maximize approved
-API capacity utilization, enforce per-user model and budget policy, and preserve
-a complete audit trail without exposing provider credentials.
+每個人／每台設備／每個 Agent 拿一把可撤銷的閘道金鑰，把公司核准的官方 API 容量集中調度，
+依政策決定「誰先跑、用哪個模型、花多少」，並留下完整的用量與稽核軌跡——**Provider 憑證永不外流**。
 
-## Request path
+## 三個 Plane
+
+邊界要一直保持清楚，這是整份架構最重要的約束。
+
+### 資料面（Data Plane）
+
+真正的推論流量走這裡。
+
+`Protocol Adapter → 認證 → Principal 解析 → 政策評估 → Admission Control → Scheduler →
+速率／併發控制 → Model Router → Provider Adapter → Retry／Fallback → 串流 → 取消`
+
+### 控制面（Control Plane）
+
+User／Device／Client／Agent／身分／憑證／API Key／Access Token／模型註冊表／Provider／
+政策／配額／排程設定／Admin UI／RBAC／稽核。
+
+**控制面掛掉時，已經進行中的推論串流不得跟著中斷。**
+
+### 可觀測性與帳務面（Observability / Accounting Plane）
+
+帳務：請求帳本、token 用量、Provider 用量、成本、預算、配額。
+可觀測性：metrics、traces、結構化 log、Provider 健康、佇列健康、排程健康、告警、SRE 儀表板。
+
+閘道對可觀測性後端**只依賴 OTLP**，不綁 Grafana／Prometheus／Tempo／SigNoz／Datadog。
+開發環境預設給 SigNoz 的 compose（因為部署簡單），閘道本體只認 OTLP。
+
+## 請求路徑
 
 ```text
-IDE / agent
-  -> Rust gateway (TLS, virtual key, identity, policy, quota)
-  -> LiteLLM proxy (model alias, provider API key routing, fallback)
-  -> approved provider API / enterprise endpoint
-  -> usage reconciliation and append-only audit events
+Client（Claude Code / Codex / VS Code / Cursor / 自建 Agent / 自動化 Agent）
+  ↓  閘道金鑰
+Protocol Adapter（Anthropic Messages / OpenAI Responses / Chat Completions）
+  ↓
+Canonical Request
+  ↓
+Principal（誰／哪台設備／哪個 Client／哪個 Agent／哪把金鑰）
+  ↓
+Policy（quality／workload／urgency／budget／deadline，六層合併）
+  ↓
+Admission Control（accept / queue / downgrade / reroute / reject）
+  ↓
+Scheduler（WHEN：加權公平佇列 ＋ aging ＋ 保留容量）
+  ↓
+Router（WHERE：模型註冊表 ＋ 能力 ＋ 健康 ＋ 成本 ＋ 負載）
+  ↓
+Provider Adapter
+  ↓
+Provider（Anthropic / OpenAI / Gemini / xAI / Local vLLM・Ollama）
 ```
 
-The Rust gateway is the policy authority. LiteLLM is an internal-only upstream
-and must not be reachable by end users.
+回應反向走同一條路，串流是**增量轉送**：
 
-## Components
+```text
+Provider SSE → Provider Adapter → Canonical Stream Event → Protocol Adapter → Client SSE
+```
 
-1. **Rust data plane**: OpenAI-compatible endpoints, streaming proxy, key
-   validation, model authorization, rate limits, budget reservations and usage
-   recording.
-2. **Rust control plane**: people, teams, service accounts, key lifecycle,
-   policies, provider pools, model catalog, budget periods and audit queries.
-3. **LiteLLM**: normalized provider calls, model aliases and approved provider
-   failover. Provider secrets live in a secret manager, never in client config.
-4. **PostgreSQL**: identities, policies, hashed keys, budgets, usage ledger and
-   configuration versions.
-5. **Redis-compatible store**: distributed RPM/TPM counters, concurrency leases,
-   circuit-breaker state and short-lived budget reservations.
-6. **OIDC/SSO**: admin authentication and group synchronization.
-7. **Telemetry**: OpenTelemetry metrics/traces, redacted structured logs and
-   alerts for spend, error rate, latency and pool exhaustion.
+旁路（不擋主路徑）：
 
-## Routing
+```text
+Request ├── 用量帳本（PostgreSQL）
+        ├── OpenTelemetry
+        ├── 稽核
+        └── Admin
+```
 
-Policies resolve in this order: global deny -> user/team deny -> model allowlist
--> time/budget limits -> provider health -> weighted least-utilized eligible
-deployment. Fallback occurs only between approved API deployments of the same
-policy class. Retries use idempotency keys where supported and never retry an
-ambiguous non-idempotent response blindly.
+## 五個概念不准混在一起
 
-## Quotas and fairness
+| 問題 | 由誰回答 |
+| --- | --- |
+| WHEN（誰先跑） | Scheduler |
+| WHERE（送去哪） | Router |
+| HOW GOOD（多好的模型） | Quality Policy |
+| HOW MUCH（能花多少） | Budget／Quota |
+| WHO（誰發的） | Principal |
 
-- RPM, TPM, concurrent requests and daily/monthly currency budgets.
-- Atomic pre-request token estimate reservation; reconcile against provider
-  usage after response.
-- Hierarchical limits: company -> department -> team -> principal -> key.
-- Weighted fair queueing prevents one heavy user from starving others.
-- Emergency reserve protects production automation from interactive workloads.
+**Scheduler 與 Router 不得寫成同一個 module。**
 
-## Data model
+## 元件
 
-Core entities: `Principal`, `Team`, `VirtualKey`, `Policy`, `ModelAlias`,
-`ProviderDeployment`, `Budget`, `UsageEvent`, `AuditEvent`, `RouteDecision`,
-`SecretReference` and `ConfigVersion`. Raw keys are shown once; only keyed hashes
-are stored. Provider secrets are represented by secret-manager references.
+1. **資料面**：協定端點、串流代理、金鑰驗證、模型授權、速率限制、預算保留、用量記錄、取消傳遞。
+2. **控制面**：人員、設備、Client、Agent、憑證生命週期、政策、Provider、模型目錄、預算週期、稽核查詢。
+3. **Provider Adapter**：各家 API 的實際呼叫、能力回報、健康檢查、成本估算。
+   **核心閘道自己實作，LiteLLM 不是執行期依賴**（可以讀它的架構學 edge case，不進 `Cargo.toml`）。
+4. **PostgreSQL**：身分、政策、金鑰雜湊、預算、用量帳本、設定版本。**精確帳本在這裡，不在 Prometheus。**
+5. **OTLP 匯出**：metrics／traces／redacted logs。
+6. **Secret 抽象層**：開發環境用 `.env`；正式環境留出介面接 Vault／Cloud Secret Manager／KMS。
+   第一版不自己造 secret manager。
 
-## Deployment
+## 身分
 
-Run at least two stateless gateway replicas behind a private load balancer.
-Place LiteLLM, PostgreSQL and Redis on private networks. Use mTLS or workload
-identity between gateway and LiteLLM. Production changes use versioned config,
-four-eyes approval for provider credentials and canary rollout with rollback.
+**Key 只是 Credential，不是 Identity。**
+
+```text
+Credential
+  ↓ 解析
+Principal ├── User
+          ├── Device
+          ├── Client
+          └── Agent
+```
+
+人類看的是「Cash → MacBook → Claude Code → Coding Agent」，不是 `aigw_sk_f8a901...`。
+階層關係**不寫死在型別裡**；Principal 是一次請求經過憑證解析後得到的邏輯身分。
+
+## 政策解析順序
+
+```text
+Global 預設 → User → Device → Client → Agent → Credential → Request hint
+```
+
+**Request hint 不得突破上層的 hard constraint。** 合併結果（`EffectivePolicy`）寫進請求記錄，
+事後才解釋得出「為什麼這次只給 standard」。
+
+## 公平性
+
+- 限制種類：RPM、估算 TPM、時／日 token、併發請求、日／月成本。
+- 維度：User／Device／Client／Agent／Credential／Model／Provider／Workload。
+- 上游前做估算 token 的保留，回應後用 provider-reported 用量對帳（兩者分開記，不互相覆寫）。
+- 加權公平佇列 ＋ aging，避免背景工作永久 starvation。
+- 保留容量保護互動式流量：背景工作塞 1000 個請求也吃不掉互動的保留槽。
+
+## 故障模型
+
+| 故障 | 行為 |
+| --- | --- |
+| Admin UI 掛掉 | 推論不受影響 |
+| OTel 後端掛掉 | 推論不受影響，遙測降級 |
+| 儀表板／分析查詢掛掉 | 推論不受影響 |
+| PostgreSQL 掛掉 | **已存在的串流不得被 kill**；新請求靠有上限的憑證／政策快取，快取未命中則 fail closed；用量寫進有上限的持久化 spool，恢復後補寫 |
+| Provider 掛掉 | 依政策 retry／fallback，遙測分開記 |
+| 佇列滿 | 明確拒絕，不無上限堆積 |
+
+**帳務不得無聲遺失**，spool 必須有上限（不是無上限記憶體佇列）。
+
+## 部署
+
+至少兩個無狀態閘道實例掛在私有負載平衡器後面。PostgreSQL 與可觀測性後端放私有網段，
+Docker port 預設綁 `127.0.0.1`。正式環境變更走版本化設定，Provider 憑證變更需二人核可，
+金絲雀推送並保留回滾路徑。
+
+版本可驗證：`/health` 回得出正在跑的版本，不靠口頭保證。

@@ -37,9 +37,11 @@ if [ -n "$slug" ] && [ -z "$since" ]; then
   until_ts="$(awk -F'|' '/^\| *結束 *\|/ {gsub(/[ `]/,"",$3); print $3; exit}' "$loop_file")"
 fi
 
-[ -n "$since" ] || { echo "need --since or --slug with a filled 開始 row" >&2; exit 2; }
-case "$since" in *T*) ;; *) echo "開始/--since must be ISO 8601, got: $since" >&2; exit 2 ;; esac
-case "$until_ts" in ""|*[Yy]*) until_ts="$(date -u +%Y-%m-%dT%H:%M:%S%z)" ;; esac
+is_iso() { case "$1" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*) return 0 ;; *) return 1 ;; esac; }
+
+is_iso "$since" || { echo "開始/--since must be ISO 8601 (YYYY-MM-DDThh:mm+08:00), got: ${since:-<empty>}" >&2; exit 2; }
+# An unfinished task has a placeholder in 結束; measure up to now instead.
+is_iso "$until_ts" || until_ts="$(date -u +%Y-%m-%dT%H:%M:%S%z)"
 
 # Timestamps in the transcript are UTC with a trailing Z. Normalise both bounds
 # so a plain string comparison inside jq is correct.

@@ -1,8 +1,12 @@
 # Agent Pool Gateway
 
-Private, company-grade AI access gateway for issuing one virtual key per person,
-enforcing quotas and model policies, and routing requests through LiteLLM to
-approved provider API accounts.
+Private, company-grade AI access gateway. It issues one revocable key per
+person/device/client/agent, resolves that key to a human-readable identity,
+applies policy, schedules the request, and routes it to an approved provider API
+account. Provider credentials never leave the server.
+
+The gateway implements the provider adapters itself. LiteLLM is **not** a runtime
+dependency.
 
 ## Important boundary
 
@@ -33,15 +37,19 @@ capabilities can change and must be verified before declaring support.
 The repository contains the first compilable Rust data-plane slice:
 
 - `GET /healthz`
-- `POST /v1/chat/completions`
-- bearer-key authentication
-- model allowlist
-- forwarding to a LiteLLM upstream
-- request IDs and structured logs
+- `POST /v1/chat/completions` (non-streaming, forwards to a configured upstream)
+- bearer-key authentication with constant-time comparison
+- model allowlist from configuration
+- request IDs and structured JSON logs
 
-The bootstrap key is for local development only. The production key store,
-quota engine, admin API, audit ledger, SSO/RBAC, streaming and provider health
-routing are explicitly tracked on the project board.
+The bootstrap key is for local development only.
+
+The work from here is split into 18 independently reviewable segments. Read
+`docs/work-breakdown.md` for the boundaries and dependency order, and
+`loops/README.md` for what is in progress right now. The runbook sections below
+(migration, first admin, create identities, issue keys, configure providers)
+land with segments W02, W03 and W09; they are deliberately absent until the
+commands actually exist.
 
 ## Run locally
 
@@ -55,11 +63,25 @@ Never commit real provider credentials or client keys.
 
 ## Documentation
 
-- `docs/architecture.md` — components, data flow and deployment
+Start with `CLAUDE.md` — it holds the document index and says which file to read
+for which problem, so you do not have to load everything.
+
+- `docs/work-breakdown.md` — the 18 segments, dependency order, priorities
+- `docs/engineering-standards.md` — quality gates and rules, machine-checkable
+- `docs/task-ledger.md` — time and token cost per segment, plus trade-offs
+- `docs/architecture.md` — three planes, request path, failure model
 - `docs/security-and-compliance.md` — credential and subscription boundary
 - `docs/product-requirements.md` — roles, policies and acceptance criteria
 - `docs/client-compatibility.md` — integration contract by client
 - `docs/operations.md` — rollout and incident controls
+- `loops/` — one live status file per segment
+
+## Quality gates
+
+```bash
+./scripts/check.sh gate   # while iterating: fmt-check, clippy, loop-file discipline
+./scripts/check.sh all    # before a PR: everything CI runs
+```
 
 ## License
 

@@ -19,7 +19,8 @@ a distinct integration only after legal/security review.
 
 ## Controls
 
-- TLS everywhere; internal LiteLLM endpoint not publicly routable.
+- TLS everywhere; provider adapters run in-process, upstream provider endpoints
+  are reached only from the gateway process.
 - Virtual keys prefixed by environment and tenant, stored as keyed hashes.
 - Provider credentials in a managed secret store with rotation and access logs.
 - Least-privilege RBAC; SSO MFA for admins; break-glass accounts monitored.
