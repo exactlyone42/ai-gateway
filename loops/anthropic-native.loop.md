@@ -27,6 +27,18 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
       provider_request_id／provider_response_id。邏輯請求與上游嘗試分開。
 - [ ] estimated 與 provider-reported 用量都落帳。
 - [ ] 串流 contract test：Provider SSE fixture → 轉送出去的事件序列逐項比對。
+- [ ] **官方閘道契約**（`docs/feasibility.md` 第二節，每條都是硬要求）：
+      路徑比對用 path 不用整個 URL（實際打的是 `/v1/messages?beta=true`）；
+      `anthropic-beta`／`anthropic-version` 逐字轉送且**不做白名單**；
+      SSE `ping` 與註解行**必須轉送**（靜默 300 秒 Client 會中止串流）；
+      上游錯誤本體**原樣轉送**（Client 的自動降級靠比對錯誤字串）；
+      `system` 陣列與 `cache_control` 標記原樣轉送、attribution block 保持在第一個獨立區塊；
+      `HEAD /api/hello` 預熱探測可拒絕但不能 5xx 噴爆。
+- [ ] `GET /v1/models?limit=1000` 3 秒內回、**不重導向**，回 `data[]` 含 `id`
+      （`display_name`／`description` 可選）。
+- [ ] Principal 解析吃 Client 送來的 `x-claude-code-session-id`（session 關聯）與
+      `x-claude-code-agent-id`／`x-claude-code-parent-agent-id`（Agent 歸屬）。
+      **agent id 不得當成人的識別**（官方明文）。
 - [ ] **陰性對照 1**：把 mock provider 的回應改成「一次吐完」→ 增量轉送測試必須變紅
       （證明測試真的在驗增量，不是只驗最終內容）。
 - [ ] **陰性對照 2**：Client 中途斷線 → mock provider 端必須觀察到連線被關閉。
@@ -45,11 +57,19 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 - （待填）
 
 ## 證據
-- （待填：`/v1/messages` 官方 SSE 事件形狀、`count_tokens` 回傳欄位，附官方 URL ＋ 查證日期）
+- 「Claude Code reads the stream as it arrives, so if your gateway buffers complete responses
+  before relaying them, Claude Code stalls.」
+  → **這證明**現況的整包轉發（`src/gateway.rs:64`）會讓 Client 卡住，不是效能問題而是壞掉。
+- 「Claude Code counts every byte your gateway relays, including SSE `ping` events and comment
+  lines, and aborts a stream that goes silent for 300 seconds by default.」
+  → **這證明**轉送 ping 是功能需求。**證明不了**上游一定會送 ping（Bedrock 二進位事件流就不送）。
+- （待填：本機實測 Claude Code → 自架閘道往返一次）
 
 ## 來源
 - 規格 §5（端點）、§35–§42（ID／串流／時間／取消／重試／帳務）。
-- Anthropic Messages API 官方文件（URL 待 W01 覆核後填入）。
+- <https://code.claude.com/docs/en/llm-gateway-protocol>（閘道相容契約）2026-09-08。
+  **這一段的完成判準大半直接來自這份文件，不是自己推的。**
+- <https://platform.claude.com/docs/en/api/messages>（Messages API 格式）。
 
 ## Trade-off
 | 決策 | 選了什麼 | 放棄了什麼 | 為什麼 |

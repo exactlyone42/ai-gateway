@@ -37,15 +37,38 @@
 ## 已做
 - `2026-09-08` 起 `compat-research` 子 Agent 查證 9 組問題（各 Client 自訂端點、席次邊界、
   SSE 事件形狀、取消語意、`count_tokens` 是否存在）。要求輸出官方 URL ＋ 逐字引用 ＋ 邊界。
+- `2026-09-08` 主 session 自行覆核最關鍵的四條（不採信轉述）：Claude Code 自訂端點、
+  Codex 自訂 provider、席次邊界、Claude Desktop。結論與原文引用寫進 `docs/feasibility.md`。
+- `2026-09-08` 查到 Anthropic 有**整組官方閘道文件**，其中一份是給閘道實作者的相容契約。
+  這是本段落最大的收穫：不必逆推行為，照契約寫即可。
+- `2026-09-08` 查到第一方同類產品 Claude apps gateway（在 `claude` 執行檔內）。
+  能力與缺口對照寫進 `docs/feasibility.md` 第四節，屬於**要人決定的範圍問題**。
 
 ## 已確定不可行
-- （待填）
+- **Claude Desktop 用 `ANTHROPIC_BASE_URL`**：Desktop 走的是 Claude apps gateway 的
+  `/user/bootstrap` 設定端點 ＋ policy 的 `desktop` 鍵，不是環境變數。
+  要支援得實作那個協定（規格由跑起來的 gateway 在 `GET /protocol` 提供，且官方寫明
+  不保證無限期向後相容）。列 pending，不阻塞其它段落。
+- **把訂閱席次轉成 API credit**：官方規則就是分開計費，這條從一開始就不成立，不再花時間查。
 
 ## 證據
-- （待填：每條要有官方 URL ＋ 查證日期，或本機實測輸出）
+- `ANTHROPIC_BASE_URL`「Override the API endpoint to route requests through a proxy or gateway.」
+  → **這證明** Claude Code 官方支援指向自架閘道。**證明不了**本機真的跑通過（實測待 W05）。
+- `wire_api`「`responses` is the only supported value, and it is the default when omitted.」
+  → **這證明** Codex 只走 Responses API。**證明不了** Codex 實際會送哪些欄位——
+  Codex 沒有等同 Anthropic 那份的閘道相容契約，這是 W06 的已知風險。
+- 「While a gateway credential variable or `apiKeyHelper` is active, a developer's claude.ai
+  subscription isn't used... billed per token to whoever owns the credential.」
+  → **這證明**席次與 API 計費的邊界主張正確。**證明不了** OpenAI 側的等價聲明（待補）。
+- 本機版本：Claude Code `2.1.263`、codex-cli `0.153.0`（`claude --version` / `codex --version`）。
+  → **這證明**這兩個版本存在於本機。**證明不了**文件描述的行為在這兩個版本上已生效。
 
 ## 來源
-- （待填）
+- <https://code.claude.com/docs/en/llm-gateway-protocol>（閘道相容契約）2026-09-08
+- <https://code.claude.com/docs/en/llm-gateway>（席次邊界、不支援非 Claude 模型）2026-09-08
+- <https://code.claude.com/docs/en/env-vars>（環境變數逐條說明）2026-09-08
+- <https://code.claude.com/docs/en/claude-apps-gateway>（第一方閘道能力與限制表）2026-09-08
+- <https://learn.chatgpt.com/docs/config-file/config-reference>（Codex `model_providers`）2026-09-08
 
 ## Trade-off
 | 決策 | 選了什麼 | 放棄了什麼 | 為什麼 |
@@ -53,7 +76,9 @@
 | 子 Agent 查證 | 子 Agent 廣搜 → 主 session 覆核關鍵 URL | 主 session 自己全查 | 全查會把數十頁文件讀進主 context；但「其它 Agent 的報告」不算證據，關鍵條目要自己覆核 |
 
 ## 下一步
-1. 收子 Agent 結果，覆核最關鍵的兩條（Claude Code 自訂 base URL、Codex 自訂 provider）。
-2. 重寫 `docs/client-compatibility.md`。
-3. 席次邊界寫進 `docs/security-and-compliance.md`。
+1. 收子 Agent 對 VS Code／Cursor／Codex Desktop 的查證，補進 `docs/client-compatibility.md`。
+2. 補 OpenAI／ChatGPT 側的席次邊界官方原文（目前只有 Anthropic 側齊全）。
+3. 席次邊界結論寫進 `docs/security-and-compliance.md`。
 4. 實測一個 Client 對本機閘道往返（等 W05 有 `/v1/messages` 之後）。
+5. **請 cash 決定**：第一方 Claude apps gateway 已覆蓋 SSO／群組模型白名單／支出上限／OTLP，
+   本專案是否把範圍收斂到它沒有的四項（多 Provider、排程、可查詢帳本、Admin UI）。

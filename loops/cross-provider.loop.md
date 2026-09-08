@@ -25,6 +25,11 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
 - [ ] **陰性對照**：把 silent drop 的防護拿掉 → 必須有測試變紅（證明防護在生效，不只是寫了）。
 
 ## 已知
+- **這一段有官方政策風險，不只是技術問題**：Anthropic 明文
+  「doesn't support routing Claude Code to non-Claude models through any gateway」
+  （<https://code.claude.com/docs/en/llm-gateway>，2026-09-08）。
+  技術上做得到，但「Claude Code ＋ 非 Claude 模型」不在 Anthropic 支援範圍。
+  → 這段的產出必須標註此風險，不得當一般功能宣傳；要不要做由 cash 決定。
 - 規格 §72 明確給了順序：文字 → 串流 → 工具 → 結構化輸出 → 推理。
 - 規格 §18 列出不一定能一對一轉換的能力：reasoning／extended thinking／prompt cache／
   tool calling／structured outputs／computer use／image／provider hosted tools／MCP 語意。
