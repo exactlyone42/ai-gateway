@@ -17,21 +17,26 @@
 
 ## 文件索引（遇到什麼問題才讀，不要一開始全載）
 
-| 文件 | 什麼時候讀 |
-| --- | --- |
-| `docs/work-breakdown.md` | 要知道整體切成哪些段落、依賴順序、現在該做哪一段 |
-| `docs/engineering-standards.md` | 要動程式碼、寫測試、加指標、開 PR 之前 |
-| `docs/feasibility.md` | 有人問「這件事到底做不做得到」、或要新增一個 Client |
-| `docs/architecture.md` | 要知道三個 Plane 的邊界、請求路徑 |
-| `docs/client-compatibility.md` | 要接一個新的 Client，或有人說「我的工具連不上」 |
-| `docs/identity.md` | 要動身分／憑證／Principal 解析 |
-| `docs/request-policy.md` | 要動政策合併、workload 分類、配額 |
-| `docs/scheduler.md` | 要動排隊、優先權、保留容量、併發上限 |
-| `docs/provider-protocols.md` | 要接新的 Provider，或處理協定轉換落差 |
-| `docs/observability.md` | 要加 metric／trace／log，或查「為什麼看不到」 |
-| `docs/security-and-compliance.md` | 要動憑證存放、訂閱席次邊界、稽核 |
-| `docs/operations.md` | 要部署、上正式、處理事故 |
-| `docs/task-ledger.md` | 要看每段落花多少時間／token、當初的 trade-off |
+「產出段落」欄標 `—` 的是現在就有；標段落的還不存在，**不要引用它**。
+
+| 文件 | 什麼時候讀 | 產出段落 |
+| --- | --- | --- |
+| `docs/work-breakdown.md` | 要知道整體切成哪些段落、依賴順序、現在該做哪一段 | — |
+| `docs/engineering-standards.md` | 要動程式碼、寫測試、加指標、開 PR 之前 | — |
+| `docs/feasibility.md` | 有人問「這件事到底做不做得到」、或要新增一個 Client | — |
+| `docs/architecture.md` | 要知道三個 Plane 的邊界、請求路徑、故障模型 | — |
+| `docs/client-compatibility.md` | 要接一個 Client，或有人說「我的工具連不上」 | — |
+| `docs/security-and-compliance.md` | 要動憑證存放、訂閱席次邊界、稽核 | — |
+| `docs/product-requirements.md` | 要確認角色與驗收條件 | — |
+| `docs/operations.md` | 要部署、上正式、處理事故 | — |
+| `docs/task-ledger.md` | 要看每段落花多少時間／token、當初的 trade-off | — |
+| `docs/loadtest-journal.md` | 要引用效能數字，或要加一輪壓測 | W18 |
+| `docs/provider-protocols.md` | 要接新的 Provider，或處理協定轉換落差 | W05／W06 |
+| `docs/identity.md` | 要動身分／憑證／Principal 解析 | W03 |
+| `docs/request-policy.md` | 要動政策合併、workload 分類、配額 | W11／W12 |
+| `docs/scheduler.md` | 要動排隊、優先權、保留容量、併發上限 | W13 |
+| `docs/observability.md` | 要加 metric／trace／log，或查「為什麼看不到」 | W07 |
+| `docs/admin.md` | 要動後台頁面或 Admin API | W08／W09 |
 
 ## 本 repo 的硬約束
 
