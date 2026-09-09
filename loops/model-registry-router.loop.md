@@ -36,6 +36,8 @@
 - 規格 §20：實際模型名稱會變，所以註冊表必須動態可設定。
 - 規格 §34：第一版優先「明確的確定性路由」，之後才加自動路由。**第一版不做 ML Router。**
 
+- W07 移交（2026-09-09）：span 樹缺 `router.select` 與 `token.estimate` 兩個節點（規格 §58），以及 `gen_ai.request.model`／`gen_ai.system` 兩個日誌欄位。這一段有程式碼後補上，作法照 `src/services/chat.rs` 的 `#[tracing::instrument(name = ..., skip_all)]`。
+
 ## 已做
 - （待填）
 

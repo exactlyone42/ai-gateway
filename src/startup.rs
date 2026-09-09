@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::{config::Config, routes, state::AppState};
+use crate::{config::Config, logging, metrics, routes, state::AppState};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    init_tracing();
-
     let config = Config::from_env()?;
+    let traces = logging::init(config.otlp_endpoint.as_deref());
+    let meters = metrics::init(config.otlp_endpoint.as_deref());
     let address = config.listen_address;
     let state = Arc::new(AppState::new(config));
 
@@ -19,16 +19,82 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, routes::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Spans buffered by the batch exporter are lost unless the provider is
+    // shut down, so a clean exit is the difference between having the last
+    // requests in the trace backend and not.
+    // `shutdown()` blocks until the exporter drains or times out, so it runs
+    // off the async worker: a wedged backend would otherwise hold a worker
+    // thread for the whole timeout.
+    if let Some(traces) = traces {
+        report_flush(
+            "spans",
+            tokio::task::spawn_blocking(move || traces.shutdown()).await,
+        );
+    }
+    if let Some(meters) = meters {
+        report_flush(
+            "metrics",
+            tokio::task::spawn_blocking(move || meters.shutdown()).await,
+        );
+    }
     Ok(())
 }
 
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+/// Says what was lost, and never hides a failed flush.
+fn report_flush<E: std::fmt::Display>(
+    signal: &str,
+    outcome: Result<Result<(), E>, tokio::task::JoinError>,
+) {
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(
+            error.type = "otlp_shutdown_failed",
+            otel.signal = signal,
+            exception.message = %error,
+            "buffered telemetry may be lost"
+        ),
+        Err(error) => tracing::error!(
+            error.type = "otlp_shutdown_panicked",
+            otel.signal = signal,
+            exception.message = %error,
+            "buffered telemetry may be lost"
+        ),
+    }
 }
 
+/// Waits for whichever stop signal arrives first.
+///
+/// SIGTERM is the one that matters: containers and service managers send it,
+/// and without it the process is killed outright -- the trace flush above
+/// never runs. Ctrl-C stays for the terminal.
+///
+/// Boundary: this only starts the shutdown. Bounded draining of in-flight
+/// streams is W19 (`loops/process-lifecycle.loop.md`).
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    error.type = "signal_handler_unavailable",
+                    exception.message = %error,
+                    "SIGTERM is not handled; only Ctrl-C stops this process cleanly"
+                );
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

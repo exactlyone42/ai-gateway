@@ -9,6 +9,10 @@ pub struct Config {
     pub litellm_master_key: String,
     pub bootstrap_client_key: String,
     pub allowed_models: Vec<String>,
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
+    /// provider at all, so log records carry no `trace_id` either -- only the
+    /// request id. Correlating one request across services needs this set.
+    pub otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -37,12 +41,18 @@ impl Config {
             .map(ToOwned::to_owned)
             .collect();
 
+        let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
+
         Ok(Self {
             listen_address,
             litellm_base_url,
             litellm_master_key,
             bootstrap_client_key,
             allowed_models,
+            otlp_endpoint,
         })
     }
 }

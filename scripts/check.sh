@@ -6,6 +6,7 @@
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
+#   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
 set -euo pipefail
@@ -136,16 +137,13 @@ bans() {
   fi
 
   # 5. High-cardinality attributes must not become metric labels.
-  #    rustfmt wraps these calls, so the window spans the following lines too.
-  #    Boundary: a label name built at runtime is invisible here -- that stays a
-  #    review item, and docs/engineering-standards.md says so.
-  hits=$(printf '%s\n' "$prod" | awk '
-    /counter|histogram|gauge|\.record\(|\.add\(/ { window = 6 }
-    window > 0 {
-      if ($0 ~ /"(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"/) print
-      window--
-    }
-  ' || true)
+  #    Matched on the attribute constructor itself, not on proximity to a
+  #    metric call: the real code builds the attribute list first and records
+  #    afterwards (measured 2026-09-09 -- a window that only looked forward
+  #    from `.record(` never saw it).
+  hits=$(printf '%s\n' "$prod" | grep -E \
+    'KeyValue::new\("(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"' \
+    || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/high-cardinality metric label (trace and log only): /'
     failed=1
@@ -167,6 +165,54 @@ bans() {
     }' || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/camelCase in Rust code (stay snake_case; let serde rename the wire format): /'
+    failed=1
+  fi
+
+  # 7. Metric attributes come from an explicit allowlist, because the failure
+  #    mode of a wrong one is a metrics backend that falls over days later,
+  #    far from the commit that caused it. Rule 5 blocks the ids we already
+  #    know are unbounded; this one requires every attribute to be argued for.
+  local allow="scripts/metric-labels.txt"
+  hits=$(printf '%s\n' "$prod" | awk -v allow="$allow" '
+    BEGIN {
+      while ((getline line < allow) > 0) {
+        sub(/#.*/, "", line)
+        gsub(/[ \t\r]/, "", line)
+        if (line != "") permitted[line] = 1
+      }
+    }
+    {
+      rest = $0
+      # A key that is not a literal cannot be checked at all, so it is
+      # refused outright: a `const LABEL: &str = \"request_id\"` passed here
+      # used to satisfy every rule while doing the exact forbidden thing
+      # (measured 2026-09-09).
+      # rustfmt puts the arguments on the next line when the call is long, so
+      # the check has to carry over one line.
+      code = $0
+      sub(/^[^:]*:[0-9]+:/, "", code)
+      if (pending) {
+        pending = 0
+        head = code
+        sub(/^[[:space:]]+/, "", head)
+        if (substr(head, 1, 1) != "\"") { print "  (key is not a literal) " held }
+      }
+      probe = code
+      while (match(probe, /KeyValue::new\(/)) {
+        after = substr(probe, RSTART + RLENGTH)
+        sub(/[[:space:]]+$/, "", after)
+        if (after == "") { pending = 1; held = $0 }
+        else if (substr(after, 1, 1) != "\"") { print "  (key is not a literal) " $0 }
+        probe = after
+      }
+      while (match(rest, /KeyValue::new\("[^"]+"/)) {
+        key = substr(rest, RSTART + 15, RLENGTH - 16)
+        if (!(key in permitted)) { print; break }
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }' || true)
+  if [ -n "$hits" ]; then
+    echo "$hits" | sed "s|^|metric attribute is not on the allowlist ($allow): |"
     failed=1
   fi
 
@@ -230,7 +276,12 @@ case "${1:-gate}" in
   loops)     loops ;;
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
+  secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
-  all|pre-push) fmt_check; clippy_full; test_all; loops; bans; deadfiles; ./scripts/check-selftest.sh ;;
+  all|pre-push)
+    fmt_check; clippy_full; test_all; loops; bans; deadfiles
+    step "log secrets"; ./scripts/check-log-secrets.sh
+    ./scripts/check-selftest.sh
+    ;;
   *) sed -n '2,11p' "$0"; exit 2 ;;
 esac
