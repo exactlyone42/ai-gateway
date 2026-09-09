@@ -76,6 +76,10 @@
   **一個行為變了**：未帶金鑰又送壞 JSON，舊版先解析 body 回 400，新版中介層先攔回 401
   （實測對照舊版 binary 確認）。這個方向是對的——未認證的呼叫者不該拿到解析細節。
 
+- `2026-09-09` 定調日誌路線：不自己做 log 框架，繼續用 `tracing`，只換輸出格式；
+  格式由 serde 的 `rename_all` 轉成 SRE 契約要的鍵名，程式碼維持 snake_case。
+  「全 repo 不出現 camelCase」寫進工程規範並做成關卡（self-test 22 → 25 條）。
+
 ## 已確定不可行
 - **沿用 `Status` 當看板欄位名**：這個 repo 的欄位實際叫 `Workflow`（repo variable `FIELD_NAME=Workflow`），
   照 skill 預設值寫會找不到欄位。

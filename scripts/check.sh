@@ -151,6 +151,25 @@ bans() {
     failed=1
   fi
 
+  # 6. No camelCase anywhere in Rust code -- identifiers or JSON key literals.
+  #    A wire format that wants camelCase (the SRE log contract does) gets it
+  #    from `#[serde(rename_all = "camelCase")]`, so the rename lives in one
+  #    attribute instead of spreading foreign-looking names through the code.
+  #    That attribute is the single allowed occurrence of the word.
+  #    Match the code only, never the `path:line:` prefix: a temp directory
+  #    named `tmp.al4IJAZBMd` matched the pattern and turned every line red
+  #    (measured 2026-09-09, mktemp in the self-test).
+  hits=$(printf '%s\n' "$prod" | grep -v 'rename_all[[:space:]]*=' | awk '
+    {
+      code = $0
+      sub(/^[^:]*:[0-9]+:/, "", code)
+      if (code ~ /(^|[^A-Za-z0-9_])[a-z][a-z0-9_]*[A-Z]/) print
+    }' || true)
+  if [ -n "$hits" ]; then
+    echo "$hits" | sed 's/^/camelCase in Rust code (stay snake_case; let serde rename the wire format): /'
+    failed=1
+  fi
+
   [ "$failed" = 0 ] && echo "banned constructs ok"
   return "$failed"
 }

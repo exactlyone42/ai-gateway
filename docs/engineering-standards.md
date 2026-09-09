@@ -21,15 +21,15 @@
 | `fmt-check` | `cargo fmt --all --check` | 每次 |
 | `gate` | fmt-check ＋ clippy ＋ loop 檔紀律 ＋ Rust 禁用構件 | **迭代中只跑這個** |
 | `loops` | loop 檔八段落、主體 200 行、必須進索引 | 改 loop 檔後 |
-| `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label | 每次 |
+| `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label、camelCase | 每次 |
 | `deadfiles` | 沒有任何 `mod` 走得到的 `.rs`（＝cargo 根本沒編譯它） | 每次 |
-| `selftest` | **證明上面那些關卡真的抓得到東西**（22 條斷言，含正對照） | 改 `check.sh` 後 |
+| `selftest` | **證明上面那些關卡真的抓得到東西**（25 條斷言，含正對照） | 改 `check.sh` 後 |
 | `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `selftest` | **PR 前、合併前** |
 
 ### 關卡自己也要被驗
 
 `./scripts/check-selftest.sh` 對每一條 ban 規則跑兩種 fixture：**該紅的必須紅、該綠的必須綠**，
-並且宣告 `EXPECTED_ASSERTS=20`——**跑到的斷言數不等於宣告數就直接失敗**。
+並且宣告 `EXPECTED_ASSERTS=25`——**跑到的斷言數不等於宣告數就直接失敗**。
 理由：半途中斷卻印出「0 failed」是最典型的假綠。
 
 加規則時要同時加兩條斷言並更新數字。**改了 `bans` 沒改 self-test，self-test 會紅。**
@@ -64,6 +64,20 @@ crates/gateway-core/src/
 ```
 
 `crates/**` 底下**禁止** `mod.rs`。機器檢查：`./scripts/check.sh bans`。
+
+### 全 repo 不出現 camelCase
+
+Rust 程式碼一律 snake_case，型別 PascalCase。**wire 上需要 camelCase 的（SRE 日誌契約要求
+`requestId`／`statusCode`／`durationMs` 這種鍵名）由 `#[serde(rename_all = "camelCase")]` 產生**
+——改名集中在一個屬性，外來命名不散進程式碼，識別字與 wire 格式各自維持自己的慣例。
+那個屬性是全 repo 唯一允許出現這個字的地方。
+
+機器檢查：`./scripts/check.sh bans`（3 條 self-test：camelCase 識別字要紅、手寫 JSON 鍵要紅、
+`rename_all` 例外要綠）。
+
+**邊界**：規則比對的是程式碼本體，不含 `path:line:` 前綴。實測 2026-09-09：
+self-test 的 mktemp 目錄叫 `tmp.al4IJAZBMd`，前綴進了比對範圍，結果每一行都變紅。
+同一類坑對「後端名稱」那條規則仍然存在（repo 放在名字含 `grafana` 的目錄下會誤判），尚未處理。
 
 ### 分層：中介層 → 路由層 → 服務層
 

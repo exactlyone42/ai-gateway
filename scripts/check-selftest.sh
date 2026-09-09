@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=22
+EXPECTED_ASSERTS=25
 
 ran=0
 failed=0
@@ -185,6 +185,34 @@ fn f(m: Meter) {
 }
 RS
 expect_green "low-cardinality metric label is allowed"
+
+# ---- rule 6: no camelCase ---------------------------------------------------
+reset
+fixture a.rs <<'RS'
+fn f() { let requestId = 1; }
+RS
+expect_red "camelCase identifier" "camelCase in Rust code"
+
+# A JSON key written by hand is the same violation -- that is how the wire
+# format leaks back into the code.
+reset
+fixture a.rs <<'RS'
+const KEY: &str = "statusCode";
+RS
+expect_red "camelCase JSON key literal" "camelCase in Rust code"
+
+# The sanctioned way to reach a camelCase wire format: snake_case fields,
+# PascalCase types, one serde attribute.
+reset
+fixture a.rs <<'RS'
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogLine {
+    pub request_id: String,
+    pub status_code: u16,
+}
+RS
+expect_green "serde rename_all is the allowed exception"
 
 # ---- rule 1: module layout --------------------------------------------------
 reset
