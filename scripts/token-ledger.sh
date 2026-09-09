@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Sum Claude Code token usage for one task window.
 #
+# SOURCE DEPENDENCY: this reads Claude Code's own transcript files, which are an
+# undocumented internal format. It is scaffolding, not the destination -- see
+# "可攜性" in docs/task-ledger.md. Once the gateway serves our own traffic (W05),
+# the ledger reads the gateway's usage tables instead and this file goes away.
+#
 # The loop file declares the window (start/end); this script measures what it
 # cost. Usage rows are deduped by requestId because the transcript writes the
 # same assistant message several times while streaming.
@@ -83,6 +88,20 @@ report="$(jq -s --arg since "$since_utc" --arg until "$until_utc" '
 ' "${files[@]}")"
 
 billed=$(jq -r '.total | (.input + .cache_write + .cache_read + .output)' <<<"$report")
+
+# Positive control. "No usage in this window" and "the reader stopped working"
+# print the same zeros, so a zero is reported as a failure, never as a result.
+# Exit 3 means "not measured", which is not the same as "measured zero".
+if [ "$(jq -r '.total.calls' <<<"$report")" = 0 ]; then
+  cat >&2 <<MSG
+no usage records in this window -- refusing to report 0 as a measurement.
+  window:  $since_utc .. $until_utc
+  scanned: ${#files[@]} transcript file(s) under $PROJECT_GLOB
+Check the window first. If the window is right, the transcript format changed
+and this reader needs fixing; see 可攜性 in docs/task-ledger.md.
+MSG
+  exit 3
+fi
 
 if [ "$as_md" = 1 ]; then
   jq -r --arg slug "${slug:-ad-hoc}" --arg since "$since" --arg until "$until_ts" --argjson billed "$billed" '
