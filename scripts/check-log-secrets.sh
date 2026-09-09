@@ -41,7 +41,13 @@ pid=$!
 # shellcheck disable=SC2064
 trap "kill $pid 2>/dev/null || true; rm -f '$log'" EXIT
 
-if ! timeout 15 tail -f -n +1 "$log" | grep -q -m1 "gateway started"; then
+# Wait for the startup line, then assert on the file rather than on the
+# pipeline's status. `grep -m1` exits as soon as it matches, which can kill
+# `tail` with SIGPIPE, and under `pipefail` that makes a successful wait look
+# like a failure -- it did exactly that in CI while the startup line was
+# sitting in the very output the error printed (measured 2026-09-09).
+timeout 15 tail -f -n +1 "$log" | grep -q -m1 "gateway started" || true
+if ! grep -q "gateway started" "$log"; then
   echo "the gateway did not start; output was:" >&2
   cat "$log" >&2
   exit 1
