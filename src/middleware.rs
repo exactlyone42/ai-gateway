@@ -6,9 +6,12 @@ use axum::{
     response::Response,
 };
 
+use tracing::Instrument as _;
+
 use crate::{
     auth,
     error::{ErrorType, GatewayError},
+    logging,
     state::AppState,
 };
 
@@ -35,6 +38,13 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// the router, a body the extractor rejected) falls back to the status code,
 /// which is what the HTTP semantic conventions prescribe.
 pub async fn access_log(request: Request, next: Next) -> Response {
+    // The span is what gives the request its trace id; everything below runs
+    // inside it, so the handlers' own spans become its children.
+    let span = tracing::info_span!("gateway.request");
+    record(request, next).instrument(span).await
+}
+
+async fn record(request: Request, next: Next) -> Response {
     let started = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
@@ -68,6 +78,8 @@ pub async fn access_log(request: Request, next: Next) -> Response {
             }
         });
 
+    let (trace_id, span_id) = logging::current_trace_ids();
+
     // The level has to be known at compile time (`tracing`'s callsite is a
     // `static`), so the field list is shared through a local macro instead of
     // being written three times.
@@ -76,6 +88,8 @@ pub async fn access_log(request: Request, next: Next) -> Response {
             tracing::$level!(
                 event.name = "http.access",
                 request_id = %request_id,
+                trace_id = %trace_id,
+                span_id = %span_id,
                 http.request.method = %method,
                 http.route = %route,
                 url.path = %path,

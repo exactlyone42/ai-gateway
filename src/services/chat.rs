@@ -16,7 +16,12 @@ pub struct UpstreamReply {
 /// Applies model policy, then forwards the completion request upstream.
 pub async fn complete(state: &AppState, body: &Value) -> Result<UpstreamReply, GatewayError> {
     ensure_model_allowed(state, body)?;
+    forward(state, body).await
+}
 
+/// `skip_all` keeps the request body -- prompts included -- out of the span.
+#[tracing::instrument(name = "provider.attempt", skip_all)]
+async fn forward(state: &AppState, body: &Value) -> Result<UpstreamReply, GatewayError> {
     let response = state
         .client
         .post(format!(
@@ -37,6 +42,7 @@ pub async fn complete(state: &AppState, body: &Value) -> Result<UpstreamReply, G
     })
 }
 
+#[tracing::instrument(name = "policy.evaluate", skip_all)]
 fn ensure_model_allowed(state: &AppState, body: &Value) -> Result<(), GatewayError> {
     let model = body
         .get("model")

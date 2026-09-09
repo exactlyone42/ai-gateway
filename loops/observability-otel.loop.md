@@ -1,7 +1,7 @@
 # LOOP: observability-otel
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開｜分支 `feature/observability-otel`（未推）｜段落 `W07`
+> 卡 [#22](https://github.com/DnaBoss/agent-pool-gateway/issues/22)｜PR [#23](https://github.com/DnaBoss/agent-pool-gateway/pull/23) draft｜分支 `feature/observability-otel`｜段落 `W07`
 > 查重（2026-09-09）：`gh issue list` 15 張開放卡無此段落（#19 對到 W02＋W18，見
 > `docs/work-breakdown.md:272`）、`git ls-remote` 無同名遠端分支 → 這段沒有人在做，開新卡。
 
@@ -20,8 +20,9 @@
 ## 完成判準
 - [ ] 只依賴 OTLP。程式碼不出現 Grafana／Prometheus／Tempo／SigNoz／Datadog 的專屬 API
       （驗收：`grep -ri` 這些名字只出現在 `deploy/` 與文件）。
-- [ ] span 樹照規格 §58：`gateway.request` → `auth.resolve`／`policy.evaluate`／`token.estimate`／
-      `scheduler.queue`／`router.select`／`provider.attempt`（→ connect／request／first_token／complete）。
+- [~] span 樹照規格 §58：**四個節點已建**（`gateway.request` → `auth.resolve`／`policy.evaluate`／
+      `provider.attempt`）。`token.estimate`／`scheduler.queue`／`router.select` 的程式碼還不存在，
+      **不先造空 span**（永遠是空的節點會讓人以為那一步被量過）。等 W10／W12／W13 一起補。
 - [ ] 規格 §57 的 13 個 metric 全部輸出，命名與 OTel semantic 一致。
 - [ ] **cardinality 規則**：`request_id`／`trace_id`／`session_id` 這類高基數只進 trace／log，
       **不得**當 metric label。驗收：一份明文的 label 白名單 ＋ 一個檢查腳本。
@@ -32,9 +33,12 @@
 - [x] 每個錯誤都被記錄：4xx → severity 13、5xx → severity 17，走同一個出口（存取記錄層）。
 - [ ] **禁止記錄**：Provider secret、閘道金鑰、密碼、access token、完整 request／response body、
       PII。驗收：一個掃 log 輸出的檢查（見陰性對照）。
-- [ ] OTel 後端不可用時，資料面不受影響（規格 §63）。
+- [x] OTel 後端不可用時，資料面不受影響（規格 §63）。三種情境實測，見「證據」。
+- [x] 日誌每一行都是合法 JSON，連 panic 也是（一行非 JSON 就會讓消費端對整個來源退回文字解析）。
 - [ ] **陰性對照 1**：故意在日誌欄位塞一個假 token 字串 → 遮蔽檢查必須變紅。
-- [ ] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
+- [~] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
+      已用「端點接得上但永不回應」代替（比 stop 更嚴格，stop 是連線被拒的 fast fail）；
+      **真正的串流還不存在**（現況是整包轉發），要等 W05 才驗得到「進行中的串流不中斷」。
 
 ## 已知
 - 日誌格式已自己實作（`src/logging.rs`），等級仍由 `RUST_LOG` 決定。沒有 OTel exporter、
@@ -43,6 +47,11 @@
   （`tracing-subscriber-0.3.23/src/fmt/format/json.rs:250`），沒有選項可改成數字。
 - 現況 `Cargo.toml` 沒有 `opentelemetry` 相關依賴。
 - 規格 §2.3：閘道對可觀測性後端只依賴 OTLP，開發環境可先給 SigNoz compose 因為部署簡單。
+
+- reviewer（`claude -p --model opus`）第一輪的三點：① 計畫只推進一小塊 ② 不加 exporter 更小
+  ③ trace_id 靜默變空抓不到。**裁定**：③ 採納（加了端到端斷言）；① 部分採納（實查後有三個節點
+  現在就有程式碼，不是單節點）；② 駁回——判準明寫「只依賴 OTLP、span 照 §58」，自己產 id 等於
+  自造協定，但採納它的附帶條件「exporter 必須可缺席」。
 
 ### 本輪規範（每個 tick 照這份跑）
 - **reviewer**：預設 `claude -p --model opus`；意見僅參考，決策在執行者。
@@ -64,7 +73,19 @@
 - `2026-09-09` 寫 `docs/observability.md`（欄位表 ＋ 三個設計決定 ＋ 消費端過濾條件 ＋ 檔案地圖），
   `docs/engineering-standards.md` §2 的欄位清單改成 semconv 命名。
 
+- `2026-09-09` 開卡 #22（PAR）、推 `feature/observability-otel`、開 draft PR #23。
+- `2026-09-09` OTLP 追蹤接上：exporter 由 `OTEL_EXPORTER_OTLP_ENDPOINT` 決定，沒設就完全不裝；
+  span 樹四個節點（`gateway.request` → `auth.resolve`／`policy.evaluate`／`provider.attempt`），
+  全部 `skip_all` 免得金鑰與 prompt 進 span；收工 flush，flush 失敗記一筆 error。
+- `2026-09-09` 存取記錄多帶 `trace_id`／`span_id`（W3C 格式），沒有 span context 時不輸出、不填零。
+- `2026-09-09` 修掉一個實測抓到的 panic：async HTTP client 跑在 SDK 自己的執行緒上會炸，
+  改 blocking client；另外裝 panic hook 把 panic 寫成一行 JSON，避免汙染日誌串流。
+- `2026-09-09` 依賴函式庫的事件沒有 message 時，`body` 改用它的 `name` 欄位（原本會是 `null`）。
+
 ## 已確定不可行
+- **OTLP 用 async HTTP client（`reqwest-client`）**：SDK 的批次處理器跑在自己的 std 執行緒上，
+  沒有 Tokio reactor → 該執行緒 **panic**（`there is no reactor running`），之後 span 全丟，
+  而且 panic 訊息是三行純文字直接汙染日誌串流（2026-09-09 實測）。要用 `reqwest-blocking-client`。
 - **`tracing-bunyan-formatter`**（2026-09-09 實接實測）：level 出數字、欄位扁平這兩點對，
   但鍵名照呼叫點原樣輸出（要對上 pino 契約就得把 camelCase 寫進程式碼）、`msg` 被硬加
   `[REQUEST - EVENT]` 前綴（寫死在 formatter，`skip_fields` 改不到）、span 生命週期讓每個請求變 3 行、
@@ -90,6 +111,17 @@
   只有 `severity_is_a_number_not_a_string` 紅（left 50／right 17）；關掉點號巢狀化 →
   只有 `semantic_convention_names_become_nested_objects` 紅。兩次都是對的那一條紅，其餘綠。
 
+- **陰性對照（追蹤）**：把 `gateway.request` span 拿掉 → 只有
+  `routes::tests::every_request_is_logged_with_a_trace_id` 紅，訊息印出那一行少了 `trace_id`。
+  這正是 reviewer 指的靜默失敗：欄位空掉會被 formatter 丟棄，日誌看起來完全正常。
+- **陰性對照（後端不可用，三種）**：① 沒設端點 → `/healthz` 200、存取記錄無 `trace_id`；
+  ② 端點沒人聽 → 200，且 `BatchSpanProcessor.ExportError` 有被記錄（severity 17）；
+  ③ 端點接得上但永不回應 → 卡住期間 `/healthz` 仍 200、`/v1/chat/completions` 仍 403，
+  收工 flush 逾時並記一筆 error，**七行輸出全部是合法 JSON**。
+  → **這證明**匯出通道壞掉不影響資料面；**證明不了**「進行中的串流不中斷」（串流還不存在，W05 才有）。
+- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／7 條測試 0 skipped／
+  loop 檔／禁用構件／死檔／關卡自測 25 條）。
+
 ## 來源
 - 規格 §2.3、§38（時間）、§57（metrics）、§58（trace）、§59（log）、§60（隱私）、§63（隔離）。
 
@@ -103,15 +135,17 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
-1. **開卡（PAR）＋ 推分支 ＋ 開 draft PR**（base `dev`，標題掛卡號）。理由見標頭查重那段：
-   分支只留在本機，別的 session 會當成沒人做而重做一次。
-2. **OTLP exporter ＋ span 樹骨架**：`opentelemetry`／`opentelemetry-otlp`／`tracing-opentelemetry`
-   進 `Cargo.toml`，span 照規格 §58。完成後 `trace_id`／`span_id` 要出現在日誌
-   （`src/logging.rs` 的 formatter 目前只讀 event 欄位，要一起改成從 span context 取）。
-3. **13 個 metric ＋ label 白名單 ＋ cardinality 檢查腳本**：白名單寫成明文檔，腳本進
+1. **13 個 metric ＋ label 白名單 ＋ cardinality 檢查腳本**：白名單寫成明文檔，腳本進
    `./scripts/check.sh`，並補 self-test 兩條斷言（現有 25 條要跟著加）。
-4. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
-5. **陰性對照 2**：`docker stop` OTel collector，進行中的串流不得中斷。
-6. **部署後才能做的**：把日誌送進 CloudWatch log group，用
+   **先要解一個依賴**：規格 §57 的 13 個 metric 清單不在這個 repo 裡（loop 只引編號）。
+   照 cashloop「需人拍板但不涉重大風險 → 有最佳實踐就照做」，我會先用 OTel HTTP semconv
+   的 `http.server.request.duration`（histogram）＋ 請求數／錯誤數／併發數起一份最小集合，
+   把清單寫進 `docs/observability.md` 並標明「待與規格 §57 對帳」。
+2. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
+3. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
+   要一起做陰性對照：假的 traceparent 不能讓請求失敗。
+4. **部署後才能做的**：把日誌送進 CloudWatch log group，用
    `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
    ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。
+5. **等別的段落**：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
+   串流不中斷的陰性對照（W05）、`principal`（W03）、`gen_ai.*`（W10）。

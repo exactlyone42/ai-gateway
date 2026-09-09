@@ -4,6 +4,10 @@ use sha2::{Digest, Sha256};
 use crate::{error::GatewayError, state::AppState};
 
 /// Accepts a caller only on an exact match with the bootstrap client key.
+///
+/// `skip_all` is not a style choice: the arguments carry the caller's token,
+/// and a span field is written out like any other log field.
+#[tracing::instrument(name = "auth.resolve", skip_all)]
 pub fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {
     let token = headers
         .get(header::AUTHORIZATION)

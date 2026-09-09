@@ -14,11 +14,15 @@
 
 use std::fmt;
 
+use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use serde_json::{Map, Value};
 use tracing::{
     Event, Level, Subscriber,
     field::{Field, Visit},
 };
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{
     EnvFilter,
     fmt::{
@@ -26,15 +30,108 @@ use tracing_subscriber::{
         format::Writer,
         time::{FormatTime, SystemTime},
     },
+    layer::SubscriberExt,
     registry::LookupSpan,
+    util::SubscriberInitExt,
 };
 
-/// Installs the subscriber. Which levels pass still comes from `RUST_LOG`.
-pub fn init() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .event_format(OtelJson)
+const SERVICE_NAME: &str = "agent-pool-gateway";
+
+/// Installs the subscriber, plus the OTLP span exporter when an endpoint is
+/// configured. Which levels pass still comes from `RUST_LOG`.
+///
+/// Returns the provider so shutdown can flush it. Without an endpoint there
+/// is no provider and no exporter: spans still exist and still carry ids for
+/// the log records, they are just not sent anywhere.
+pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
+    // The exporter is built before the subscriber exists, so a failure here
+    // cannot be logged yet -- it is carried out and logged below.
+    let (provider, failure) = match otlp_endpoint {
+        None => (None, None),
+        Some(endpoint) => match provider_for(endpoint) {
+            Ok(provider) => (Some(provider), None),
+            Err(error) => (None, Some(error.to_string())),
+        },
+    };
+
+    let traces = provider
+        .as_ref()
+        .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer().event_format(OtelJson))
+        .with(traces)
         .init();
+
+    install_panic_logging();
+
+    if let Some(reason) = failure {
+        tracing::error!(
+            error.type = "otlp_exporter_unavailable",
+            exception.message = %reason,
+            "traces are not exported; the gateway keeps serving"
+        );
+    }
+    provider
+}
+
+/// Turns a panic into one JSON log line.
+///
+/// Measured 2026-09-09: the OTLP batch thread panicked and wrote a bare
+/// multi-line message to stderr, which is not JSON -- a single such line makes
+/// a log consumer fall back to text parsing for the whole source. A panic in a
+/// dependency is not hypothetical, so the stream has to survive one.
+fn install_panic_logging() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_default();
+        tracing::error!(
+            error.type = "panic",
+            exception.message = %info.payload_as_str().unwrap_or("<non-string payload>"),
+            code.filepath = %location,
+            "a thread panicked"
+        );
+    }));
+}
+
+/// A programmatic endpoint is used verbatim by the exporter, so the signal
+/// path has to be appended here (`opentelemetry-otlp-0.32.0`,
+/// `src/exporter/http/mod.rs:726`).
+fn provider_for(
+    endpoint: &str,
+) -> Result<SdkTracerProvider, opentelemetry_otlp::ExporterBuildError> {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(format!("{endpoint}/v1/traces"))
+        .build()?;
+
+    Ok(SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(Resource::builder().with_service_name(SERVICE_NAME).build())
+        .build())
+}
+
+/// Ids of the span the caller is inside, or empty strings when there is no
+/// OpenTelemetry context.
+///
+/// Empty, not a placeholder: the formatter drops empty fields, so "this
+/// request has no trace" stays visibly absent instead of looking like an id
+/// that happens to be zero.
+pub fn current_trace_ids() -> (String, String) {
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    if span_context.is_valid() {
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    }
 }
 
 /// Formats an event as an OpenTelemetry-shaped log record.
@@ -67,6 +164,14 @@ where
         event.record(&mut Collector {
             record: &mut record,
         });
+        // Events from dependencies carry no message, only fields -- the OTel
+        // SDK names its own events with a `name` field. Without this, an
+        // export failure arrives with `body: null` (measured 2026-09-09).
+        if !record.contains_key("body")
+            && let Some(name) = record.get("name").cloned()
+        {
+            record.insert("body".to_owned(), name);
+        }
 
         let line = serde_json::to_string(&record).map_err(|_| fmt::Error)?;
         writeln!(writer, "{line}")
@@ -166,8 +271,10 @@ fn insert_nested(record: &mut Map<String, Value>, name: &str, value: Value) {
     }
 }
 
+/// Log capture for tests, shared with the router's integration test: a log
+/// line is only proven to carry a field if a test reads the emitted bytes.
 #[cfg(test)]
-mod tests {
+pub(crate) mod capture {
     use std::{
         io,
         sync::{Arc, Mutex},
@@ -176,10 +283,22 @@ mod tests {
     use serde_json::Value;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use super::OtelJson;
-
     #[derive(Clone, Default)]
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    pub(crate) struct Buffer(pub(crate) Arc<Mutex<Vec<u8>>>);
+
+    impl Buffer {
+        /// Every line emitted so far, parsed. Panics on malformed output,
+        /// which is itself the thing under test.
+        pub(crate) fn lines(&self) -> Vec<Value> {
+            let bytes = self.0.lock().unwrap().clone();
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
 
     impl io::Write for Buffer {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
@@ -199,6 +318,37 @@ mod tests {
             self.clone()
         }
     }
+}
+
+/// The same subscriber the binary installs, writing into a buffer: traces
+/// layer included, so a test can prove a log line really carries a trace id.
+/// The provider comes back with it because the tracer only records while the
+/// provider is alive.
+#[cfg(test)]
+pub(crate) fn test_subscriber(
+    buffer: capture::Buffer,
+) -> (impl tracing::Subscriber + Send + Sync, SdkTracerProvider) {
+    use opentelemetry::trace::TracerProvider as _;
+
+    let provider = SdkTracerProvider::builder().build();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(OtelJson)
+                .with_writer(buffer),
+        )
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
+    (subscriber, provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use serde_json::Value;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    use super::{OtelJson, SERVICE_NAME, capture::Buffer, current_trace_ids};
 
     /// Emits through the real subscriber and parses what came out, so a test
     /// fails when the wire format changes -- not when a helper changes.
@@ -209,8 +359,9 @@ mod tests {
             .with_writer(buffer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, emit);
-        let bytes = buffer.0.lock().unwrap().clone();
-        serde_json::from_slice(&bytes).unwrap()
+        let mut lines = buffer.lines();
+        assert_eq!(lines.len(), 1, "expected exactly one line: {lines:?}");
+        lines.remove(0)
     }
 
     #[test]
@@ -258,5 +409,38 @@ mod tests {
         assert_eq!(line["error"]["type"], Value::from("upstream_unavailable"));
         // Display-valued fields must not arrive quoted.
         assert_eq!(line["request_id"], Value::from("abc-123"));
+    }
+
+    #[test]
+    fn a_span_has_trace_ids_when_traces_are_installed() {
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("gateway.request");
+            let _entered = span.enter();
+            let (trace_id, span_id) = current_trace_ids();
+
+            assert_eq!(trace_id.len(), 32, "trace id was {trace_id:?}");
+            assert_eq!(span_id.len(), 16, "span id was {span_id:?}");
+            assert!(trace_id.chars().all(|digit| digit.is_ascii_hexdigit()));
+            assert_ne!(trace_id, "0".repeat(32), "an all-zero id means invalid");
+        });
+    }
+
+    /// Without the layer there is no trace to point at, and the answer must be
+    /// empty rather than a zero id that looks like a real one.
+    #[test]
+    fn a_span_has_no_trace_ids_without_the_layer() {
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().event_format(OtelJson));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("gateway.request");
+            let _entered = span.enter();
+
+            assert_eq!(current_trace_ids(), (String::new(), String::new()));
+        });
     }
 }
