@@ -65,6 +65,21 @@ crates/gateway-core/src/
 
 `crates/**` 底下**禁止** `mod.rs`。機器檢查：`./scripts/check.sh bans`。
 
+### 分層：中介層 → 路由層 → 服務層
+
+| 層 | 檔案 | 只准做什麼 |
+| --- | --- | --- |
+| 中介層 | `src/middleware.rs` | 跨端點的門檻（金鑰、之後的配額／限流）。過不了就在這裡回掉。 |
+| 路由層 | `src/routes.rs` ＋ `src/routes/<端點>.rs` | 路由表；一個端點一支檔，只做「取參數 → 呼叫服務 → 組 HTTP 回應」。 |
+| 服務層 | `src/services/<領域>.rs` | 業務邏輯（政策判斷、上游呼叫、轉換）。不碰 `Router`、不碰狀態碼。 |
+| 狀態／設定 | `src/state.rs`、`src/config.rs` | 共用狀態與設定值集中，不在各層各自讀環境變數。 |
+
+**路由層出現上游呼叫、政策判斷、或 SQL 就是違規。**
+
+**驗收動作**（沒有機器檢查，review 時逐項看）：
+`src/routes/` 底下的檔案不得出現 `state.client`、`reqwest`、`sqlx`、`config.allowed_*`；
+`src/services/` 底下不得出現 `Router`、`StatusCode::`（除了服務自己的回傳型別欄位）、`IntoResponse`。
+
 ### 錯誤處理分層
 
 | 層 | 用什麼 |

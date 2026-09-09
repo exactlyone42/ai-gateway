@@ -30,11 +30,12 @@
       加上一條**正對照**：同樣的構件放進 `#[cfg(test)]` 模組**不會**誤報。
 
 ## 已知
-- repo 非空。既有 9 支 Rust 檔共 279 行：`src/main.rs`（只有一行啟動）、
-  `src/startup.rs`（設定載入 ＋ JSON 日誌 ＋ 服務生命週期）、`src/routes.rs`（路由表 ＋ request-id 層）、
-  一個端點一支檔（`src/routes/health.rs`、`src/routes/chat_completions.rs` 整包轉發 LiteLLM）、
-  `src/state.rs`、`src/auth.rs`、`src/config.rs`、`src/error.rs`。
-- 既有實作與新規格的**四個落差**：非串流（`src/routes/chat_completions.rs:46` 先 `response.bytes().await` 收完才回）、
+- repo 非空。既有 12 支 Rust 檔共 336 行，分層是「中介層 → 路由層 → 服務層」：
+  `src/main.rs`（一行啟動）、`src/startup.rs`（設定 ＋ 日誌 ＋ 生命週期）、
+  `src/routes.rs`（路由表）＋ 一個端點一支檔、`src/middleware.rs`（金鑰閘門）、
+  `src/services/chat.rs`（模型政策 ＋ 轉發 LiteLLM）、`src/state.rs`、`src/auth.rs`、
+  `src/config.rs`、`src/error.rs`。
+- 既有實作與新規格的**四個落差**：非串流（`src/services/chat.rs:36` 先 `response.bytes().await` 收完才回）、
   上游是 LiteLLM、沒有資料庫、沒有身分模型。
 - 既有 CI 三關：`cargo fmt --check`、`cargo clippy --all-targets --all-features -D warnings`、
   `cargo test --all`（`.github/workflows/ci.yml:20`）。
@@ -69,6 +70,11 @@
 - `2026-09-09` 一個端點一支檔：`src/routes.rs` 只留路由表，`/healthz` 與 `/v1/chat/completions`
   各自一支檔；共用狀態進 `src/state.rs`、金鑰驗證進 `src/auth.rs`（`src/gateway.rs` 解散）。
   行為不變（同一組實測全綠），同步修掉十處指到舊路徑的文件引用。
+- `2026-09-09` 補上分層：金鑰檢查變成中介層（只掛在需要驗證的端點上）、模型政策與上游轉發
+  移到服務層 `src/services/chat.rs`，路由層只剩「呼叫服務 → 組 HTTP 回應」。規則寫進
+  `docs/engineering-standards.md`（附 review 驗收動作）。
+  **一個行為變了**：未帶金鑰又送壞 JSON，舊版先解析 body 回 400，新版中介層先攔回 401
+  （實測對照舊版 binary 確認）。這個方向是對的——未認證的呼叫者不該拿到解析細節。
 
 ## 已確定不可行
 - **沿用 `Status` 當看板欄位名**：這個 repo 的欄位實際叫 `Workflow`（repo variable `FIELD_NAME=Workflow`），
