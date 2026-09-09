@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use axum::{
     extract::{MatchedPath, Request, State},
@@ -11,7 +11,7 @@ use tracing::Instrument as _;
 use crate::{
     auth,
     error::{ErrorType, GatewayError},
-    logging, metrics,
+    logging,
     state::AppState,
 };
 
@@ -37,16 +37,18 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// response extension; a status with no gateway error of its own (a 404 from
 /// the router, a body the extractor rejected) falls back to the status code,
 /// which is what the HTTP semantic conventions prescribe.
-pub async fn access_log(request: Request, next: Next) -> Response {
+pub async fn access_log(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
     // The span is what gives the request its trace id; everything below runs
     // inside it, so the handlers' own spans become its children.
     let span = tracing::info_span!("gateway.request");
-    record(request, next).instrument(span).await
+    record(state, request, next).instrument(span).await
 }
 
-async fn record(request: Request, next: Next) -> Response {
-    let started = Instant::now();
-    let _in_flight = metrics::InFlight::new();
+async fn record(state: Arc<AppState>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let request_id = request
@@ -63,10 +65,13 @@ async fn record(request: Request, next: Next) -> Response {
         .map(|matched| matched.as_str().to_owned())
         .unwrap_or_default();
 
+    // Measurement starts here and ends when the scope is dropped, so a
+    // cancelled request is still counted -- see `metrics::RequestScope`.
+    let mut scope = state.instruments.scope(method.as_str(), &route);
+
     let response = next.run(request).await;
 
     let status = response.status();
-    let duration = started.elapsed().as_secs_f64();
     let failure = response.extensions().get::<ErrorType>().cloned();
     let error_type = failure
         .as_ref()
@@ -82,13 +87,8 @@ async fn record(request: Request, next: Next) -> Response {
         .and_then(|failure| failure.cause)
         .unwrap_or_default();
 
-    metrics::record(
-        method.as_str(),
-        &route,
-        status.as_u16(),
-        &error_type,
-        duration,
-    );
+    // One number for both the histogram and the log line.
+    let duration = scope.complete(status.as_u16(), &error_type);
 
     let (trace_id, span_id) = logging::current_trace_ids();
 

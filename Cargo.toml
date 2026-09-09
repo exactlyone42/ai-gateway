@@ -22,4 +22,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }
 tower = { version = "0.5.3", features = ["util"] }

@@ -103,17 +103,27 @@ OTLP 送不出去時 SDK 會記 `BatchSpanProcessor.ExportError`（severity 17�
 **規格 §57 說有 13 個指標，但那份清單不在這個 repo**（只有「13 個」這個數字），
 所以先出這兩個 semconv 有定義、現有端點真的產得出來的，其餘等規格到手再對帳。
 
-在處理中的計數用 **guard（`Drop`）** 實作，不是「開始 +1／結束 -1」兩行：Client 中途斷線時
-handler 的 future 會被丟棄，寫在 `await` 之後的減一永遠不會執行——那個計數會一路往上爬，
-看起來像閘道卡住。
+**桶界是秒，不是 SDK 預設的那組。** SDK 預設是 `[0, 5, 10, 25, …]`
+（`opentelemetry_sdk-0.32.1/src/metrics/pipeline.rs:513`），那是毫秒形狀的階梯——用在秒上，
+五秒內的請求全部落進第一桶，p50／p95／p99 會讀到同一個數字，等於白留這個 histogram。
+
+**一個請求的量測用 guard（`RequestScope`）包住**，不是「開始 +1、結束 -1」兩行：Client 中途斷線時
+handler 的 future 會被丟棄，寫在 `await` 之後的那幾行（減一、histogram 取樣、存取紀錄）全都不會執行。
+那樣會有兩個後果——在處理中的計數一路往上爬（看起來像閘道卡住），而那次請求完全沒留下痕跡。
+被取消的請求記成 `error.type=cancelled`、沒有狀態碼（因為沒有回應），並照樣留一筆存取紀錄。
+
+指標實例掛在 `AppState` 上，不是全域 `OnceLock`：instrument 綁定的是「建立當下已安裝的 provider」，
+這個順序必須在程式碼上看得見，不能靠「剛好哪個函式先跑」。
 
 ### 標籤走白名單，不是黑名單
 
 允許的標籤只有四個，明列在 `scripts/metric-labels.txt`：
 `http.request.method`／`http.response.status_code`／`http.route`／`error.type`。全部是有界集合。
 
-**機器檢查**：`./scripts/check.sh bans` 會把程式碼裡每個 `KeyValue::new("...")` 的鍵拿去比對白名單，
-不在名單上就紅（self-test 兩條斷言：名單外的要紅、名單上的要綠）。
+**機器檢查**：`./scripts/check.sh bans` 有兩條——高基數名稱直接擋，以及每個 `KeyValue::new("...")`
+的鍵必須在白名單上。**鍵不是字面量的一律拒絕**：`const LABEL: &str = "request_id"` 這種寫法
+2026-09-09 實測可以同時繞過兩條規則、閘道全綠。另外高基數那條原本只往 `.record(` 之後看 6 行，
+而真實程式碼是「先組屬性、後面才 record」——實測完全沒開火，已改成比對屬性建構本身。
 為什麼是白名單：加錯一個標籤的後果是幾天後指標後端被時間序列壓垮，離肇事的那次 commit 很遠。
 
 `http.route` 只在真的匹配到路由時才附上——404 沒有 route，硬填一個就把有界標籤變成無界。

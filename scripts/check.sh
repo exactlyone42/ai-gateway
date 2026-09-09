@@ -137,16 +137,13 @@ bans() {
   fi
 
   # 5. High-cardinality attributes must not become metric labels.
-  #    rustfmt wraps these calls, so the window spans the following lines too.
-  #    Boundary: a label name built at runtime is invisible here -- that stays a
-  #    review item, and docs/engineering-standards.md says so.
-  hits=$(printf '%s\n' "$prod" | awk '
-    /counter|histogram|gauge|\.record\(|\.add\(/ { window = 6 }
-    window > 0 {
-      if ($0 ~ /"(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"/) print
-      window--
-    }
-  ' || true)
+  #    Matched on the attribute constructor itself, not on proximity to a
+  #    metric call: the real code builds the attribute list first and records
+  #    afterwards (measured 2026-09-09 -- a window that only looked forward
+  #    from `.record(` never saw it).
+  hits=$(printf '%s\n' "$prod" | grep -E \
+    'KeyValue::new\("(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"' \
+    || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/high-cardinality metric label (trace and log only): /'
     failed=1
@@ -186,6 +183,28 @@ bans() {
     }
     {
       rest = $0
+      # A key that is not a literal cannot be checked at all, so it is
+      # refused outright: a `const LABEL: &str = \"request_id\"` passed here
+      # used to satisfy every rule while doing the exact forbidden thing
+      # (measured 2026-09-09).
+      # rustfmt puts the arguments on the next line when the call is long, so
+      # the check has to carry over one line.
+      code = $0
+      sub(/^[^:]*:[0-9]+:/, "", code)
+      if (pending) {
+        pending = 0
+        head = code
+        sub(/^[[:space:]]+/, "", head)
+        if (substr(head, 1, 1) != "\"") { print "  (key is not a literal) " held }
+      }
+      probe = code
+      while (match(probe, /KeyValue::new\(/)) {
+        after = substr(probe, RSTART + RLENGTH)
+        sub(/[[:space:]]+$/, "", after)
+        if (after == "") { pending = 1; held = $0 }
+        else if (substr(after, 1, 1) != "\"") { print "  (key is not a literal) " $0 }
+        probe = after
+      }
       while (match(rest, /KeyValue::new\("[^"]+"/)) {
         key = substr(rest, RSTART + 15, RLENGTH - 16)
         if (!(key in permitted)) { print; break }

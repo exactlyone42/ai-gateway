@@ -61,6 +61,9 @@
   現在就有程式碼，不是單節點）；② 駁回——判準明寫「只依賴 OTLP、span 照 §58」，自己產 id 等於
   自造協定，但採納它的附帶條件「exporter 必須可缺席」。
 
+- reviewer 第三輪（tick 3 diff）六點**全採納**，tick 5 全修掉；兩件它查過沒問題的也記著：
+  blocking exporter 跑在 `PeriodicReader` 自己的 OS 執行緒（不佔 tokio worker）、
+  指標與日誌的 `error_type` 同源。
 - reviewer 第二輪（diff 審查）八點的裁定：②③④⑤⑥⑦⑧ 全採納並在 tick 2 修掉；
   **① 駁回**——它建議「同一行同時輸出 pino 與 OTel 兩組鍵」，但 cash 2026-09-09 已決定
   「一種通用格式，消費端做適配，改 aletheia 沒問題」。依相左優先序第一條（使用者既有決策）
@@ -127,6 +130,19 @@
   那條會記錯誤原因，是最可能夾帶東西的路徑），再掃它印出來的每一行；順便驗每行都是合法 JSON。
   進了 `all`（CI 會跑），並在 `docs/engineering-standards.md` §2 把原本的「驗收動作」換成這個關卡。
 
+- `2026-09-09` tick 5：修掉 tick 3 diff 審查的六點（全是實測過的真問題）——
+  ① histogram 桶界用 SDK 預設（毫秒階梯）配上「秒」單位 → 五秒內的請求全在第一桶、
+  百分位數全部相同，改成 semconv 的秒級桶界；
+  ② 指標完全沒有自動測試（把記錄整段刪掉仍 10 passed）→ 用 in-memory reader 走真的 SDK 管線斷言
+  單位、桶界、屬性；
+  ③ `const LABEL: &str = "request_id"` 可同時繞過兩條 label 規則且閘道全綠 → 鍵不是字面量一律拒絕；
+  ④ 高基數那條規則只往 `.record(` 之後看 6 行，而真實程式碼先組屬性後 record → 改成比對屬性建構本身；
+  ⑤ 請求被取消時 histogram 與存取紀錄都沒有那一筆 → guard 改成 `RequestScope`，
+  被取消記 `error.type=cancelled`、無狀態碼，並照樣留一筆紀錄；
+  ⑥ 指標綁定時機沒有東西強制（`OnceLock` 在測試裡會被先綁到 no-op）→ 移到 `AppState`，
+  順序在程式碼上看得見，測試可注入自己的 reader。
+- `2026-09-09` tick 5：測試 10 → 12 條，self-test 27 → 29 條。
+
 ## 已確定不可行
 - **靜態 grep 當遮蔽檢查**：要抓的不是「程式碼裡有沒有寫 token」，而是執行期的值透過沒人想到的
   欄位流出去（標頭、錯誤訊息、依賴自己印的東西）。實測 tick 4：把 `authorization` 標頭記成一個欄位，
@@ -188,7 +204,12 @@
   **證明不了** OTLP payload 乾淨（那不在關卡裡，只手動驗過一次）。
 - **實測（tick 4，額外）**：用哨兵金鑰與哨兵 prompt 跑一輪並收下 OTLP payload，
   traces 與 metrics 兩個 payload 都不含四個哨兵值中的任何一個（span 全是 `skip_all`）。
-- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／10 條測試 0 skipped／
+- **陰性對照（tick 5）**：在真實程式碼裡重現審查說的兩個繞過——常數當 key、屬性先組後 record——
+  兩者現在都會紅（訊息分別是「key is not a literal」與「high-cardinality metric label」）。
+  拿掉 `Drop` 裡的存取紀錄 → `a_dropped_scope_is_still_recorded_as_cancelled` 紅（`left no access log line: []`）。
+  → **這證明**新規則與新測試都咬得住；**過程中也證明了一件事**：第一次注入時我寫的 pattern 沒有命中，
+  測試照樣綠——**沒生效的注入產生的綠燈不是證據**，要先確認 diff 真的變了。
+- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／12 條測試 0 skipped／
   loop 檔／禁用構件／死檔／關卡自測 25 條）。
 
 ## 來源

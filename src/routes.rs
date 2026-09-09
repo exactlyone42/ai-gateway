@@ -30,12 +30,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(health::handle))
         .merge(authenticated)
-        .with_state(state)
+        .with_state(state.clone())
         // Innermost first: the access log needs the id already set and the
         // status already final, so it sits inside the two id layers and
         // outside the handlers. It replaces `TraceLayer`, which reported the
         // same requests without any of the fields a consumer filters on.
-        .layer(axum::middleware::from_fn(access_log))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            access_log,
+        ))
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
 }

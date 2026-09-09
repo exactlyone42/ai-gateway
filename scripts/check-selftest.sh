@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=27
+EXPECTED_ASSERTS=29
 
 ran=0
 failed=0
@@ -215,6 +215,34 @@ pub struct LogLine {
 }
 RS
 expect_green "serde rename_all is the allowed exception"
+
+# The real code shape: attributes are collected first, recorded later. A rule
+# that only looked forward from the record call missed this entirely.
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter, id: String) {
+    let mut attributes = vec![KeyValue::new("http.route", route)];
+    attributes.push(KeyValue::new("request_id", id));
+    m.f64_histogram("http.server.request.duration")
+        .build()
+        .record(1.0, &attributes);
+}
+RS
+expect_red "metric label collected before the record call" "high-cardinality metric label"
+
+# A key that is not a literal cannot be checked, so it is refused: this is how
+# a const smuggled a banned attribute past every rule.
+reset
+fixture a.rs <<'RS'
+const LABEL: &str = "request_id";
+
+fn f(m: Meter, id: String) {
+    m.f64_histogram("http.server.request.duration")
+        .build()
+        .record(1.0, &[KeyValue::new(LABEL, id)]);
+}
+RS
+expect_red "metric attribute key from a constant" "not on the allowlist"
 
 # ---- rule 7: metric attribute allowlist -------------------------------------
 # `model` is not on the allowlist and is not one of rule 5's known ids, so this
