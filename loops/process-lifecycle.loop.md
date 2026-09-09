@@ -29,7 +29,7 @@
 - [ ] **陰性對照 2**：把 `drain_timeout` 設成 0 → 行程必須立刻退出且留下被砍串流的記錄。
 
 ## 已知
-- 現況 `src/main.rs:44` 的 `shutdown_signal()` 只等 `ctrl_c()`，之後交給 axum 的
+- 現況 `src/startup.rs:32` 的 `shutdown_signal()` 只等 `ctrl_c()`，之後交給 axum 的
   graceful shutdown。axum 會等 in-flight 請求結束——**SSE 串流不會自己結束**，
   所以現在的行為是「部署時要嘛永遠不退出、要嘛被外部砍掉」。兩種都不對。
 - **文件互相矛盾，必須解掉**：`docs/architecture.md` 寫「至少兩個無狀態閘道實例」，

@@ -30,7 +30,8 @@
 
 ## 已知
 - 現況是單 crate，`Cargo.toml` 直接列 12 個依賴，`edition = "2024"`。
-- `src/main.rs:23` 已有 JSON 結構化日誌 ＋ `x-request-id` 傳遞層，這兩個可直接沿用。
+- `src/startup.rs:26` 已有 JSON 結構化日誌、`src/routes.rs:23` 已有 `x-request-id` 傳遞層，
+  這兩個可直接沿用。
 - 現有 `/healthz` 是唯一健康端點，只回 `{"status":"ok"}`，沒有依賴檢查。
 - 目前沒有 `sqlx`、沒有 migration、沒有 compose 檔。
 - 規格 §86 要求「不要要求開發者手動開十個 Terminal」。

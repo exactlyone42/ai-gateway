@@ -30,7 +30,8 @@
       加上一條**正對照**：同樣的構件放進 `#[cfg(test)]` 模組**不會**誤報。
 
 ## 已知
-- repo 非空。既有 4 支 Rust 檔共 241 行：`src/main.rs`（路由 ＋ JSON 日誌 ＋ request-id 層）、
+- repo 非空。既有 5 支 Rust 檔共 262 行：`src/main.rs`（只有一行啟動）、
+  `src/startup.rs`（設定載入 ＋ JSON 日誌 ＋ 服務生命週期）、`src/routes.rs`（路由 ＋ request-id 層）、
   `src/gateway.rs:37`（`/v1/chat/completions` 整包轉發 LiteLLM）、`src/config.rs`、`src/error.rs`。
 - 既有實作與新規格的**四個落差**：非串流（`src/gateway.rs:64` 先 `response.bytes().await` 收完才回）、
   上游是 LiteLLM、沒有資料庫、沒有身分模型。
@@ -61,6 +62,9 @@
 - `2026-09-08` 改寫 `docs/architecture.md`（三個 Plane、五個概念不准混、故障模型）、
   更新 `README.md`、修 `docs/security-and-compliance.md` 的 LiteLLM 敘述。
 - `2026-09-08` 看板整理：#6 作廢並關閉（附取代路徑），#16 拆兩段、#8 縮範圍、#4 改順序，各留說明。
+- `2026-09-09` 把啟動流程拆成「設定與生命週期」與「路由」兩塊，`main` 只剩一行啟動。
+  行為不變（實測 `/healthz` 200、未授權 401、`x-request-id` 仍回傳、JSON 日誌照舊），
+  順手修掉六處指到舊 `src/main.rs` 行號的文件引用。
 
 ## 已確定不可行
 - **沿用 `Status` 當看板欄位名**：這個 repo 的欄位實際叫 `Workflow`（repo variable `FIELD_NAME=Workflow`），

@@ -32,7 +32,7 @@
 - [ ] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
 
 ## 已知
-- 現況 `src/main.rs:23` 已有 `tracing_subscriber` JSON 輸出 ＋ `EnvFilter`，但沒有 OTel exporter、
+- 現況 `src/startup.rs:26` 已有 `tracing_subscriber` JSON 輸出 ＋ `EnvFilter`，但沒有 OTel exporter、
   沒有 metric、沒有 span 結構。
 - 現況 `Cargo.toml` 沒有 `opentelemetry` 相關依賴。
 - 規格 §2.3：閘道對可觀測性後端只依賴 OTLP，開發環境可先給 SigNoz compose 因為部署簡單。

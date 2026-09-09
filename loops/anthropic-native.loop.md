@@ -51,7 +51,7 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 
 ## 已知
 - 現況 `/v1/chat/completions` 是非串流整包轉發，且上游是 LiteLLM。這一段要換掉上游並補串流。
-- 現況已有 `x-request-id` 傳遞層（`src/main.rs:34`），可當 trace 關聯的起點。
+- 現況已有 `x-request-id` 傳遞層（`src/routes.rs:23`），可當 trace 關聯的起點。
 - 規格 §36：不要自己重造 response matching。HTTP／SSE／tokio 本來就維護請求—回應對應，
   application request ID 只用於 trace／用量／重試／稽核／除錯。
 - 規格 §40：已開始串流之後不得無腦重試（已產生 token 成本、工具可能有副作用）。

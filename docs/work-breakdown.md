@@ -245,7 +245,7 @@ Protocol Adapter 與 Provider Adapter 分離；`provider_options.<vendor>` 保�
 **交付**：有上限的排空（SIGTERM → 停收新請求、既有串流繼續、`drain_timeout` 到才強制關閉）；
 排空期間 `/ready` 非 200 而 `/health` 仍 200；被砍的串流留下記錄；request body／header 上限；
 所有上游呼叫有逾時；**配額視窗的時區定義**；**多實例的併發與配額語意二選一並記錄理由**。
-**為什麼是 P0**：現況 `src/main.rs:44` 只等 `ctrl_c()` 就交給 axum 的 graceful shutdown，
+**為什麼是 P0**：現況 `src/startup.rs:32` 只等 `ctrl_c()` 就交給 axum 的 graceful shutdown，
 而 axum 會等 in-flight 結束——**一條 SSE 不會自己結束**。所以現在部署的行為是
 「要嘛永遠不退出、要嘛被外部砍掉」，兩種都不對。這是反方審查抓出來的缺口
 （原本 18 個段落沒有人擁有這件事）。
