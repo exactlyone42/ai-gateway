@@ -25,6 +25,11 @@
       attempt_number／started_at／first_token_at／completed_at／status／error_type／
       estimated_usage／actual_usage。
 - [ ] estimated 與 provider-reported 用量分開兩組欄位，不互相覆寫。
+- [ ] **cache token 分開記**：`cached_input_tokens`（讀）與 cache 寫入分成兩格，
+      不要併進 `input_tokens`。理由：排隊超過上游 cache TTL 會讓成本無聲上升
+      （見 `docs/architecture.md` 的「排隊會打爛 prompt cache 的經濟學」），
+      **這兩格沒分開，帳本天生看不見這筆錢**，W13 的公平性代價就量不出來。
+- [ ] `reasoning_tokens` 也單獨一格（不同 Provider 的定義不同，不得相加）。
 - [ ] 用量帳本能回答規格 §46 的九個問題（誰／哪台／哪個 Client／哪個 Agent／哪把金鑰／
       哪個模型／哪個 Provider／哪一天／各類 token 與金額）→ 每個問題附一句可跑的 SQL。
 - [ ] **有上限**的持久化 outbox：DB 不可用時寫本機 spool，恢復後補寫；spool 滿了要有明確策略

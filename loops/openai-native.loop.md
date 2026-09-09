@@ -44,6 +44,15 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
   `auth` 這個欄位對短效憑證是好事，W03 的金鑰輪替可以接上去。
 - **已知風險**：Codex **沒有**等同 Anthropic 那份的閘道相容契約文件，所以「它實際會送哪些欄位、
   哪些必須原樣轉送」只能靠實測，不能照抄 Anthropic 那套假設。
+- **OpenAI 沒有給一般串流的取消端點**：`POST /responses/{id}/cancel` 官方原文
+  「Only responses created with the `background` parameter set to `true` can be cancelled.」
+  → 非 background 的串流，閘道能做的只有**關掉連線**。
+  而且**官方文件對「取消／斷線後是否停止計費」完全沒有說明**（查過 streaming guide、
+  background guide、cancel reference 三處）。所以這一段**不得宣稱**取消會省錢。
+- **`[DONE]` 哨兵在 Chat Completions 的串流事件文件裡沒有記載**。閘道通常會依賴它 →
+  **不要把它當契約**：要能同時處理「有 `[DONE]`」與「沒有 `[DONE]`，靠 `finish_reason` 收尾」。
+- Responses 的串流事件帶 `sequence_number`，background 回應可以用 `starting_after` 續接。
+  這是未來做「斷線續傳」的入口，但**第一版不做**。
 
 ## 已做
 - （待填）

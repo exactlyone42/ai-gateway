@@ -5,6 +5,7 @@
 #   ./scripts/check.sh gate        # fast: fmt-check + clippy + loops + bans
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
+#   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
 set -euo pipefail
@@ -154,13 +155,63 @@ bans() {
   return "$failed"
 }
 
+
+# A .rs file that no `mod` declaration reaches is not compiled at all, so
+# `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` never see
+# it (measured 2026-09-08). Such a file can carry an `unwrap()` and a hardcoded
+# model name into the repo with CI fully green -- the grep-based gates are the
+# only thing standing in its way, so a dead file is a hole in every other gate.
+#
+# Boundary: this walks plain `mod name;` declarations from each crate root. It
+# does not follow `#[path = "..."]` overrides or `mod` inside a macro.
+deadfiles() {
+  step "dead files"
+  local roots=("$@")
+  [ "${#roots[@]}" -gt 0 ] || roots=(src crates)
+
+  local queue=() seen=" " f dir m cand failed=0 root
+  for root in "${roots[@]}"; do
+    while IFS= read -r f; do queue+=("$f"); done < <(
+      find "$root" -path '*/target' -prune -o \
+           \( -name 'main.rs' -o -name 'lib.rs' -o -name 'build.rs' \) -print 2>/dev/null
+    )
+  done
+
+  while [ "${#queue[@]}" -gt 0 ]; do
+    f="${queue[0]}"; queue=("${queue[@]:1}")
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    # A crate root's modules are its siblings; any other module's children live
+    # in a directory named after it.
+    case "$f" in
+      */main.rs|*/lib.rs|*/build.rs) dir="$(dirname "$f")" ;;
+      *) dir="${f%.rs}" ;;
+    esac
+    while IFS= read -r m; do
+      cand="$dir/$m.rs"
+      [ -f "$cand" ] && queue+=("$cand")
+    done < <(sed -nE 's/^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]*;.*/\2/p' "$f")
+  done
+
+  while IFS= read -r f; do
+    case "$f" in */tests/*|*/benches/*|*/examples/*) continue ;; esac
+    case "$seen" in *" $f "*) continue ;; esac
+    echo "$f: no mod declaration reaches this file -- cargo never compiles it"
+    failed=1
+  done < <(find "${roots[@]}" -name '*.rs' -not -path '*/target/*' 2>/dev/null | sort)
+
+  [ "$failed" = 0 ] && echo "dead files ok"
+  return "$failed"
+}
+
 case "${1:-gate}" in
   fmt)       fmt ;;
   fmt-check) fmt_check ;;
-  gate)      fmt_check; clippy_fast; loops; bans ;;
+  gate)      fmt_check; clippy_fast; loops; bans; deadfiles ;;
   loops)     loops ;;
   bans)      shift; bans "$@" ;;
+  deadfiles) shift; deadfiles "$@" ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
-  all|pre-push) fmt_check; clippy_full; test_all; loops; bans; ./scripts/check-selftest.sh ;;
-  *) sed -n '2,10p' "$0"; exit 2 ;;
+  all|pre-push) fmt_check; clippy_full; test_all; loops; bans; deadfiles; ./scripts/check-selftest.sh ;;
+  *) sed -n '2,11p' "$0"; exit 2 ;;
 esac

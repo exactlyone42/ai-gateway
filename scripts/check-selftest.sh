@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=20
+EXPECTED_ASSERTS=22
 
 ran=0
 failed=0
@@ -28,13 +28,17 @@ fixture() {
 reset() { rm -rf "${work:?}"/*; }
 
 run_bans() { ./scripts/check.sh bans "$work" 2>&1; }
+run_deadfiles() { ./scripts/check.sh deadfiles "$work" 2>&1; }
+
+# Which gate the next expectation runs. Defaults to bans.
+gate_cmd=run_bans
 
 # The rule must fire, and its message must name the rule -- an exit code alone
 # does not prove the RIGHT rule caught it.
 expect_red() {
   local name="$1" want="$2" out status
   ran=$((ran + 1))
-  set +e; out="$(run_bans)"; status=$?; set -e
+  set +e; out="$($gate_cmd)"; status=$?; set -e
   if [ "$status" = 0 ]; then
     echo "FAIL [$name]: expected a violation, gate passed"
     failed=$((failed + 1))
@@ -50,7 +54,7 @@ expect_red() {
 expect_green() {
   local name="$1" out status
   ran=$((ran + 1))
-  set +e; out="$(run_bans)"; status=$?; set -e
+  set +e; out="$($gate_cmd)"; status=$?; set -e
   if [ "$status" != 0 ]; then
     echo "FAIL [$name]: expected a pass, gate fired"
     printf '%s\n' "$out" | sed 's/^/       /'
@@ -195,6 +199,36 @@ fixture a.rs <<'RS'
 pub fn f(x: Option<u8>) -> Result<u8, Error> { x.ok_or(Error::Missing) }
 RS
 expect_green "clean tree"
+
+# ---- dead files -------------------------------------------------------------
+# Measured 2026-09-08: an orphan .rs file passes cargo fmt --check, clippy
+# --all-targets AND cargo test, because cargo never compiles it. So this gate is
+# what stops such a file from carrying anything past every other gate.
+gate_cmd=run_deadfiles
+
+reset
+fixture main.rs <<'RS'
+fn main() {}
+RS
+fixture orphan.rs <<'RS'
+pub fn f() {}
+RS
+expect_red "orphan file no mod reaches" "no mod declaration reaches"
+
+# The mirror control: a properly declared file must pass, or the rule is just
+# "every new file is red", which catches nothing useful.
+reset
+fixture main.rs <<'RS'
+mod declared;
+
+fn main() {}
+RS
+fixture declared.rs <<'RS'
+pub fn f() {}
+RS
+expect_green "declared file is reachable"
+
+gate_cmd=run_bans
 
 printf '\n'
 if [ "$ran" != "$EXPECTED_ASSERTS" ]; then
