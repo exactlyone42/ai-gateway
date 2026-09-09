@@ -146,8 +146,11 @@ migration、設定檔、測試 fixture、文件。非測試程式碼命中即紅
 - 錯誤走**統一出口**，不各處自己 `println!`／`eprintln!` 散寫。
 - 日誌用**結構化欄位**，不要把資料塞進字串：
   `error!(provider = %p, model = %m, "upstream rejected")`，不是 `error!("upstream {p}/{m} ...")`。
-- 每筆日誌至少帶：`timestamp`／`level`／`trace_id`／`request_id`／`attempt_id`／
-  `principal`／`event`／`status`／`provider`／`model`。
+- 欄位名一律用 **OpenTelemetry semantic conventions**，不自己發明；格式與完整欄位表見
+  `docs/observability.md`。每筆至少帶：`timestamp`／`severity_number`／`body`／`request_id`／
+  `event.name`，HTTP 相關的再加 `http.request.method`／`http.route`／
+  `http.response.status_code`／`http.server.request.duration`／`error.type`。
+  `trace_id`／`principal`／`gen_ai.*` 等前置條件未到的欄位列在該文件的「還沒有的」。
 
 ### 絕對不記
 

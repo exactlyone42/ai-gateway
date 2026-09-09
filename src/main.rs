@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod logging;
 mod middleware;
 mod routes;
 mod services;

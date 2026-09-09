@@ -1,12 +1,16 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use axum::{
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     middleware::Next,
     response::Response,
 };
 
-use crate::{auth, error::GatewayError, state::AppState};
+use crate::{
+    auth,
+    error::{ErrorType, GatewayError},
+    state::AppState,
+};
 
 /// Turns a request away before it reaches any handler unless it carries a
 /// valid client key.
@@ -17,4 +21,79 @@ pub async fn require_client_key(
 ) -> Result<Response, GatewayError> {
     auth::authorize(&state, request.headers())?;
     Ok(next.run(request).await)
+}
+
+/// Request id header, set by the layer above and read back here.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Writes one log record per request -- the only place that does.
+///
+/// It runs inside the request-id layer and outside everything else, so it sees
+/// the id, the final status (including a rejection from the layer below) and
+/// the whole duration. `error.type` arrives from the error boundary through a
+/// response extension; a status with no gateway error of its own (a 404 from
+/// the router, a body the extractor rejected) falls back to the status code,
+/// which is what the HTTP semantic conventions prescribe.
+pub async fn access_log(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    // Absent before routing happens, and absent for a path that matches no
+    // route at all. Empty means unknown and is dropped, never guessed.
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned())
+        .unwrap_or_default();
+
+    let response = next.run(request).await;
+
+    let status = response.status();
+    let duration = started.elapsed().as_secs_f64();
+    let error_type = response
+        .extensions()
+        .get::<ErrorType>()
+        .map(|error| error.0.to_owned())
+        .unwrap_or_else(|| {
+            if status.is_client_error() || status.is_server_error() {
+                status.as_u16().to_string()
+            } else {
+                String::new()
+            }
+        });
+
+    // The level has to be known at compile time (`tracing`'s callsite is a
+    // `static`), so the field list is shared through a local macro instead of
+    // being written three times.
+    macro_rules! emit {
+        ($level:ident) => {
+            tracing::$level!(
+                event.name = "http.access",
+                request_id = %request_id,
+                http.request.method = %method,
+                http.route = %route,
+                url.path = %path,
+                http.response.status_code = status.as_u16(),
+                http.server.request.duration = duration,
+                error.type = %error_type,
+                "request completed"
+            )
+        };
+    }
+
+    if status.is_server_error() {
+        emit!(error);
+    } else if status.is_client_error() {
+        emit!(warn);
+    } else {
+        emit!(info);
+    }
+
+    response
 }

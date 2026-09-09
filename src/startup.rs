@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::{config::Config, routes, state::AppState};
+use crate::{config::Config, logging, routes, state::AppState};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    init_tracing();
+    logging::init();
 
     let config = Config::from_env()?;
     let address = config.listen_address;
@@ -20,13 +20,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
 }
 
 async fn shutdown_signal() {
