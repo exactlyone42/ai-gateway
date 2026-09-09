@@ -1,8 +1,9 @@
+mod auth;
 mod config;
 mod error;
-mod gateway;
 mod routes;
 mod startup;
+mod state;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

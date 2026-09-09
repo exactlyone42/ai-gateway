@@ -30,10 +30,11 @@
       加上一條**正對照**：同樣的構件放進 `#[cfg(test)]` 模組**不會**誤報。
 
 ## 已知
-- repo 非空。既有 5 支 Rust 檔共 262 行：`src/main.rs`（只有一行啟動）、
-  `src/startup.rs`（設定載入 ＋ JSON 日誌 ＋ 服務生命週期）、`src/routes.rs`（路由 ＋ request-id 層）、
-  `src/gateway.rs:37`（`/v1/chat/completions` 整包轉發 LiteLLM）、`src/config.rs`、`src/error.rs`。
-- 既有實作與新規格的**四個落差**：非串流（`src/gateway.rs:64` 先 `response.bytes().await` 收完才回）、
+- repo 非空。既有 9 支 Rust 檔共 279 行：`src/main.rs`（只有一行啟動）、
+  `src/startup.rs`（設定載入 ＋ JSON 日誌 ＋ 服務生命週期）、`src/routes.rs`（路由表 ＋ request-id 層）、
+  一個端點一支檔（`src/routes/health.rs`、`src/routes/chat_completions.rs` 整包轉發 LiteLLM）、
+  `src/state.rs`、`src/auth.rs`、`src/config.rs`、`src/error.rs`。
+- 既有實作與新規格的**四個落差**：非串流（`src/routes/chat_completions.rs:46` 先 `response.bytes().await` 收完才回）、
   上游是 LiteLLM、沒有資料庫、沒有身分模型。
 - 既有 CI 三關：`cargo fmt --check`、`cargo clippy --all-targets --all-features -D warnings`、
   `cargo test --all`（`.github/workflows/ci.yml:20`）。
@@ -65,6 +66,9 @@
 - `2026-09-09` 把啟動流程拆成「設定與生命週期」與「路由」兩塊，`main` 只剩一行啟動。
   行為不變（實測 `/healthz` 200、未授權 401、`x-request-id` 仍回傳、JSON 日誌照舊），
   順手修掉六處指到舊 `src/main.rs` 行號的文件引用。
+- `2026-09-09` 一個端點一支檔：`src/routes.rs` 只留路由表，`/healthz` 與 `/v1/chat/completions`
+  各自一支檔；共用狀態進 `src/state.rs`、金鑰驗證進 `src/auth.rs`（`src/gateway.rs` 解散）。
+  行為不變（同一組實測全綠），同步修掉十處指到舊路徑的文件引用。
 
 ## 已確定不可行
 - **沿用 `Status` 當看板欄位名**：這個 repo 的欄位實際叫 `Workflow`（repo variable `FIELD_NAME=Workflow`），

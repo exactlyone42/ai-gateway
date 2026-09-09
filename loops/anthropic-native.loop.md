@@ -18,7 +18,7 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 ## 完成判準
 - [ ] `POST /v1/messages` 與 `POST /v1/messages/count_tokens` 直連 Anthropic，**不經 LiteLLM**。
 - [ ] 串流是增量轉送：**不得**先 `bytes().await` 收完整回應再送
-      （現況 `src/gateway.rs:64` 就是收完才送，這是要修掉的行為）。
+      （現況 `src/routes/chat_completions.rs:46` 就是收完才送，這是要修掉的行為）。
 - [ ] Client 斷線／取消／逾時 → 上游請求被取消。
 - [ ] 時間戳欄位**全部先開好**：request_received_at／queue_entered_at／queue_left_at／
       provider_request_at／provider_first_byte_at／client_first_byte_at／completed_at。
@@ -65,7 +65,7 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 ## 證據
 - 「Claude Code reads the stream as it arrives, so if your gateway buffers complete responses
   before relaying them, Claude Code stalls.」
-  → **這證明**現況的整包轉發（`src/gateway.rs:64`）會讓 Client 卡住，不是效能問題而是壞掉。
+  → **這證明**現況的整包轉發（`src/routes/chat_completions.rs:46`）會讓 Client 卡住，不是效能問題而是壞掉。
 - 「Claude Code counts every byte your gateway relays, including SSE `ping` events and comment
   lines, and aborts a stream that goes silent for 300 seconds by default.」
   → **這證明**轉送 ping 是功能需求。**證明不了**上游一定會送 ping（Bedrock 二進位事件流就不送）。

@@ -281,7 +281,7 @@ gateway.yaml` 就能跑。
 
 | 項目 | 結論 | 依據 |
 | --- | --- | --- |
-| Rust ＋ Axum ＋ Tokio 做 SSE 增量代理 | 可行 | 既有 `src/gateway.rs` 已能轉發；增量轉送是 Axum/Tokio 的常規用法 |
+| Rust ＋ Axum ＋ Tokio 做 SSE 增量代理 | 可行 | 既有 `src/routes/chat_completions.rs` 已能轉發；增量轉送是 Axum/Tokio 的常規用法 |
 | 取消傳遞（Client 斷線 → 取消上游） | 可行，但**要實測** | Tokio 的 task cancellation ＋ reqwest 的 drop 會關連線；「Provider 是否停止計費」`未查證`，Provider 文件沒有明文承諾 |
 | PostgreSQL 當精確用量帳本 | 可行 | 一般用法，無技術風險 |
 | OTLP 三路（trace／metric／log） | 可行 | `opentelemetry` crate 生態成熟 |

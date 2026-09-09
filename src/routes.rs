@@ -1,3 +1,6 @@
+mod chat_completions;
+mod health;
+
 use std::sync::Arc;
 
 use axum::{
@@ -10,15 +13,15 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::gateway::{AppState, chat_completions, health};
+use crate::state::AppState;
 
-/// The HTTP surface: which paths exist and which layers every request crosses.
+/// The route table: one line per endpoint, plus the layers every request crosses.
 pub fn router(state: Arc<AppState>) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
 
     Router::new()
-        .route("/healthz", get(health))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route("/healthz", get(health::handle))
+        .route("/v1/chat/completions", post(chat_completions::handle))
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))

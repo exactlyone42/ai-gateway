@@ -28,8 +28,8 @@
 - [ ] **陰性對照 2**：撤銷一把金鑰後，同一把金鑰的下一次請求必須 401（含快取仍在的情況）。
 
 ## 已知
-- 現況只有一把開機用金鑰，SHA-256 雜湊存在記憶體（`src/gateway.rs:23`），
-  常數時間比對已實作（`src/gateway.rs:88`）＋ 有單元測試。這段可沿用概念，但要換成 DB 來源。
+- 現況只有一把開機用金鑰，SHA-256 雜湊存在記憶體（`src/state.rs:15`），
+  常數時間比對已實作（`src/auth.rs:21`）＋ 有單元測試。這段可沿用概念，但要換成 DB 來源。
 - 規格 §9 的核心設計：**Key 只是 Credential，不是 Identity**。人類看的是
   「Cash → MacBook → Claude Code → Coding Agent」，不是 `aigw_sk_f8a901...`。
 - 規格 §13 建議一把金鑰對應單一 Principal，不推薦一把金鑰跨 Mac／Windows／CI／Server。
