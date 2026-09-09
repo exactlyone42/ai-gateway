@@ -23,9 +23,13 @@
 - [~] span 樹照規格 §58：**四個節點已建**（`gateway.request` → `auth.resolve`／`policy.evaluate`／
       `provider.attempt`）。`token.estimate`／`scheduler.queue`／`router.select` 的程式碼還不存在，
       **不先造空 span**（永遠是空的節點會讓人以為那一步被量過）。等 W10／W12／W13 一起補。
-- [ ] 規格 §57 的 13 個 metric 全部輸出，命名與 OTel semantic 一致。
-- [ ] **cardinality 規則**：`request_id`／`trace_id`／`session_id` 這類高基數只進 trace／log，
-      **不得**當 metric label。驗收：一份明文的 label 白名單 ＋ 一個檢查腳本。
+- [~] 規格 §57 的 13 個 metric 全部輸出，命名與 OTel semantic 一致。
+      **已出兩個** semconv 有定義且現有端點產得出來的：`http.server.request.duration`（histogram，秒）、
+      `http.server.active_requests`（up-down counter）。**§57 那份清單不在這個 repo**（只有「13 個」
+      這個數字，`docs/engineering-standards.md:229` 說名稱是契約），要規格到手才能對帳。
+- [x] **cardinality 規則**：`request_id`／`trace_id`／`session_id` 這類高基數只進 trace／log，
+      **不得**當 metric label。白名單 `scripts/metric-labels.txt`（四個標籤）＋ 機器檢查
+      （`bans` 第 7 條，self-test 兩條斷言），並用實際送出的 payload 量過（見「證據」）。
 - [x] 結構化 JSON 日誌，欄位名一律照 OTel semconv：`timestamp`／`severity_number`／`body`／
       `request_id`／`event.name`／`http.request.method`／`http.route`／`url.path`／
       `http.response.status_code`／`http.server.request.duration`／`error.type`。
@@ -108,6 +112,15 @@
 - `2026-09-09` tick 2：把 aletheia 端需要的三個改動寫成明確接口（`docs/observability.md`
   的「消費端要改什麼」），含「先部署程式再改設定」的順序警告——順序反了會讓整個觀測層載入失敗。
 
+- `2026-09-09` tick 3：加指標——`http.server.request.duration`（histogram，秒）與
+  `http.server.active_requests`（up-down counter），名稱照 semconv。在處理中的計數用 `Drop` guard，
+  不是「開始 +1／結束 -1」：Client 中途斷線會讓 future 被丟棄，寫在 `await` 之後的減一永遠不跑，
+  那個計數會一路往上爬、看起來像閘道卡住。
+- `2026-09-09` tick 3：標籤改走白名單 `scripts/metric-labels.txt`（四個有界標籤）＋ `bans` 第 7 條
+  機器檢查（self-test 25 → 27 條）。順手把 rule 5 的正對照 fixture 換成白名單上的標籤，
+  否則那條 fixture 會被新規則絆倒、證明不了原本要證明的事。
+- `2026-09-09` tick 3：`SIGTERM` 收工時追蹤與指標都會 flush，失敗各自記一筆並標明是哪個信號。
+
 ## 已確定不可行
 - **OTLP 用 async HTTP client（`reqwest-client`）**：SDK 的批次處理器跑在自己的 std 執行緒上，
   沒有 Tokio reactor → 該執行緒 **panic**（`there is no reactor running`），之後 span 全丟，
@@ -153,6 +166,12 @@
   送 `SIGTERM` → 收工 flush 真的執行，匯出失敗被記成 severity 17（target `opentelemetry_sdk`）；
   該輪三行輸出全部是合法 JSON。
   → **這證明**預設等級與停服路徑都會留下紀錄；**證明不了**正式環境的容器停服時序（那是 W19）。
+- **實測（tick 3，對一個真的會收的 OTLP 端點）**：收到 traces 兩批（1072 ＋ 2185 bytes）＋
+  metrics 一批（1219 bytes）。把兩個 signal 的 payload 分開存後比對字串：
+  追蹤裡有 `gateway.request`／`auth.resolve`／`policy.evaluate`／`provider.attempt`；
+  指標裡有兩個指標名與四個白名單標籤，**沒有** `request_id`／`trace_id`／`span_id`／`exception.message`。
+  → **這證明** cardinality 規則在送出的資料上成立，不只是程式碼看起來對；
+  **證明不了**指標的數值正確（沒有解 protobuf 比對數字），也證明不了 §57 的 13 個都齊。
 - 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／10 條測試 0 skipped／
   loop 檔／禁用構件／死檔／關卡自測 25 條）。
 
@@ -169,19 +188,13 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
-1. **13 個 metric ＋ label 白名單 ＋ cardinality 檢查腳本**：白名單寫成明文檔，腳本進
-   `./scripts/check.sh`，並補 self-test 兩條斷言（現有 25 條要跟著加）。
-   **先要解一個依賴**：規格 §57 的 13 個 metric 清單不在這個 repo 裡（loop 只引編號）。
-   照 cashloop「需人拍板但不涉重大風險 → 有最佳實踐就照做」，我會先用 OTel HTTP semconv
-   的 `http.server.request.duration`（histogram）＋ 請求數／錯誤數／併發數起一份最小集合，
-   把清單寫進 `docs/observability.md` 並標明「待與規格 §57 對帳」。
-2. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
-3. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
+1. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
+2. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
    要一起做陰性對照：假的 traceparent 不能讓請求失敗。
-4. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
+3. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
    要照「先程式後設定」的順序做。
 4. **部署後才能做的**：把日誌送進 CloudWatch log group，用
    `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
    ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。
-5. **等別的段落**：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
+5. **等別的段落**（含規格 §57 的 13 個指標對帳，要 cash 提供清單）：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
    串流不中斷的陰性對照（W05）、`principal`（W03）、`gen_ai.*`（W10）。

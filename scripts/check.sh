@@ -170,6 +170,32 @@ bans() {
     failed=1
   fi
 
+  # 7. Metric attributes come from an explicit allowlist, because the failure
+  #    mode of a wrong one is a metrics backend that falls over days later,
+  #    far from the commit that caused it. Rule 5 blocks the ids we already
+  #    know are unbounded; this one requires every attribute to be argued for.
+  local allow="scripts/metric-labels.txt"
+  hits=$(printf '%s\n' "$prod" | awk -v allow="$allow" '
+    BEGIN {
+      while ((getline line < allow) > 0) {
+        sub(/#.*/, "", line)
+        gsub(/[ \t\r]/, "", line)
+        if (line != "") permitted[line] = 1
+      }
+    }
+    {
+      rest = $0
+      while (match(rest, /KeyValue::new\("[^"]+"/)) {
+        key = substr(rest, RSTART + 15, RLENGTH - 16)
+        if (!(key in permitted)) { print; break }
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }' || true)
+  if [ -n "$hits" ]; then
+    echo "$hits" | sed "s|^|metric attribute is not on the allowlist ($allow): |"
+    failed=1
+  fi
+
   [ "$failed" = 0 ] && echo "banned constructs ok"
   return "$failed"
 }

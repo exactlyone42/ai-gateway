@@ -11,7 +11,7 @@ use tracing::Instrument as _;
 use crate::{
     auth,
     error::{ErrorType, GatewayError},
-    logging,
+    logging, metrics,
     state::AppState,
 };
 
@@ -46,6 +46,7 @@ pub async fn access_log(request: Request, next: Next) -> Response {
 
 async fn record(request: Request, next: Next) -> Response {
     let started = Instant::now();
+    let _in_flight = metrics::InFlight::new();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let request_id = request
@@ -80,6 +81,14 @@ async fn record(request: Request, next: Next) -> Response {
     let cause = failure
         .and_then(|failure| failure.cause)
         .unwrap_or_default();
+
+    metrics::record(
+        method.as_str(),
+        &route,
+        status.as_u16(),
+        &error_type,
+        duration,
+    );
 
     let (trace_id, span_id) = logging::current_trace_ids();
 

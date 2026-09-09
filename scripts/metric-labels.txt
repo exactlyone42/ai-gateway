@@ -1,0 +1,14 @@
+# Metric attributes allowed in production code, one per line.
+#
+# Every attribute here must have a bounded set of values. An unbounded one --
+# a request id, a trace id, a caller-supplied model name -- multiplies the
+# stored time series and eventually takes the metrics backend down, which is
+# why this is an allowlist and not a blocklist: a new attribute has to be
+# argued for, not merely be un-banned.
+#
+# Machine check: ./scripts/check.sh bans
+
+http.request.method
+http.response.status_code
+http.route
+error.type

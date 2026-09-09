@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=25
+EXPECTED_ASSERTS=27
 
 ran=0
 failed=0
@@ -174,13 +174,15 @@ fn f(m: Meter) {
 RS
 expect_red "metric label, wrapped across lines" "high-cardinality metric label"
 
-# A low-cardinality label is the whole point of metrics.
+# A low-cardinality label is the whole point of metrics. It has to be one the
+# allowlist (rule 7) also accepts, or this fixture would prove nothing about
+# rule 5 -- it would just trip the other rule.
 reset
 fixture a.rs <<'RS'
 fn f(m: Meter) {
     m.u64_counter("gateway_requests_total").add(
         1,
-        &[KeyValue::new("workload_class", w)],
+        &[KeyValue::new("http.route", route)],
     );
 }
 RS
@@ -213,6 +215,29 @@ pub struct LogLine {
 }
 RS
 expect_green "serde rename_all is the allowed exception"
+
+# ---- rule 7: metric attribute allowlist -------------------------------------
+# `model` is not on the allowlist and is not one of rule 5's known ids, so this
+# proves the allowlist itself fires rather than the blocklist.
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter, model: String) {
+    m.f64_histogram("http.server.request.duration")
+        .build()
+        .record(1.0, &[KeyValue::new("model", model)]);
+}
+RS
+expect_red "metric attribute off the allowlist" "not on the allowlist"
+
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter, route: String) {
+    m.f64_histogram("http.server.request.duration")
+        .build()
+        .record(1.0, &[KeyValue::new("http.route", route)]);
+}
+RS
+expect_green "allowlisted metric attribute is fine"
 
 # ---- rule 1: module layout --------------------------------------------------
 reset

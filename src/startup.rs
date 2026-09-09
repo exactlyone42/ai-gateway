@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::{config::Config, logging, routes, state::AppState};
+use crate::{config::Config, logging, metrics, routes, state::AppState};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
@@ -10,6 +10,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let config = Config::from_env()?;
     let traces = logging::init(config.otlp_endpoint.as_deref());
+    let meters = metrics::init(config.otlp_endpoint.as_deref());
     let address = config.listen_address;
     let state = Arc::new(AppState::new(config));
 
@@ -26,22 +27,40 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // off the async worker: a wedged backend would otherwise hold a worker
     // thread for the whole timeout.
     if let Some(traces) = traces {
-        let flushed = tokio::task::spawn_blocking(move || traces.shutdown()).await;
-        match flushed {
-            Ok(Err(error)) => tracing::error!(
-                error.type = "otlp_shutdown_failed",
-                exception.message = %error,
-                "buffered spans may be lost"
-            ),
-            Err(error) => tracing::error!(
-                error.type = "otlp_shutdown_panicked",
-                exception.message = %error,
-                "buffered spans may be lost"
-            ),
-            Ok(Ok(())) => {}
-        }
+        report_flush(
+            "spans",
+            tokio::task::spawn_blocking(move || traces.shutdown()).await,
+        );
+    }
+    if let Some(meters) = meters {
+        report_flush(
+            "metrics",
+            tokio::task::spawn_blocking(move || meters.shutdown()).await,
+        );
     }
     Ok(())
+}
+
+/// Says what was lost, and never hides a failed flush.
+fn report_flush<E: std::fmt::Display>(
+    signal: &str,
+    outcome: Result<Result<(), E>, tokio::task::JoinError>,
+) {
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(
+            error.type = "otlp_shutdown_failed",
+            otel.signal = signal,
+            exception.message = %error,
+            "buffered telemetry may be lost"
+        ),
+        Err(error) => tracing::error!(
+            error.type = "otlp_shutdown_panicked",
+            otel.signal = signal,
+            exception.message = %error,
+            "buffered telemetry may be lost"
+        ),
+    }
 }
 
 /// Waits for whichever stop signal arrives first.
