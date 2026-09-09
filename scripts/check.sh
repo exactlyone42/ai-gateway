@@ -2,9 +2,10 @@
 # Quality gates. Run the cheap ones while iterating, the full set before a PR.
 #
 #   ./scripts/check.sh fmt         # rewrite formatting
-#   ./scripts/check.sh gate        # fast: fmt-check + clippy on the library
+#   ./scripts/check.sh gate        # fast: fmt-check + clippy + loops + bans
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
+#   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
 set -euo pipefail
 
@@ -37,10 +38,7 @@ loops() {
     fi
     grep -q '^| 開始 |' "$file" || { echo "$file: missing 開始 row"; failed=1; }
     grep -q '^| 結束 |' "$file" || { echo "$file: missing 結束 row"; failed=1; }
-  done < <(find loops -name '*.loop.md' -not -name '_TEMPLATE*')
-
-  # Every loop file must be reachable from the index, or it is invisible.
-  while IFS= read -r file; do
+    # Every loop file must be reachable from the index, or it is invisible.
     grep -q "$(basename "$file")" loops/README.md || { echo "$file: not listed in loops/README.md"; failed=1; }
   done < <(find loops -name '*.loop.md' -not -name '_TEMPLATE*')
 
@@ -48,64 +46,105 @@ loops() {
   return "$failed"
 }
 
-
-# Production-code bans from docs/engineering-standards.md. Each rule here is a
-# rule that doc claims is machine-checked, so the two must not drift.
+# Print production lines as `path:line:text`, dropping test code.
 #
-# Test code is excluded by dropping everything from the first `#[cfg(test)]` to
-# end of file, which is where this repo keeps its test modules.
+# Test code is excluded two ways, because there are two kinds:
+#   - `#[cfg(test)] mod ... { ... }` blocks, tracked by brace depth so a test
+#     module in the MIDDLE of a file does not blind the rest of it.
+#   - files under a `tests/` or `benches/` directory, which are already test
+#     crates and carry no `#[cfg(test)]` marker at all.
+prod_lines() {
+  local f
+  for f in "$@"; do
+    case "$f" in */tests/*|*/benches/*) continue ;; esac
+    awk -v file="$f" '
+      # A #[cfg(test)] attribute arms the skip; the module line that follows
+      # opens it. An attribute on a plain item (a `use ...;`) disarms instead.
+      /^[[:space:]]*#\[cfg\(test\)\]/ { armed = 1; next }
+      armed && /mod[[:space:]]/ && /\{/ {
+        armed = 0
+        depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+        if (depth > 0) intest = 1
+        next
+      }
+      armed && /;[[:space:]]*$/ { armed = 0 }
+      intest {
+        depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+        if (depth <= 0) intest = 0
+        next
+      }
+      { print file ":" FNR ":" $0 }
+    ' "$f"
+  done
+}
+
+# Production-code bans from docs/engineering-standards.md. Every rule that doc
+# claims is machine-checked must exist here, and `selftest` proves each one
+# actually fires. Pass roots as arguments; defaults to the real source tree.
 bans() {
   step "banned constructs"
-  local failed=0
+  local roots=("$@")
+  [ "${#roots[@]}" -gt 0 ] || roots=(src crates)
+  local failed=0 hits modrs sources=()
 
-  local sources=()
   while IFS= read -r f; do sources+=("$f"); done < <(
-    find src crates -name '*.rs' -not -path '*/target/*' 2>/dev/null | sort
+    find "${roots[@]}" -name '*.rs' -not -path '*/target/*' 2>/dev/null | sort
   )
   if [ "${#sources[@]}" = 0 ]; then
-    echo "no Rust sources found -- nothing to check"
+    echo "no Rust sources under ${roots[*]} -- nothing to check"
     return 0
   fi
 
   # 1. Rust 2018+ layout: no mod.rs anywhere.
-  local modrs
-  modrs=$(find src crates -name 'mod.rs' -not -path '*/target/*' 2>/dev/null || true)
+  modrs=$(find "${roots[@]}" -name 'mod.rs' -not -path '*/target/*' 2>/dev/null || true)
   if [ -n "$modrs" ]; then
     echo "$modrs" | sed 's/^/mod.rs is banned (use <module>.rs + <module>\/): /'
     failed=1
   fi
 
-  # 2. No panicking shortcuts on a production path.
-  local hits
-  hits=$(prod_grep "${sources[@]}" \
-    | grep -E '\.unwrap\(\)|\.expect\(|panic!\(|todo!\(|unimplemented!\(' || true)
+  local prod
+  prod=$(prod_lines "${sources[@]}")
+
+  # 2. No panicking shortcuts on a production path. Errors travel up; they do
+  #    not blow up in place.
+  hits=$(printf '%s\n' "$prod" | grep -E \
+    '\.unwrap\(\)|\.unwrap_err\(\)|\.expect\(|\.expect_err\(|panic!\(|todo!\(|unimplemented!\(|unreachable!\(|[^_a-zA-Z]assert(_eq|_ne)?!\(' \
+    || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/panicking shortcut on a production path: /'
     failed=1
   fi
 
   # 3. Model names live in configuration, never in code (spec section 20).
-  hits=$(prod_grep "${sources[@]}" \
-    | grep -E '"(claude|gpt|gemini|grok|o[0-9])-[a-z0-9.-]+"' || true)
+  #    A version digit is what separates a model id from a header name such as
+  #    `x-claude-code-session-id`, which must stay allowed.
+  hits=$(printf '%s\n' "$prod" | grep -Ei \
+    '"[^"]*(claude|gpt|gemini|grok)-[a-z0-9.-]*[0-9][a-z0-9.-]*' || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/hardcoded model name (put it in the model registry): /'
     failed=1
   fi
 
   # 4. The gateway speaks OTLP only; backend names belong in deploy/ and docs.
-  hits=$(prod_grep "${sources[@]}" \
-    | grep -iE 'grafana|prometheus|signoz|datadog|tempo' || true)
+  #    Word-anchored: `temporary` must not read as `tempo`.
+  hits=$(printf '%s\n' "$prod" | grep -Ei \
+    '\b(grafana|prometheus|signoz|datadog|tempo|loki|jaeger)\b' || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/observability backend named in gateway code (OTLP only): /'
     failed=1
   fi
 
   # 5. High-cardinality attributes must not become metric labels.
-  #    Boundary: this catches literal attribute keys on a metric call site. It
-  #    does NOT catch a label name built at runtime -- that stays a review item.
-  hits=$(prod_grep "${sources[@]}" \
-    | grep -E '(counter|histogram|gauge|meter|\.record\(|\.add\()' \
-    | grep -E '"(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"' || true)
+  #    rustfmt wraps these calls, so the window spans the following lines too.
+  #    Boundary: a label name built at runtime is invisible here -- that stays a
+  #    review item, and docs/engineering-standards.md says so.
+  hits=$(printf '%s\n' "$prod" | awk '
+    /counter|histogram|gauge|\.record\(|\.add\(/ { window = 6 }
+    window > 0 {
+      if ($0 ~ /"(request_id|trace_id|session_id|attempt_id|credential_id|user_id|device_id|agent_id)"/) print
+      window--
+    }
+  ' || true)
   if [ -n "$hits" ]; then
     echo "$hits" | sed 's/^/high-cardinality metric label (trace and log only): /'
     failed=1
@@ -115,21 +154,13 @@ bans() {
   return "$failed"
 }
 
-# Print production lines only: each file with its `#[cfg(test)]` tail removed,
-# prefixed with `path:line:` so the grep output stays addressable.
-prod_grep() {
-  local f
-  for f in "$@"; do
-    awk -v file="$f" '/#\[cfg\(test\)\]/ { exit } { print file ":" FNR ":" $0 }' "$f"
-  done
-}
-
 case "${1:-gate}" in
   fmt)       fmt ;;
   fmt-check) fmt_check ;;
   gate)      fmt_check; clippy_fast; loops; bans ;;
   loops)     loops ;;
-  bans)      bans ;;
-  all|pre-push) fmt_check; clippy_full; test_all; loops; bans ;;
-  *) sed -n '2,9p' "$0"; exit 2 ;;
+  bans)      shift; bans "$@" ;;
+  selftest)  exec ./scripts/check-selftest.sh ;;
+  all|pre-push) fmt_check; clippy_full; test_all; loops; bans; ./scripts/check-selftest.sh ;;
+  *) sed -n '2,10p' "$0"; exit 2 ;;
 esac

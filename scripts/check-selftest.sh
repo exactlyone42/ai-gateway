@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Self-test for the `bans` gate.
+#
+# A gate nobody has seen go red is a rubber stamp. This runs every ban rule
+# against a fixture that should trip it, and against a fixture that should NOT,
+# then fails if fewer assertions ran than expected -- because a half-executed
+# suite printing "0 failed" is the classic false green.
+#
+# When you add a rule to `bans`, add both assertions here and bump the count.
+set -euo pipefail
+
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+EXPECTED_ASSERTS=20
+
+ran=0
+failed=0
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# fixture <relative-path> <<'RS' ... RS
+fixture() {
+  local path="$work/$1"
+  mkdir -p "$(dirname "$path")"
+  cat > "$path"
+}
+
+reset() { rm -rf "${work:?}"/*; }
+
+run_bans() { ./scripts/check.sh bans "$work" 2>&1; }
+
+# The rule must fire, and its message must name the rule -- an exit code alone
+# does not prove the RIGHT rule caught it.
+expect_red() {
+  local name="$1" want="$2" out status
+  ran=$((ran + 1))
+  set +e; out="$(run_bans)"; status=$?; set -e
+  if [ "$status" = 0 ]; then
+    echo "FAIL [$name]: expected a violation, gate passed"
+    failed=$((failed + 1))
+  elif ! printf '%s' "$out" | grep -qF "$want"; then
+    echo "FAIL [$name]: fired, but not with '$want'"
+    printf '%s\n' "$out" | sed 's/^/       /'
+    failed=$((failed + 1))
+  else
+    echo "ok   [$name]"
+  fi
+}
+
+expect_green() {
+  local name="$1" out status
+  ran=$((ran + 1))
+  set +e; out="$(run_bans)"; status=$?; set -e
+  if [ "$status" != 0 ]; then
+    echo "FAIL [$name]: expected a pass, gate fired"
+    printf '%s\n' "$out" | sed 's/^/       /'
+    failed=$((failed + 1))
+  else
+    echo "ok   [$name]"
+  fi
+}
+
+printf '== bans self-test\n'
+
+# ---- rule 2: panicking shortcuts -------------------------------------------
+for construct in \
+  'let _ = none().unwrap();' \
+  'let _ = none().expect("x");' \
+  'panic!("x");' \
+  'todo!();' \
+  'unreachable!();' \
+  'assert!(true);' \
+  'let _ = err().unwrap_err();'
+do
+  reset
+  fixture a.rs <<RS
+fn f() { $construct }
+RS
+  expect_red "panicking: $construct" "panicking shortcut"
+done
+
+# The same construct inside a test module must NOT fire. Without this the rule
+# could be matching everything and still look correct above.
+reset
+fixture a.rs <<'RS'
+fn f() -> u8 { 1 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() { let _ = Some(1u8).unwrap(); }
+}
+RS
+expect_green "test module is exempt"
+
+# A test module in the MIDDLE of a file must not blind the production code that
+# follows it.
+reset
+fixture a.rs <<'RS'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() { assert!(true); }
+}
+
+fn after_the_test_module() { let _ = none().unwrap(); }
+RS
+expect_red "code after a test module is still scanned" "panicking shortcut"
+
+# A whole test crate carries no #[cfg(test)] marker at all.
+reset
+fixture tests/integration.rs <<'RS'
+#[test]
+fn t() { let _ = none().unwrap(); }
+RS
+expect_green "tests/ directory is exempt"
+
+# ---- rule 3: hardcoded model names -----------------------------------------
+reset
+fixture a.rs <<'RS'
+const M: &str = "claude-sonnet-4-6";
+RS
+expect_red "model name" "hardcoded model name"
+
+# A provider-prefixed id inside the string must still be caught.
+reset
+fixture a.rs <<'RS'
+const M: &str = "anthropic/claude-sonnet-4-5";
+RS
+expect_red "model name behind a provider prefix" "hardcoded model name"
+
+# The Claude Code attribution headers are not model names.
+reset
+fixture a.rs <<'RS'
+const H: &str = "x-claude-code-session-id";
+const G: &str = "x-claude-code-parent-agent-id";
+RS
+expect_green "claude-code header names are allowed"
+
+# ---- rule 4: observability backends ----------------------------------------
+reset
+fixture a.rs <<'RS'
+const U: &str = "http://prometheus:9090";
+RS
+expect_red "observability backend" "observability backend"
+
+# `temporary` must not read as `tempo`; retry code says this word constantly.
+reset
+fixture a.rs <<'RS'
+const E: &str = "temporary upstream failure, retrying";
+RS
+expect_green "the word temporary is allowed"
+
+# ---- rule 5: high-cardinality metric labels --------------------------------
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter) { m.u64_counter("x").add(1, &[KeyValue::new("request_id", id)]); }
+RS
+expect_red "metric label, one line" "high-cardinality metric label"
+
+# rustfmt wraps this call, so the rule must span lines.
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter) {
+    m.u64_counter("gateway_requests_total").add(
+        1,
+        &[KeyValue::new("user_id", uid)],
+    );
+}
+RS
+expect_red "metric label, wrapped across lines" "high-cardinality metric label"
+
+# A low-cardinality label is the whole point of metrics.
+reset
+fixture a.rs <<'RS'
+fn f(m: Meter) {
+    m.u64_counter("gateway_requests_total").add(
+        1,
+        &[KeyValue::new("workload_class", w)],
+    );
+}
+RS
+expect_green "low-cardinality metric label is allowed"
+
+# ---- rule 1: module layout --------------------------------------------------
+reset
+fixture thing/mod.rs <<'RS'
+pub fn f() {}
+RS
+expect_red "mod.rs" "mod.rs is banned"
+
+# ---- a clean tree passes ----------------------------------------------------
+reset
+fixture a.rs <<'RS'
+pub fn f(x: Option<u8>) -> Result<u8, Error> { x.ok_or(Error::Missing) }
+RS
+expect_green "clean tree"
+
+printf '\n'
+if [ "$ran" != "$EXPECTED_ASSERTS" ]; then
+  echo "FAIL: $ran assertions ran, expected $EXPECTED_ASSERTS -- the suite did not fully execute"
+  exit 1
+fi
+if [ "$failed" != 0 ]; then
+  echo "FAIL: $failed of $ran assertions failed"
+  exit 1
+fi
+echo "bans self-test ok: $ran/$EXPECTED_ASSERTS assertions passed"

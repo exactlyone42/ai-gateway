@@ -1,6 +1,6 @@
 # 工程拆解
 
-整份規格切成 **18 個段落**。切的依據是**可獨立審查**：一個段落 = 一張卡 = 一份 loop 檔 =
+整份規格切成 **19 個段落**（W19 是反方審查補上的缺口）。切的依據是**可獨立審查**：一個段落 = 一張卡 = 一份 loop 檔 =
 一支 `feature/<slug>` 分支 = 一個能單獨驗收的成果。
 
 段落之間只透過**已合進 `dev` 的介面**相依，不共用未合併的分支。
@@ -26,6 +26,7 @@ W02 workspace-foundation ──┬───────────┼──→ 
                                                    │                                       │
                                                    ▼                                       ▼
                                           W14 canonical-layer                     W18 test-harness-load
+                     W05 ──→ W19 process-lifecycle
                                                    │
                                     ┌──────────────┴──────────────┐
                                     ▼                             ▼
@@ -36,6 +37,14 @@ W02 workspace-foundation ──┬───────────┼──→ 
 ```
 
 **關鍵路徑**：`W02 → W03/W04 → W05 → W06 → W14`。其它段落都掛在旁邊，可並行。
+`W19 process-lifecycle` 掛在 W05 之後（要有真的長命串流才驗得出排空）。
+
+**兩個先於實作的決定**（拖到寫程式時才問就來不及）：
+
+1. **單實例還是分散式計數器**（屬於 W19）。`docs/architecture.md` 原本寫「至少兩個實例」，
+   而 W12 寫「不做分散式計數器」——兩個實例各自記憶體計數，等於所有上限實際上是兩倍，
+   而且**沒有任何錯誤訊息**。第一版的答案是**單實例**，理由見 `docs/task-ledger.md`。
+2. **要不要自建 Admin 認證**（屬於 W08）。取決於採不採用第一方閘道，見 `docs/feasibility.md` 第四節。
 
 ## 段落定義
 
@@ -87,8 +96,10 @@ DB 只存雜湊 ＋ 前綴 ＋ 指紋；`PrincipalContext` 解析中介層；有
 
 **目的**：Claude Code 指向閘道就能正常工作，串流不卡、取消會傳到上游、用量有落帳。
 **交付**：`POST /v1/messages`、`POST /v1/messages/count_tokens` 直連 Anthropic（**不經 LiteLLM**）；
-SSE 增量轉送（不得整包 buffer）；Client 斷線 → 取消上游；六個時間戳
-（收到／進佇列／離佇列／送上游／上游首字／Client 首字／完成）；estimated 與 provider-reported 用量分開記。
+SSE 增量轉送（不得整包 buffer）；Client 斷線 → 取消上游；時間戳欄位全部開好
+（收到／進佇列／離佇列／送上游／上游首字／Client 首字／完成，其中兩個 queue 欄位在 W13 之前寫 NULL）；
+`GET /v1/models` 由**設定檔**供應、contract 在此定死（W10 只換來源）；
+estimated 與 provider-reported 用量分開記。
 **不做**：跨 Provider 轉換。
 
 | 編號 | Slug | 優先度 | 前置 |
@@ -225,6 +236,19 @@ Protocol Adapter 與 Provider Adapter 分離；`provider_options.<vendor>` 保�
 - 階段二（W13 後）：排程器公平性（10 互動 premium ＋ 30 互動 economy ＋ 30 背景 premium ＋
   30 批次 economy）→ 互動優先、保留槽生效、背景不霸佔且最後仍被服務、deadline 過期取消、佇列滿正確拒絕。
 **每個數字都要有量測方法與 journal 紀錄**，不留「大概」。
+
+| 編號 | Slug | 優先度 | 前置 |
+| --- | --- | --- | --- |
+| W19 | `process-lifecycle` | P0 | W05 |
+
+**目的**：部署一次不會砍掉全公司正在跑的 Claude Code session，也不會讓行程永遠退不掉。
+**交付**：有上限的排空（SIGTERM → 停收新請求、既有串流繼續、`drain_timeout` 到才強制關閉）；
+排空期間 `/ready` 非 200 而 `/health` 仍 200；被砍的串流留下記錄；request body／header 上限；
+所有上游呼叫有逾時；**配額視窗的時區定義**；**多實例的併發與配額語意二選一並記錄理由**。
+**為什麼是 P0**：現況 `src/main.rs:44` 只等 `ctrl_c()` 就交給 axum 的 graceful shutdown，
+而 axum 會等 in-flight 結束——**一條 SSE 不會自己結束**。所以現在部署的行為是
+「要嘛永遠不退出、要嘛被外部砍掉」，兩種都不對。這是反方審查抓出來的缺口
+（原本 18 個段落沒有人擁有這件事）。
 
 ## 既有看板卡對照
 

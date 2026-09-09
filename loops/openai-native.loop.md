@@ -21,6 +21,10 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
 - [ ] 再做 `POST /v1/chat/completions`（給其它 OpenAI 相容 Client）與 `GET /v1/models`。
 - [ ] 串流／取消／時間戳／ID／落帳**複用** W05 的骨架，不另寫一套
       （驗收方式：`cargo tree` ／程式碼審查確認共用同一個 streaming 模組）。
+- [ ] **`CanonicalStreamEvent` 在這一段出生**，不等 W14。
+      理由：兩個 Provider 一起拉才有辦法設計對；只有 Anthropic 一家時定出來的型別
+      一定長得像 Anthropic SSE，W06 就只能把 Responses 掰成那個形狀，或直接分岔。
+      其餘 Canonical 型別（Request／Response／Message／Tool*）仍留在 W14。
 - [ ] `GET /v1/models` 回的清單來自模型註冊表，不是 hardcode 字串。
 - [ ] 錯誤契約：上游 4xx／5xx 對應到穩定的 HTTP status ＋ error code，不吞、不一律回 200。
 - [ ] 串流 contract test：Responses SSE 與 Chat Completions SSE 各一組 fixture。

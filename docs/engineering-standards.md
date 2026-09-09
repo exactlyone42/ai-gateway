@@ -21,8 +21,17 @@
 | `fmt-check` | `cargo fmt --all --check` | 每次 |
 | `gate` | fmt-check ＋ clippy ＋ loop 檔紀律 ＋ Rust 禁用構件 | **迭代中只跑這個** |
 | `loops` | loop 檔八段落、主體 200 行、必須進索引 | 改 loop 檔後 |
-| `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名 | 每次 |
-| `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` | **PR 前、合併前** |
+| `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label | 每次 |
+| `selftest` | **證明上面那些關卡真的抓得到東西**（20 條斷言，含正對照） | 改 `check.sh` 後 |
+| `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `selftest` | **PR 前、合併前** |
+
+### 關卡自己也要被驗
+
+`./scripts/check-selftest.sh` 對每一條 ban 規則跑兩種 fixture：**該紅的必須紅、該綠的必須綠**，
+並且宣告 `EXPECTED_ASSERTS=20`——**跑到的斷言數不等於宣告數就直接失敗**。
+理由：半途中斷卻印出「0 failed」是最典型的假綠。
+
+加規則時要同時加兩條斷言並更新數字。**改了 `bans` 沒改 self-test，self-test 會紅。**
 
 **不要每改一行就跑 `all`。** 那是浪費時間，不是嚴謹。
 
@@ -55,11 +64,15 @@ HTTP 映射固定：參數／輸入錯誤 → 400；認證 → 401／403；找�
 
 ### 生產路徑禁用構件
 
-非測試程式碼**禁止**：`unwrap()`、`expect()`、`panic!()`、`todo!()`、`unimplemented!()`、
-裸 `assert!`。錯誤要往上傳，不是就地炸掉。
+非測試程式碼**禁止**：`unwrap()`、`unwrap_err()`、`expect()`、`expect_err()`、`panic!()`、
+`todo!()`、`unimplemented!()`、`unreachable!()`、裸 `assert!`／`assert_eq!`／`assert_ne!`。
+錯誤要往上傳，不是就地炸掉。
 
-機器檢查：`./scripts/check.sh bans`。
-**陰性對照**：在任一非測試檔加一行 `let _ = None::<u8>.unwrap();`，`bans` 必須變紅。
+機器檢查：`./scripts/check.sh bans`，每一條都有對應的 self-test 斷言。
+
+**測試程式碼怎麼認**：① `#[cfg(test)]` 開的模組，**用大括號深度追蹤**——
+測試模組放在檔案中間不會讓後面的正式程式碼變成盲區；② `tests/`／`benches/` 目錄下的整個檔案
+（那本來就是測試 crate，沒有 `#[cfg(test)]` 標記）。
 
 ### 依賴管理
 
@@ -78,7 +91,8 @@ HTTP 映射固定：參數／輸入錯誤 → 400；認證 → 401／403；找�
 migration、設定檔、測試 fixture、文件。非測試程式碼命中即紅。
 理由：模型名稱會變，換模型必須是改設定不是改程式（規格 §20）。
 
-機器檢查：`./scripts/check.sh bans`。
+機器檢查：`./scripts/check.sh bans`。**帶前綴的也算**（`"anthropic/claude-sonnet-4-5"`）。
+判別依據是「版本數字」——`x-claude-code-session-id` 這種標頭名沒有數字，不會誤判。
 
 ---
 
@@ -158,14 +172,19 @@ Provider API secret、閘道金鑰（明文或雜湊）、密碼、access token�
 
 理由：高基數 label 會把時序資料庫打爆，而且爆的時候是可觀測性先死，不是被監控的系統先死。
 
-驗收動作：`./scripts/check.sh bans` 檢查 metric 註冊點沒有用到黑名單欄位名。
+機器檢查：`./scripts/check.sh bans` 掃 metric 呼叫點**往後六行**內的字面 label 名
+（rustfmt 會把呼叫拆行，只比對同一行會漏）。
+
+**這個檢查的邊界**：只抓得到**字面字串**。label 名如果是執行期組出來的（變數、`format!`、
+常數轉發），這個檢查看不到——那條只能靠 review。說得出邊界才算想清楚。
 
 ### 只認 OTLP
 
-閘道程式碼**不得**出現 Grafana／Prometheus／Tempo／SigNoz／Datadog 的專屬 API。
+閘道程式碼**不得**出現 Grafana／Prometheus／Tempo／Loki／Jaeger／SigNoz／Datadog 的專屬 API。
 這些名字只允許出現在 `deploy/` 與文件。換後端不該動閘道一行程式碼。
 
-機器檢查：`./scripts/check.sh bans`。
+機器檢查：`./scripts/check.sh bans`，比對加了詞界——重試邏輯一定會寫的 `temporary`
+不會被 `tempo` 誤判（這是 self-test 裡的一條正對照）。
 
 ### PostgreSQL 是帳本，Prometheus 不是
 

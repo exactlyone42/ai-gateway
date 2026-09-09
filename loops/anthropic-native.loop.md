@@ -20,9 +20,11 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 - [ ] 串流是增量轉送：**不得**先 `bytes().await` 收完整回應再送
       （現況 `src/gateway.rs:64` 就是收完才送，這是要修掉的行為）。
 - [ ] Client 斷線／取消／逾時 → 上游請求被取消。
-- [ ] 六個時間戳都記：request_received_at／queue_entered_at／queue_left_at／
-      provider_request_at／provider_first_byte_at／client_first_byte_at／completed_at，
-      並算出 queue latency／provider TTFT／gateway overhead／total latency。
+- [ ] 時間戳欄位**全部先開好**：request_received_at／queue_entered_at／queue_left_at／
+      provider_request_at／provider_first_byte_at／client_first_byte_at／completed_at。
+      **W13 之前沒有佇列**，所以兩個 queue 欄位這一段一律寫 NULL，
+      並算出 provider TTFT／gateway overhead／total latency 三個現在算得出來的。
+      不要為了「看起來有」而填 0——0 和「沒有佇列」是兩件事。
 - [ ] 請求 ID 六件齊全：session_id／trace_id／gateway_request_id／attempt_id／
       provider_request_id／provider_response_id。邏輯請求與上游嘗試分開。
 - [ ] estimated 與 provider-reported 用量都落帳。
@@ -36,6 +38,8 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
       `HEAD /api/hello` 預熱探測可拒絕但不能 5xx 噴爆。
 - [ ] `GET /v1/models?limit=1000` 3 秒內回、**不重導向**，回 `data[]` 含 `id`
       （`display_name`／`description` 可選）。
+      **來源是設定檔，不是 W10 的資料表**——W10 只換來源，不換這個端點的回應形狀。
+      端點的 contract test 在這裡就定死，W10 必須照著過。
 - [ ] Principal 解析吃 Client 送來的 `x-claude-code-session-id`（session 關聯）與
       `x-claude-code-agent-id`／`x-claude-code-parent-agent-id`（Agent 歸屬）。
       **agent id 不得當成人的識別**（官方明文）。
