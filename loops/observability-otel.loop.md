@@ -82,6 +82,9 @@
   改 blocking client；另外裝 panic hook 把 panic 寫成一行 JSON，避免汙染日誌串流。
 - `2026-09-09` 依賴函式庫的事件沒有 message 時，`body` 改用它的 `name` 欄位（原本會是 `null`）。
 
+- `2026-09-09` **未完的一件**：diff 的反方審查（`claude -p --model opus`）在 tick 1 收工時還沒回，
+  下一個 tick 先讀它、有高／中嚴重度就先修再做指標。
+
 ## 已確定不可行
 - **OTLP 用 async HTTP client（`reqwest-client`）**：SDK 的批次處理器跑在自己的 std 執行緒上，
   沒有 Tokio reactor → 該執行緒 **panic**（`there is no reactor running`），之後 span 全丟，
