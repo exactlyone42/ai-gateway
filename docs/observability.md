@@ -74,8 +74,10 @@ gateway.request                 存取記錄層（src/middleware.rs）
 
 ### exporter 是可缺席的
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` 沒設 → 完全不裝 exporter。span 照樣建立、`trace_id` 照樣有，只是不送出去。
-設了但後端掛掉／卡住 → 資料面不受影響（見下方實測）。收工時會 flush，flush 失敗會記一筆 error。
+`OTEL_EXPORTER_OTLP_ENDPOINT` 沒設 → 完全不裝 exporter，**連 tracer provider 都沒有，所以日誌也沒有
+`trace_id`**（只有 `request_id`）。要跨服務串同一個請求就必須設這個變數。
+設了但後端掛掉／卡住 → 資料面不受影響（見下方實測）。收工時會 flush（SIGTERM 與 Ctrl-C 都會），
+flush 失敗記一筆 error。flush 是阻塞呼叫，跑在 blocking 執行緒上，不佔用 async worker。
 
 ### 匯出失敗會出現 severity 17，但那不是資料面的問題
 
@@ -88,6 +90,33 @@ OTLP 送不出去時 SDK 會記 `BatchSpanProcessor.ExportError`（severity 17�
 依賴函式庫 panic 時，預設會往 stderr 印多行純文字——**一行非 JSON 就會讓消費端對整個來源退回文字解析**。
 所以裝了 panic hook，把 panic 寫成一行 JSON（`error.type = "panic"` ＋ 位置 ＋ 訊息）。
 這不是假想情境：2026-09-09 實測時 OTLP 批次執行緒真的 panic 了（見下方）。
+
+## 等級過濾：`RUST_LOG` 沒設也要看得到東西
+
+`EnvFilter::from_default_env()` 在環境變數缺席時**只留 ERROR**
+（`tracing-subscriber-0.3.23/src/filter/env/mod.rs:289`）——那會讓存取記錄整批消失、
+請求 span 連建都不建（於是沒有 `trace_id`），而輸出看起來完全正常。所以預設值寫在程式碼裡：
+
+```
+info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
+```
+
+**如果你要自己設 `RUST_LOG`，記得保留 exporter 的 directive。** EnvFilter 一旦有任何 directive
+就不再補預設值（`filter/env/builder.rs:335`），漏掉的話「追蹤送不出去」在正式環境沒人會知道。
+
+## 消費端（aletheia）要改什麼
+
+閘道這頭已完成，格式不會再改。SRE 觀測層要讀得到，需要三個改動：
+
+| 檔案 | 改什麼 |
+| --- | --- |
+| `src/logs.rs:28` | `LogFormat` 加一個 `Otel` variant（編譯器會逼 `parse_entry`／`zero_means_none`／`caveat` 三處補 arm） |
+| `src/logs.rs:340-380` | 新 arm 讀：`severity_number`、`trace_id`、巢狀 `http.request.method`／`http.route`／`http.response.status_code`、`error.type`、`body`。`zero_means_none = true`、`caveat = None` |
+| `sre/target.yaml` | 加一個 log group：`format: otel`、`error_pattern: '{ $.severity_number >= 17 \|\| $.http.response.status_code >= 500 }'`。要抓 4xx 用 `>= 13` |
+
+**部署順序不能反**：先部署懂 `otel` 的新版程式，再改 `target.yaml`。
+設定載入是 `serde_yaml::from_str(...)` ＋ `deny_unknown_fields`（`src/target.rs:231`），
+舊版程式讀到 `format: otel` 會直接載入失敗 → 整個觀測層停擺。
 
 ## 還沒有的
 
@@ -114,3 +143,5 @@ OTLP 送不出去時 SDK 會記 `BatchSpanProcessor.ExportError`（severity 17�
 | 端點沒人在聽 | `/healthz` 200；`BatchSpanProcessor.ExportError` 被記錄（severity 17） |
 | 端點接得上但永不回應 | 卡住期間 `/healthz` 仍 200、`/v1/chat/completions` 仍 403；收工 flush 逾時並記一筆 error；**七行輸出全部是合法 JSON** |
 | 批次匯出執行緒 panic | **修掉了**：原因是 async HTTP client 跑在 SDK 自己的執行緒上（沒有 Tokio reactor），改用 blocking client。修之前 panic 訊息是三行純文字，直接汙染日誌串流 |
+| 完全不設 `RUST_LOG` | 存取記錄照樣出現（severity 9）——預設值在程式碼裡，不靠 `.env` |
+| `SIGTERM` 停服 | flush 真的執行了，匯出失敗被記成 severity 17（`opentelemetry_sdk`）。修之前只等 `ctrl_c()`，容器停服時整段不會跑 |

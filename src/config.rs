@@ -9,8 +9,9 @@ pub struct Config {
     pub litellm_master_key: String,
     pub bootstrap_client_key: String,
     pub allowed_models: Vec<String>,
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter is installed at
-    /// all: traces still get ids, they just go nowhere.
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
+    /// provider at all, so log records carry no `trace_id` either -- only the
+    /// request id. Correlating one request across services needs this set.
     pub otlp_endpoint: Option<String>,
 }
 

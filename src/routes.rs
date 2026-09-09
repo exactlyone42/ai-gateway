@@ -106,4 +106,77 @@ mod tests {
             "no request id: {access}"
         );
     }
+
+    /// Drives a request through the real router and returns its access line.
+    async fn access_line(request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let buffer = logging::capture::Buffer::default();
+        let (subscriber, _provider) = logging::test_subscriber(buffer.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let state = Arc::new(AppState::new(test_config()));
+        let response = router(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        drop(guard);
+
+        let lines = buffer.lines();
+        let access = lines
+            .iter()
+            .find(|line| line["event"]["name"] == "http.access")
+            .unwrap_or_else(|| panic!("no access log line in {lines:?}"))
+            .clone();
+        (status, access)
+    }
+
+    /// A rejected key must be visible as a warning with a stable identifier.
+    /// It carries no cause: the type says everything, and the request that
+    /// caused it belongs to the caller.
+    #[tokio::test]
+    async fn a_rejected_key_is_logged_as_a_warning() {
+        let (status, access) = access_line(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"company-default"}"#))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(access["severity_number"], 13, "not a warning: {access}");
+        assert_eq!(access["error"]["type"], "unauthorized");
+        assert_eq!(access["http"]["response"]["status_code"], 401);
+        assert!(
+            access["exception"]["message"].is_null(),
+            "a rejected key needs no cause: {access}"
+        );
+    }
+
+    /// An unreachable upstream must be an error *with* the cause: without it
+    /// the line says only that a 502 happened, never whether it was DNS, TLS
+    /// or a timeout. The test config points at a port nobody listens on.
+    #[tokio::test]
+    async fn an_unreachable_upstream_is_logged_with_its_cause() {
+        let (status, access) = access_line(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer client-key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"company-default"}"#))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(access["severity_number"], 17, "not an error: {access}");
+        assert_eq!(access["error"]["type"], "upstream_unavailable");
+        assert!(
+            !access["exception"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "no cause on a 502: {access}"
+        );
+    }
 }

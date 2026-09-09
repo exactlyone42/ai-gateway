@@ -35,6 +35,9 @@
       PII。驗收：一個掃 log 輸出的檢查（見陰性對照）。
 - [x] OTel 後端不可用時，資料面不受影響（規格 §63）。三種情境實測，見「證據」。
 - [x] 日誌每一行都是合法 JSON，連 panic 也是（一行非 JSON 就會讓消費端對整個來源退回文字解析）。
+      測試：`logging::tests::a_panic_is_one_json_line`。
+- [x] 4xx 記 warning、5xx 記 error，各帶穩定的 `error.type`；5xx 另帶原因。
+      測試：`routes::tests::a_rejected_key_is_logged_as_a_warning`／`an_unreachable_upstream_is_logged_with_its_cause`。
 - [ ] **陰性對照 1**：故意在日誌欄位塞一個假 token 字串 → 遮蔽檢查必須變紅。
 - [~] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
       已用「端點接得上但永不回應」代替（比 stop 更嚴格，stop 是連線被拒的 fast fail）；
@@ -52,6 +55,12 @@
   ③ trace_id 靜默變空抓不到。**裁定**：③ 採納（加了端到端斷言）；① 部分採納（實查後有三個節點
   現在就有程式碼，不是單節點）；② 駁回——判準明寫「只依賴 OTLP、span 照 §58」，自己產 id 等於
   自造協定，但採納它的附帶條件「exporter 必須可缺席」。
+
+- reviewer 第二輪（diff 審查）八點的裁定：②③④⑤⑥⑦⑧ 全採納並在 tick 2 修掉；
+  **① 駁回**——它建議「同一行同時輸出 pino 與 OTel 兩組鍵」，但 cash 2026-09-09 已決定
+  「一種通用格式，消費端做適配，改 aletheia 沒問題」。依相左優先序第一條（使用者既有決策）
+  照決策走；我方改為把 aletheia 需要的三個改動寫成明確接口（見 `docs/observability.md`
+  的「消費端要改什麼」），含部署順序警告。
 
 ### 本輪規範（每個 tick 照這份跑）
 - **reviewer**：預設 `claude -p --model opus`；意見僅參考，決策在執行者。
@@ -84,6 +93,20 @@
 
 - `2026-09-09` **未完的一件**：diff 的反方審查（`claude -p --model opus`）在 tick 1 收工時還沒回，
   下一個 tick 先讀它、有高／中嚴重度就先修再做指標。
+
+- `2026-09-09` tick 2：修掉 diff 審查抓到的七個缺口——
+  ① 預設等級（`RUST_LOG` 沒設時 `from_default_env()` 只留 ERROR，會讓存取記錄整批消失、
+  請求 span 連建都不建）改成程式碼內建 `info,opentelemetry_sdk=warn,opentelemetry_otlp=warn`；
+  ② `SIGTERM` 現在也會觸發收工（原本只等 `ctrl_c()`，容器停服時 flush 根本不跑）；
+  ③ flush 移到 blocking 執行緒，卡住的後端不再佔用 async worker；
+  ④ 502 的原因（DNS／TLS／逾時）帶進 `exception.message`，不再只有一個 `error.type`；
+  ⑤ panic 紀錄加 `exception.stacktrace`（`Backtrace::capture()`，尊重 `RUST_BACKTRACE`）；
+  ⑥ 測試改用與正式版同一份等級過濾器（原本是平行實作，過濾器錯了測試也綠）；
+  ⑦ 修掉兩處講錯的註解／文件（沒設端點時「trace_id 照樣有」是錯的）。
+- `2026-09-09` tick 2：補三條測試——4xx 記成 warning ＋ 穩定錯誤型別、5xx 記成 error ＋ 帶原因、
+  panic 是一行 JSON。連同既有共 10 條。
+- `2026-09-09` tick 2：把 aletheia 端需要的三個改動寫成明確接口（`docs/observability.md`
+  的「消費端要改什麼」），含「先部署程式再改設定」的順序警告——順序反了會讓整個觀測層載入失敗。
 
 ## 已確定不可行
 - **OTLP 用 async HTTP client（`reqwest-client`）**：SDK 的批次處理器跑在自己的 std 執行緒上，
@@ -122,7 +145,15 @@
   ③ 端點接得上但永不回應 → 卡住期間 `/healthz` 仍 200、`/v1/chat/completions` 仍 403，
   收工 flush 逾時並記一筆 error，**七行輸出全部是合法 JSON**。
   → **這證明**匯出通道壞掉不影響資料面；**證明不了**「進行中的串流不中斷」（串流還不存在，W05 才有）。
-- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／7 條測試 0 skipped／
+- **陰性對照（tick 2 的三條，各只紅該紅的）**：① 4xx 改記成 info → 只有
+  `a_rejected_key_is_logged_as_a_warning` 紅；② 拿掉錯誤出口塞進 response 的那一行 →
+  401 與 502 兩條都紅；③ 預設等級改回 `error` → 200 與 401 兩條紅，502 那條仍綠
+  （ERROR 過得去）——這正好說明為什麼光靠 502 的測試抓不到過濾器設錯。
+- **實測（tick 2）**：完全不設 `RUST_LOG` → 存取記錄照樣出現（severity 9）；
+  送 `SIGTERM` → 收工 flush 真的執行，匯出失敗被記成 severity 17（target `opentelemetry_sdk`）；
+  該輪三行輸出全部是合法 JSON。
+  → **這證明**預設等級與停服路徑都會留下紀錄；**證明不了**正式環境的容器停服時序（那是 W19）。
+- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／10 條測試 0 skipped／
   loop 檔／禁用構件／死檔／關卡自測 25 條）。
 
 ## 來源
@@ -147,6 +178,8 @@
 2. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
 3. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
    要一起做陰性對照：假的 traceparent 不能讓請求失敗。
+4. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
+   要照「先程式後設定」的順序做。
 4. **部署後才能做的**：把日誌送進 CloudWatch log group，用
    `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
    ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。

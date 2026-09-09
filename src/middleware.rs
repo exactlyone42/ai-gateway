@@ -66,10 +66,10 @@ async fn record(request: Request, next: Next) -> Response {
 
     let status = response.status();
     let duration = started.elapsed().as_secs_f64();
-    let error_type = response
-        .extensions()
-        .get::<ErrorType>()
-        .map(|error| error.0.to_owned())
+    let failure = response.extensions().get::<ErrorType>().cloned();
+    let error_type = failure
+        .as_ref()
+        .map(|failure| failure.kind.to_owned())
         .unwrap_or_else(|| {
             if status.is_client_error() || status.is_server_error() {
                 status.as_u16().to_string()
@@ -77,6 +77,9 @@ async fn record(request: Request, next: Next) -> Response {
                 String::new()
             }
         });
+    let cause = failure
+        .and_then(|failure| failure.cause)
+        .unwrap_or_default();
 
     let (trace_id, span_id) = logging::current_trace_ids();
 
@@ -96,6 +99,7 @@ async fn record(request: Request, next: Next) -> Response {
                 http.response.status_code = status.as_u16(),
                 http.server.request.duration = duration,
                 error.type = %error_type,
+                exception.message = %cause,
                 "request completed"
             )
         };

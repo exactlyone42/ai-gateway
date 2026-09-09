@@ -37,6 +37,22 @@ use tracing_subscriber::{
 
 const SERVICE_NAME: &str = "agent-pool-gateway";
 
+/// Used when `RUST_LOG` is absent.
+///
+/// `EnvFilter::from_default_env()` defaults to ERROR only
+/// (`tracing-subscriber-0.3.23/src/filter/env/mod.rs:289`), which silently
+/// removes every access log line and disables the request span -- so there
+/// would be no trace ids either, and the output would look perfectly healthy.
+/// The exporter's own failures are kept at WARN: they are the only signal
+/// that traces stop arriving.
+const DEFAULT_FILTER: &str = "info,opentelemetry_sdk=warn,opentelemetry_otlp=warn";
+
+/// The filter both the binary and the tests use, so a test cannot pass
+/// through a level the binary would drop.
+fn filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
+}
+
 /// Installs the subscriber, plus the OTLP span exporter when an endpoint is
 /// configured. Which levels pass still comes from `RUST_LOG`.
 ///
@@ -59,7 +75,7 @@ pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
         .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
 
     tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
+        .with(filter())
         .with(tracing_subscriber::fmt::layer().event_format(OtelJson))
         .with(traces)
         .init();
@@ -88,9 +104,15 @@ fn install_panic_logging() {
             .location()
             .map(|location| format!("{}:{}", location.file(), location.line()))
             .unwrap_or_default();
+        // `capture()` honours `RUST_BACKTRACE`, so the stack is available on
+        // demand and costs nothing otherwise. The default hook is replaced
+        // rather than chained: it writes multi-line plain text, and one such
+        // line makes a consumer treat the whole source as unstructured.
+        let backtrace = std::backtrace::Backtrace::capture().to_string();
         tracing::error!(
             error.type = "panic",
             exception.message = %info.payload_as_str().unwrap_or("<non-string payload>"),
+            exception.stacktrace = %backtrace,
             code.filepath = %location,
             "a thread panicked"
         );
@@ -114,6 +136,10 @@ fn provider_for(
         .build())
 }
 
+/// Boundary: a panic raised inside this formatter would re-enter the hook and
+/// abort the process. That is the price of having panics in the log at all,
+/// and it is cheaper than an unparseable stream.
+///
 /// Ids of the span the caller is inside, or empty strings when there is no
 /// OpenTelemetry context.
 ///
@@ -332,6 +358,7 @@ pub(crate) fn test_subscriber(
 
     let provider = SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
+        .with(filter())
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(OtelJson)
@@ -409,6 +436,43 @@ mod tests {
         assert_eq!(line["error"]["type"], Value::from("upstream_unavailable"));
         // Display-valued fields must not arrive quoted.
         assert_eq!(line["request_id"], Value::from("abc-123"));
+    }
+
+    /// The claim "even a panic is one JSON line" is only worth anything if a
+    /// test reads the bytes. The previous hook is restored afterwards so this
+    /// test does not change how other failures are reported.
+    #[test]
+    fn a_panic_is_one_json_line() {
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(OtelJson)
+            .with_writer(buffer.clone())
+            .finish();
+
+        let previous = std::panic::take_hook();
+        super::install_panic_logging();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = std::panic::catch_unwind(|| panic!("upstream exploded"));
+        });
+        std::panic::set_hook(previous);
+
+        let lines = buffer.lines();
+        let panic_line = lines
+            .iter()
+            .find(|line| line["error"]["type"] == "panic")
+            .unwrap_or_else(|| panic!("no panic line in {lines:?}"));
+
+        assert_eq!(panic_line["severity_number"], Value::from(17));
+        assert_eq!(
+            panic_line["exception"]["message"],
+            Value::from("upstream exploded")
+        );
+        assert!(
+            panic_line["code"]["filepath"]
+                .as_str()
+                .is_some_and(|path| path.contains("logging.rs")),
+            "no location: {panic_line}"
+        );
     }
 
     #[test]

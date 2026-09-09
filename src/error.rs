@@ -18,15 +18,22 @@ pub enum GatewayError {
     ResponseBuild(#[from] axum::http::Error),
 }
 
-/// Carries the error type from the error boundary to the access log, which is
-/// the single place that writes a log line.
-#[derive(Clone, Copy)]
-pub struct ErrorType(pub &'static str);
+/// Carries the failure from the error boundary to the access log, which is the
+/// single place that writes a log line.
+///
+/// The type is a stable identifier; the cause is the sentence a person needs
+/// at 03:00 -- without it a 502 says only "upstream failed", never whether it
+/// was DNS, TLS or a timeout.
+#[derive(Clone)]
+pub struct ErrorType {
+    pub kind: &'static str,
+    pub cause: Option<String>,
+}
 
 impl GatewayError {
     /// Stable identifier for logs and metrics. Never the message text: that
     /// is written for humans and changes without notice.
-    fn error_type(&self) -> &'static str {
+    fn kind(&self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
@@ -34,11 +41,25 @@ impl GatewayError {
             Self::ResponseBuild(_) => "response_build_failed",
         }
     }
+
+    /// Only for the variants that wrap someone else's failure. A rejected key
+    /// or a disallowed model needs no cause: the type says everything, and
+    /// the request that caused it is the caller's own.
+    fn cause(&self) -> Option<String> {
+        match self {
+            Self::Unauthorized | Self::ModelForbidden => None,
+            Self::Upstream(error) => Some(error.to_string()),
+            Self::ResponseBuild(error) => Some(error.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let error_type = self.error_type();
+        let failure = ErrorType {
+            kind: self.kind(),
+            cause: self.cause(),
+        };
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
@@ -50,7 +71,7 @@ impl IntoResponse for GatewayError {
             Json(json!({"error": {"message": self.to_string()}})),
         )
             .into_response();
-        response.extensions_mut().insert(ErrorType(error_type));
+        response.extensions_mut().insert(failure);
         response
     }
 }
