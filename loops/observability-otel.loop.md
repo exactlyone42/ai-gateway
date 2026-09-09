@@ -1,7 +1,9 @@
 # LOOP: observability-otel
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開（開工時建）｜分支 `feature/observability-otel`｜段落 `W07`
+> 卡 待開｜分支 `feature/observability-otel`（未推）｜段落 `W07`
+> 查重（2026-09-09）：`gh issue list` 15 張開放卡無此段落（#19 對到 W02＋W18，見
+> `docs/work-breakdown.md:272`）、`git ls-remote` 無同名遠端分支 → 這段沒有人在做，開新卡。
 
 | 欄位 | 值 |
 | --- | --- |
@@ -42,6 +44,15 @@
 - 現況 `Cargo.toml` 沒有 `opentelemetry` 相關依賴。
 - 規格 §2.3：閘道對可觀測性後端只依賴 OTLP，開發環境可先給 SigNoz compose 因為部署簡單。
 
+### 本輪規範（每個 tick 照這份跑）
+- **reviewer**：預設 `claude -p --model opus`；意見僅參考，決策在執行者。
+- **兩個 review 點**：① 計畫定案（實作前）② `git diff origin/dev...HEAD` 完成後。
+- **守門**：迭代中 `./scripts/check.sh gate`；PR 前 `./scripts/check.sh all`（＝CI 全套）。
+- **記錄五項**（每段落回寫卡面＋這份 loop）：開始時間／做什麼／怎麼解決／怎麼證明解決／耗時。
+- **合併**：AI 可自行合 `dev`；合 `main` 要 CI 全綠 ＋ 本檔完成判準全綠。
+- **外部依賴**：優先自己打通（先實測權限再說沒權限），只有「不可逆且無回滾路徑」才停下來問人。
+- **只做三類**：安全性／必需依賴／最終目標本身。路上看到的其它問題記進「已知」或另開卡，不撿。
+
 ## 已做
 - `2026-09-09` 日誌 wire 格式自己實作（`src/logging.rs`）：一行一個 JSON、severity 出數字、
   點號欄位名做成巢狀物件、沒有值就不輸出該欄位。
@@ -54,7 +65,14 @@
   `docs/engineering-standards.md` §2 的欄位清單改成 semconv 命名。
 
 ## 已確定不可行
-- （待填）
+- **`tracing-bunyan-formatter`**（2026-09-09 實接實測）：level 出數字、欄位扁平這兩點對，
+  但鍵名照呼叫點原樣輸出（要對上 pino 契約就得把 camelCase 寫進程式碼）、`msg` 被硬加
+  `[REQUEST - EVENT]` 前綴（寫死在 formatter，`skip_fields` 改不到）、span 生命週期讓每個請求變 3 行、
+  span 與 event 同名欄位會產生**重複鍵** `{"requestId":"x","requestId":"x"}`。
+- **`tracing_subscriber` 內建 json formatter**：`flatten_event(true)` 能把欄位提到頂層，
+  但 `level` 永遠是字串（`tracing-subscriber-0.3.23/src/fmt/format/json.rs:250`），沒有選項可改成數字。
+- **從 log 推 metric**（CloudWatch metric filter 那條路）：可行但不採用——會把 metric 的正確性
+  綁在 log 文字上，改一句訊息就可能讓告警靜音。服務自己出 OTLP metric。
 
 ## 證據
 - 欄位名與 severity 數值都有本地權威來源：`opentelemetry-proto-0.27.0`
@@ -85,6 +103,15 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
-1. OTLP exporter ＋ span 樹骨架（`trace_id`／`span_id` 進日誌要靠這個）。
-2. 13 個 metric ＋ label 白名單 ＋ cardinality 檢查腳本。
-3. 敏感值遮蔽 ＋ 兩個陰性對照。
+1. **開卡（PAR）＋ 推分支 ＋ 開 draft PR**（base `dev`，標題掛卡號）。理由見標頭查重那段：
+   分支只留在本機，別的 session 會當成沒人做而重做一次。
+2. **OTLP exporter ＋ span 樹骨架**：`opentelemetry`／`opentelemetry-otlp`／`tracing-opentelemetry`
+   進 `Cargo.toml`，span 照規格 §58。完成後 `trace_id`／`span_id` 要出現在日誌
+   （`src/logging.rs` 的 formatter 目前只讀 event 欄位，要一起改成從 span context 取）。
+3. **13 個 metric ＋ label 白名單 ＋ cardinality 檢查腳本**：白名單寫成明文檔，腳本進
+   `./scripts/check.sh`，並補 self-test 兩條斷言（現有 25 條要跟著加）。
+4. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
+5. **陰性對照 2**：`docker stop` OTel collector，進行中的串流不得中斷。
+6. **部署後才能做的**：把日誌送進 CloudWatch log group，用
+   `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
+   ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。
