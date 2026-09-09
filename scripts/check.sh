@@ -6,6 +6,7 @@
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
+#   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
 set -euo pipefail
@@ -256,7 +257,12 @@ case "${1:-gate}" in
   loops)     loops ;;
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
+  secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
-  all|pre-push) fmt_check; clippy_full; test_all; loops; bans; deadfiles; ./scripts/check-selftest.sh ;;
+  all|pre-push)
+    fmt_check; clippy_full; test_all; loops; bans; deadfiles
+    step "log secrets"; ./scripts/check-log-secrets.sh
+    ./scripts/check-selftest.sh
+    ;;
   *) sed -n '2,11p' "$0"; exit 2 ;;
 esac

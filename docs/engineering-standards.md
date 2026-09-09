@@ -23,13 +23,14 @@
 | `loops` | loop 檔八段落、主體 200 行、必須進索引 | 改 loop 檔後 |
 | `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label、camelCase | 每次 |
 | `deadfiles` | 沒有任何 `mod` 走得到的 `.rs`（＝cargo 根本沒編譯它） | 每次 |
-| `selftest` | **證明上面那些關卡真的抓得到東西**（25 條斷言，含正對照） | 改 `check.sh` 後 |
-| `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `selftest` | **PR 前、合併前** |
+| `secrets` | **起服務跑一輪，掃它印出來的每一行**：金鑰／prompt／PII 都不得出現 | PR 前（`all` 會跑） |
+| `selftest` | **證明上面那些關卡真的抓得到東西**（27 條斷言，含正對照） | 改 `check.sh` 後 |
+| `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `secrets` ＋ `selftest` | **PR 前、合併前** |
 
 ### 關卡自己也要被驗
 
 `./scripts/check-selftest.sh` 對每一條 ban 規則跑兩種 fixture：**該紅的必須紅、該綠的必須綠**，
-並且宣告 `EXPECTED_ASSERTS=25`——**跑到的斷言數不等於宣告數就直接失敗**。
+並且宣告 `EXPECTED_ASSERTS=27`——**跑到的斷言數不等於宣告數就直接失敗**。
 理由：半途中斷卻印出「0 failed」是最典型的假綠。
 
 加規則時要同時加兩條斷言並更新數字。**改了 `bans` 沒改 self-test，self-test 會紅。**
@@ -157,8 +158,15 @@ migration、設定檔、測試 fixture、文件。非測試程式碼命中即紅
 Provider API secret、閘道金鑰（明文或雜湊）、密碼、access token、
 完整 request／response body、PII（姓名／email／電話）。
 
-驗收動作：跑一次 W18 的故障注入場景，把 log 輸出過一遍遮蔽檢查。
-**陰性對照**：在日誌欄位塞一個假 token 字串，遮蔽檢查必須變紅。
+機器檢查：`./scripts/check.sh secrets`。它**起一個真的服務**、用哨兵值當金鑰與 prompt 打四種請求，
+再掃它印出來的每一行——靜態 grep 答不了這個問題，會漏的是「執行期才出現的值透過沒人想到的欄位流出去」。
+
+**陰性對照（兩層，都實測過）**：① `./scripts/check-log-secrets.sh --selftest` 往輸出塞一行含哨兵值的
+紀錄，掃描器必須變紅（證明掃描器不是橡皮圖章）；② 真的把 `authorization` 標頭記進日誌，
+檢查必須變紅——實測 2026-09-09 兩層都紅，而且抓到的是對的那幾行。
+
+**邊界**：這個關卡只掃**日誌**。送去 OTLP 的 span／metric payload 沒掃（要架接收端），
+2026-09-09 手動驗過一次是乾淨的（span 全用 `#[tracing::instrument(skip_all)]`）。
 
 ---
 

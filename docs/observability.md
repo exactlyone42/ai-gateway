@@ -131,6 +131,24 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 **如果你要自己設 `RUST_LOG`，記得保留 exporter 的 directive。** EnvFilter 一旦有任何 directive
 就不再補預設值（`filter/env/builder.rs:335`），漏掉的話「追蹤送不出去」在正式環境沒人會知道。
 
+## 不記敏感值：用跑起來的服務驗，不是用 grep 驗
+
+`./scripts/check.sh secrets` 起一個真的服務，用哨兵值當閘道金鑰、上游金鑰、prompt 內容與 email，
+打四種請求（免驗證端點、沒帶金鑰、錯金鑰、對金鑰但上游打不通——最後那條會記錯誤原因，
+是最可能夾帶東西的路徑），然後掃它印出來的每一行。任何哨兵值出現即紅。
+
+會漏的東西靜態 grep 抓不到：問題不是「程式碼裡有沒有寫 token」，而是**執行期的值透過沒人想到的
+欄位流出去**（標頭、錯誤訊息、依賴函式庫自己印的東西）。
+
+**兩層陰性對照**：
+1. `--selftest` 往輸出塞一行含哨兵值的紀錄 → 掃描器必須變紅（證明掃描器本身不是橡皮圖章）。
+2. 真的把 `authorization` 標頭記成一個欄位 → 檢查必須變紅。
+
+實測 2026-09-09：兩層都紅，而且指出的是對的那幾行（含「錯的那把金鑰」——被拒絕的 token 一樣不能記）。
+
+**邊界**：只掃日誌。送去 OTLP 的 span／metric payload 不在這個關卡裡；手動驗過一次是乾淨的
+（所有 span 都是 `#[tracing::instrument(skip_all)]`，參數不進 span 欄位）。
+
 ## 消費端（aletheia）要改什麼
 
 閘道這頭已完成，格式不會再改。SRE 觀測層要讀得到，需要三個改動：
@@ -149,7 +167,6 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 
 `principal`（要等 W03 身分）、`gen_ai.request.model`／`gen_ai.system`／`gen_ai.usage.*`
 （要等模型註冊表）、**與規格 §57 的 13 個指標對帳**（清單不在 repo）、
-日誌遮蔽檢查（不記 secret／PII 的機器驗證）、
 以及**接收端的 `traceparent` 傳遞**——目前不讀 Client 送來的 W3C 標頭，每個請求都是新的 trace，
 所以跨系統串不起來（要自己的陰性對照：假的 traceparent 不能讓請求失敗）。
 
@@ -164,6 +181,7 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 | `src/config.rs` | `OTEL_EXPORTER_OTLP_ENDPOINT`（沒設就不裝 exporter） |
 | `src/metrics.rs` | 兩個指標、在處理中的 guard、標籤只用白名單上的 |
 | `scripts/metric-labels.txt` | 標籤白名單（機器檢查讀這份） |
+| `scripts/check-log-secrets.sh` | 起服務、打請求、掃輸出有沒有敏感值（含自我陰性對照） |
 
 ## 實測（2026-09-09）
 

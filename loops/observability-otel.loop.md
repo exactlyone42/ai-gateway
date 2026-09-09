@@ -18,8 +18,8 @@
 任何一次請求都查得到「卡在哪一步、花多久、誰發的」，而且換可觀測性後端不用改閘道程式。
 
 ## 完成判準
-- [ ] 只依賴 OTLP。程式碼不出現 Grafana／Prometheus／Tempo／SigNoz／Datadog 的專屬 API
-      （驗收：`grep -ri` 這些名字只出現在 `deploy/` 與文件）。
+- [x] 只依賴 OTLP。程式碼不出現 Grafana／Prometheus／Tempo／SigNoz／Datadog 的專屬 API。
+      機器檢查：`bans` 第 4 條（字詞邊界比對，`temporary` 不會被誤判），self-test 兩條斷言。
 - [~] span 樹照規格 §58：**四個節點已建**（`gateway.request` → `auth.resolve`／`policy.evaluate`／
       `provider.attempt`）。`token.estimate`／`scheduler.queue`／`router.select` 的程式碼還不存在，
       **不先造空 span**（永遠是空的節點會讓人以為那一步被量過）。等 W10／W12／W13 一起補。
@@ -35,14 +35,15 @@
       `http.response.status_code`／`http.server.request.duration`／`error.type`。
       （`trace_id`／`principal`／`gen_ai.*` 前置條件未到，列在 `docs/observability.md`）
 - [x] 每個錯誤都被記錄：4xx → severity 13、5xx → severity 17，走同一個出口（存取記錄層）。
-- [ ] **禁止記錄**：Provider secret、閘道金鑰、密碼、access token、完整 request／response body、
-      PII。驗收：一個掃 log 輸出的檢查（見陰性對照）。
+- [x] **禁止記錄**：Provider secret、閘道金鑰、密碼、access token、完整 request／response body、
+      PII。`./scripts/check.sh secrets` 起真的服務、用哨兵值打四種請求、掃它印出來的每一行。
 - [x] OTel 後端不可用時，資料面不受影響（規格 §63）。三種情境實測，見「證據」。
 - [x] 日誌每一行都是合法 JSON，連 panic 也是（一行非 JSON 就會讓消費端對整個來源退回文字解析）。
       測試：`logging::tests::a_panic_is_one_json_line`。
 - [x] 4xx 記 warning、5xx 記 error，各帶穩定的 `error.type`；5xx 另帶原因。
       測試：`routes::tests::a_rejected_key_is_logged_as_a_warning`／`an_unreachable_upstream_is_logged_with_its_cause`。
-- [ ] **陰性對照 1**：故意在日誌欄位塞一個假 token 字串 → 遮蔽檢查必須變紅。
+- [x] **陰性對照 1**：故意在日誌欄位塞一個假 token 字串 → 遮蔽檢查必須變紅。**做了兩層**：
+      掃描器自我對照（`--selftest`）＋ 真的把 `authorization` 標頭記進日誌。兩層都紅（見「證據」）。
 - [~] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
       已用「端點接得上但永不回應」代替（比 stop 更嚴格，stop 是連線被拒的 fast fail）；
       **真正的串流還不存在**（現況是整包轉發），要等 W05 才驗得到「進行中的串流不中斷」。
@@ -121,7 +122,15 @@
   否則那條 fixture 會被新規則絆倒、證明不了原本要證明的事。
 - `2026-09-09` tick 3：`SIGTERM` 收工時追蹤與指標都會 flush，失敗各自記一筆並標明是哪個信號。
 
+- `2026-09-09` tick 4：加 `./scripts/check.sh secrets`——`scripts/check-log-secrets.sh` 起真的服務、
+  用哨兵值當閘道金鑰／上游金鑰／prompt／email，打四種請求（含「對金鑰但上游打不通」，
+  那條會記錯誤原因，是最可能夾帶東西的路徑），再掃它印出來的每一行；順便驗每行都是合法 JSON。
+  進了 `all`（CI 會跑），並在 `docs/engineering-standards.md` §2 把原本的「驗收動作」換成這個關卡。
+
 ## 已確定不可行
+- **靜態 grep 當遮蔽檢查**：要抓的不是「程式碼裡有沒有寫 token」，而是執行期的值透過沒人想到的
+  欄位流出去（標頭、錯誤訊息、依賴自己印的東西）。實測 tick 4：把 `authorization` 標頭記成一個欄位，
+  grep 類關卡全綠，只有跑起來掃輸出的檢查會紅。
 - **OTLP 用 async HTTP client（`reqwest-client`）**：SDK 的批次處理器跑在自己的 std 執行緒上，
   沒有 Tokio reactor → 該執行緒 **panic**（`there is no reactor running`），之後 span 全丟，
   而且 panic 訊息是三行純文字直接汙染日誌串流（2026-09-09 實測）。要用 `reqwest-blocking-client`。
@@ -172,6 +181,13 @@
   指標裡有兩個指標名與四個白名單標籤，**沒有** `request_id`／`trace_id`／`span_id`／`exception.message`。
   → **這證明** cardinality 規則在送出的資料上成立，不只是程式碼看起來對；
   **證明不了**指標的數值正確（沒有解 protobuf 比對數字），也證明不了 §57 的 13 個都齊。
+- **陰性對照（遮蔽，tick 4 兩層）**：① `--selftest` 往輸出塞一行含哨兵值的紀錄 → 掃描器變紅；
+  ② 真的把 `authorization` 標頭記成欄位 → 檢查變紅，而且同時抓出「對的金鑰」與「被拒絕的那把錯金鑰」
+  （被拒絕的 token 一樣不能記）。還原後綠。
+  → **這證明**掃描器不是橡皮圖章、而且真的攔得住一次程式碼層的洩漏；
+  **證明不了** OTLP payload 乾淨（那不在關卡裡，只手動驗過一次）。
+- **實測（tick 4，額外）**：用哨兵金鑰與哨兵 prompt 跑一輪並收下 OTLP payload，
+  traces 與 metrics 兩個 payload 都不含四個哨兵值中的任何一個（span 全是 `skip_all`）。
 - 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／10 條測試 0 skipped／
   loop 檔／禁用構件／死檔／關卡自測 25 條）。
 
@@ -188,13 +204,12 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
-1. **敏感值遮蔽 ＋ 陰性對照 1**：掃 log 輸出的檢查；在欄位塞假 token 必須變紅。
-2. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
+1. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
    要一起做陰性對照：假的 traceparent 不能讓請求失敗。
-3. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
+2. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
    要照「先程式後設定」的順序做。
-4. **部署後才能做的**：把日誌送進 CloudWatch log group，用
+3. **部署後才能做的**：把日誌送進 CloudWatch log group，用
    `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
    ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。
-5. **等別的段落**（含規格 §57 的 13 個指標對帳，要 cash 提供清單）：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
+4. **等別的段落**（含規格 §57 的 13 個指標對帳，要 cash 提供清單）：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
    串流不中斷的陰性對照（W05）、`principal`（W03）、`gen_ai.*`（W10）。
