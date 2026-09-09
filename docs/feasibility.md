@@ -2,8 +2,14 @@
 
 **問題**：這個閘道最終真的做得出來嗎？
 
-**結論：做得出來。** 核心路徑（Claude Code、Codex CLI）不但可行，還有**官方明文規範的相容契約**
-可以照著實作，不需要任何非官方手段。三個 Client 目前列為待查／不支援，但**不阻塞**整體架構。
+**結論：做得出來。** 核心路徑（Claude Code、Codex CLI、**VS Code**）都可行，
+而且 Claude Code 那條還有**官方明文規範的相容契約**可以照著實作，不需要任何非官方手段。
+
+三個 Client 支援（Claude Code、Codex CLI、VS Code）、一個 pending（Claude Desktop）、
+一個受阻於架構而非協定（Cursor）、一個不支援（Codex Desktop／IDE）。**都不阻塞整體架構。**
+
+**額外收穫**：VS Code 的 Custom Endpoint 可以直接講 Anthropic Messages
+→ W05 做完就同時通 Claude Code 與 VS Code 兩個 Client。
 
 查證日期：**2026-09-08**。Claude Code 本機版本 `2.1.263`，Codex CLI 本機版本 `0.153.0`。
 
@@ -152,10 +158,33 @@ compatibility isn't guaranteed」。
 **處置**：列為 `pending`。要支援就得先跑一個 Claude apps gateway 抓 `GET /protocol`，成本與
 維護風險都要另外評估。**不阻塞其它段落。**
 
-### VS Code、Cursor、Codex Desktop／IDE — **待查**
+### VS Code（Copilot Chat）— **supported**（聊天／agent 面）
 
-`未查證`。子 Agent 查證中，結果進 `docs/client-compatibility.md`。
-規格 §6 的處置原則：不支援就標 unsupported，**不硬 hack**（不做 TLS 中間人、不改執行檔）。
+自行覆核官方文件（2026-09-08）：Custom Endpoint provider 支援
+**`"chat-completions"` / `"responses"` / `"messages"` 三種 apiType**，可按 provider 或按 model 指定。
+
+> 「The Custom Endpoint provider lets you connect any compatible API endpoint to chat in VS Code.
+> It supports three API types... Chat Completions, Responses, and the Anthropic Messages API.」
+> 「BYOK models work without signing into a GitHub account and without a Copilot plan.」
+> — <https://code.visualstudio.com/docs/agent-customization/language-models>
+
+**這件事的份量**：VS Code 可以直接講 Anthropic Messages → **W05 做完就同時通兩個 Client**。
+**限制**：只作用在聊天與工具類任務；程式碼補全、語意搜尋、embeddings 仍需 GitHub 帳號。
+組織管理者可以在 GitHub.com 關掉 BYOK 政策。
+
+### Cursor — **partial，而且架構上最弱**
+
+證據等級低（子 Agent 轉述，未自行覆核）。BYOK 只列五家 Provider，自訂 base URL 查不到官方來源。
+
+**真正的問題不是協定**：官方說請求會「routed through Cursor's servers for final prompt building」。
+如果請求要經過 Cursor 的伺服器，我們的閘道就得**從 Cursor 的機房連得到**——等於要對外曝露，
+跟「閘道放私有網段、port 綁 `127.0.0.1`」直接衝突。**這點解不掉，Cursor 就不列入支援。**
+
+### Codex Desktop／IDE 擴充 — **unsupported**
+
+證據等級低：依據是 vendor repo 的 issue（`openai/codex#15364` 被 OpenAI 成員以「upvote 不足」
+關閉，另有三張「Desktop／擴充忽略 config.toml」仍開著），**不是官方文件**。
+issue 關閉是駁回請求，不等於描述現行行為。Codex **CLI** 那條路已經通，不阻塞。
 
 ---
 
@@ -272,7 +301,9 @@ gateway.yaml` 就能跑。
 | 1 | Claude Code 走自架閘道 | **不是**。官方明文支援，且有實作契約 |
 | 2 | Codex CLI 走自架閘道 | **不是**。官方支援，但只有 `responses` 一種 wire 協定 |
 | 3 | Claude Desktop | **不是**（不阻塞）。要走 Claude apps gateway 協定，列 pending |
-| 4 | VS Code／Cursor | **不是**（不阻塞）。待查，不支援就標 unsupported |
+| 4 | VS Code | **不是**。官方支援 Custom Endpoint，且可講 Anthropic Messages |
+| 4b | Cursor | **不是**（不阻塞）。卡在「請求經過 Cursor 伺服器」＝閘道要對外曝露，不是協定問題 |
+| 4c | Codex Desktop／IDE | **不是**（不阻塞）。無官方支援，記 unsupported；Codex CLI 那條已通 |
 | 5 | 跨 Provider 給 Claude Code 用非 Claude 模型 | **不是 blocker，但是風險**。Anthropic 明文不支援，W15 要標註 |
 | 6 | 訂閱席次轉 API credit | **不做**。官方規則就是分開計費，本專案從一開始就不碰 |
 | 7 | 取消後上游是否停止計費 | **不是 blocker**。閘道盡力關連線，不宣稱 Provider 行為 |

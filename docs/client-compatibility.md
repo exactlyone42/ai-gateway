@@ -18,9 +18,9 @@
 | Claude Code CLI | **supported** | `ANTHROPIC_BASE_URL` | Anthropic Messages | 待做（W05） |
 | Codex CLI | **supported** | `~/.codex/config.toml` 的 `model_providers` | OpenAI Responses | 待做（W06） |
 | Claude Desktop | **pending** | 只有 Claude apps gateway 的 `/user/bootstrap` 協定 | 該協定自有格式 | — |
-| VS Code（Copilot Chat） | `未查證` | — | — | — |
-| Cursor | `未查證` | — | — | — |
-| Codex Desktop／IDE | `未查證` | — | — | — |
+| VS Code（Copilot Chat） | **supported**（聊天／agent 面） | `chatLanguageModels.json` 的 Custom Endpoint | Chat Completions／Responses／**Anthropic Messages** 三選一 | 待做 |
+| Cursor | **partial**（證據等級低） | BYOK 只列五家；自訂 base URL 無官方文件 | — | — |
+| Codex Desktop／IDE | **unsupported**（證據等級低） | 無官方文件 | — | — |
 | 自建 Agent／自動化 Agent | **supported** | 自己設 base URL | 任一支援的協定 | 待做 |
 | 本機 LLM 前端 | **supported** | OpenAI 相容 base URL | Chat Completions | 待做 |
 
@@ -110,11 +110,49 @@ wire_api = "responses"
 | 處置 | 列 pending。要支援得先跑一個 Claude apps gateway 抓 `GET /protocol`，成本與維護風險另評。**不阻塞其它段落** |
 | official_source | <https://code.claude.com/docs/en/claude-apps-gateway> |
 
-## VS Code（Copilot Chat）／ Cursor ／ Codex Desktop
+## VS Code（Copilot Chat）
 
-`未查證`。查證中，結果補上後才寫結論。
+| 欄位 | 值 |
+| --- | --- |
+| 狀態 | **supported**（聊天與 agent 面；程式碼補全不適用） |
+| verification_date | 2026-09-08（官方文件原文，自行覆核） |
+| custom_endpoint | `chatLanguageModels.json` 的 **Custom Endpoint** provider。UI：Chat: Manage Language Models → Add Models → Custom Endpoint |
+| protocol | **三選一，可按 provider 或按 model 指定**：`"chat-completions"`（預設）／`"responses"`／`"messages"` |
+| authentication | 設定檔的 `apiKey` |
+| 設定欄位 | provider 層：`vendor`／`apiKey`／`apiType`／`url`；model 層：`id`／`name`／`url`／`toolCalling`／`vision`／`maxInputTokens`／`maxOutputTokens` |
+| seat_subscription_behavior | 「BYOK models work without signing into a GitHub account and without a Copilot plan.」→ **不吃 Copilot 方案**，計費落在我們的 Provider 憑證 |
+| known_limitations | 只作用在聊天與工具類任務。官方原文：「Some features still require a GitHub account: semantic search, inline suggestions (code completions), and features that rely on embeddings.」另外組織管理者可以在 GitHub.com 的 Copilot 政策關掉「Bring Your Own Language Model Key in VS Code」 |
+| official_source | <https://code.visualstudio.com/docs/agent-customization/language-models> |
 
-**不要因為某個 Client 的 model picker 不顯示自訂模型就寫「閘道不支援」** —— 那是 UI 的事。
+**這件事的份量**：VS Code 可以**直接講 Anthropic Messages**。也就是 W05 做完，
+Claude Code 與 VS Code 兩個 Client 同時就通了，不必等 W06。
+**證明不了**：實際往返（未實測），以及 `apiType` 是否只有這三個值——
+官方頁面列了三個，我沒看到原始 JSON schema。
+
+## Cursor
+
+| 欄位 | 值 |
+| --- | --- |
+| 狀態 | **partial**，而且是架構上最弱的一個 |
+| verification_date | 2026-09-08 |
+| 證據等級 | **低——子 Agent 轉述，我未自行覆核官方頁面。引用前請先驗。** |
+| BYOK | 官方只列五家：OpenAI／Anthropic／Google／Azure OpenAI／AWS Bedrock。設定在 Cursor Settings > Models |
+| 自訂 base URL | **查不到官方來源**。有社群提到的「Override OpenAI Base URL」，但沒有官方文件 → 記 `unknown`，不當成支援 |
+| known_limitations | ①「Custom API keys only work with chat models. Tab completion continues using Cursor's built-in models.」② 請求「routed through Cursor's servers for final prompt building」 |
+| **對我們的真正影響** | 第 ② 點是關鍵：如果請求要經過 Cursor 的伺服器，那我們的閘道就得**從 Cursor 的機房連得到**——等於要對外曝露。這跟「Docker port 綁 `127.0.0.1`」「閘道放私有網段」直接衝突。**在解掉這點以前，Cursor 不列入支援。** |
+| official_source | <https://cursor.com/help/models-and-usage/api-keys>（未自行覆核） |
+
+## Codex Desktop／IDE 擴充
+
+| 欄位 | 值 |
+| --- | --- |
+| 狀態 | **unsupported** |
+| verification_date | 2026-09-08 |
+| 證據等級 | **低**。依據是 vendor repo 的 issue，不是官方文件：`openai/codex#15364`「Support custom provider in app」被 OpenAI 成員於 2026-05-10 以「upvote 不足」關閉；另有 #4558／#6963／#14133 回報「擴充／Desktop 忽略 `config.toml`」仍開著 |
+| 邊界 | **issue 關閉是「駁回一個請求」，不是「描述現行行為」**；issue 內文是使用者回報，不是官方聲明。「查不到文件」比「文件明文否認」弱。也未在本機實測 |
+| 處置 | 記 unsupported，不阻塞。Codex **CLI** 可用，那條路已經通 |
+
+**通則：不要因為某個 Client 的 model picker 不顯示自訂模型就寫「閘道不支援」** —— 那是 UI 的事。
 
 ## 自建 Agent、自動化 Agent、本機 LLM 前端
 
