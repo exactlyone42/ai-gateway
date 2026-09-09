@@ -14,9 +14,14 @@
 
 use std::fmt;
 
-use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+use axum::http::HeaderMap;
+use opentelemetry::{
+    Context,
+    propagation::{Extractor, Injector},
+    trace::{TraceContextExt, TracerProvider as _},
+};
 use opentelemetry_otlp::WithExportConfig as _;
-use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use serde_json::{Map, Value};
 use tracing::{
     Event, Level, Subscriber,
@@ -81,6 +86,7 @@ pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
         .init();
 
     install_panic_logging();
+    install_propagator();
 
     if let Some(reason) = failure {
         tracing::error!(
@@ -90,6 +96,17 @@ pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
         );
     }
     provider
+}
+
+/// W3C `traceparent`, so a caller's trace continues through the gateway
+/// instead of restarting at it.
+///
+/// Called by both `init()` and the test subscriber: when it lived only in
+/// `init()`, propagation worked in the binary and silently did nothing in
+/// tests -- the same "tests exercise a parallel setup" trap that hid the
+/// filter default earlier.
+fn install_propagator() {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 }
 
 /// Turns a panic into one JSON log line.
@@ -140,6 +157,51 @@ fn provider_for(
 /// abort the process. That is the price of having panics in the log at all,
 /// and it is cheaper than an unparseable stream.
 ///
+/// The trace the caller says this request belongs to, or an empty context.
+///
+/// A malformed header yields an empty context rather than an error: the
+/// caller's tracing being broken is not a reason to refuse their request.
+pub fn parent_context(headers: &HeaderMap) -> Context {
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&FromHeaders(headers))
+    })
+}
+
+/// Writes this request's trace into outgoing headers, so the provider call
+/// shows up as part of the same trace rather than as an orphan.
+pub fn inject_context(headers: &mut HeaderMap) {
+    let context = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut IntoHeaders(headers));
+    });
+}
+
+struct FromHeaders<'a>(&'a HeaderMap);
+
+impl Extractor for FromHeaders<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(axum::http::HeaderName::as_str).collect()
+    }
+}
+
+struct IntoHeaders<'a>(&'a mut HeaderMap);
+
+impl Injector for IntoHeaders<'_> {
+    /// A value that cannot become a header is dropped: a trace header is not
+    /// worth failing a request for.
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(name) = axum::http::HeaderName::try_from(key)
+            && let Ok(value) = axum::http::HeaderValue::try_from(value)
+        {
+            self.0.insert(name, value);
+        }
+    }
+}
+
 /// Ids of the span the caller is inside, or empty strings when there is no
 /// OpenTelemetry context.
 ///
@@ -356,6 +418,7 @@ pub(crate) fn test_subscriber(
 ) -> (impl tracing::Subscriber + Send + Sync, SdkTracerProvider) {
     use opentelemetry::trace::TracerProvider as _;
 
+    install_propagator();
     let provider = SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
         .with(filter())

@@ -130,6 +130,50 @@ mod tests {
         (status, access)
     }
 
+    /// A caller's trace must continue through the gateway. Without this, one
+    /// request crossing two services looks like two unrelated requests, and
+    /// the id the caller quotes in a ticket finds nothing here.
+    #[tokio::test]
+    async fn an_incoming_trace_is_continued() {
+        let incoming = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let (status, access) = access_line(
+            Request::builder()
+                .uri("/healthz")
+                .header("traceparent", format!("00-{incoming}-00f067aa0ba902b7-01"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            access["trace_id"], incoming,
+            "the caller's trace was not continued: {access}"
+        );
+    }
+
+    /// A caller whose tracing is broken still gets served, and still gets a
+    /// trace of their own -- refusing the request, or leaving it untraced,
+    /// would both be worse than ignoring the bad header.
+    #[tokio::test]
+    async fn a_malformed_traceparent_is_ignored() {
+        let (status, access) = access_line(
+            Request::builder()
+                .uri("/healthz")
+                .header("traceparent", "not-a-trace-parent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            access["trace_id"].as_str().unwrap_or_default().len(),
+            32,
+            "no trace of its own: {access}"
+        );
+    }
+
     /// A rejected key must be visible as a warning with a stable identifier.
     /// It carries no cause: the type says everything, and the request that
     /// caused it belongs to the caller.

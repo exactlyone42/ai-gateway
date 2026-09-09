@@ -143,6 +143,13 @@
   順序在程式碼上看得見，測試可注入自己的 reader。
 - `2026-09-09` tick 5：測試 10 → 12 條，self-test 27 → 29 條。
 
+- `2026-09-09` tick 6：`traceparent` 雙向接上——收到就接續那條 trace（壞的直接忽略，不影響請求），
+  往上游的呼叫也帶上，所以 provider 慢是同一條 trace 裡的一段而不是空白。
+  實測：送進 `00-4bf92f…4736-…`，閘道紀錄的 `trace_id` 就是它，假裝是上游的服務收到同一個 trace、
+  新的 span id。
+- `2026-09-09` tick 6：**測試又抓到一次「測試走平行組態」**——propagator 原本只裝在 `init()`，
+  測試的 subscriber 沒裝，於是「延續 trace」在正式版會動、在測試裡靜靜地不動。改成兩邊共用一個函式。
+
 ## 已確定不可行
 - **靜態 grep 當遮蔽檢查**：要抓的不是「程式碼裡有沒有寫 token」，而是執行期的值透過沒人想到的
   欄位流出去（標頭、錯誤訊息、依賴自己印的東西）。實測 tick 4：把 `authorization` 標頭記成一個欄位，
@@ -209,7 +216,9 @@
   拿掉 `Drop` 裡的存取紀錄 → `a_dropped_scope_is_still_recorded_as_cancelled` 紅（`left no access log line: []`）。
   → **這證明**新規則與新測試都咬得住；**過程中也證明了一件事**：第一次注入時我寫的 pattern 沒有命中，
   測試照樣綠——**沒生效的注入產生的綠燈不是證據**，要先確認 diff 真的變了。
-- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／12 條測試 0 skipped／
+- **陰性對照（tick 6）**：拿掉 `span.set_parent(parent)` → 只有 `an_incoming_trace_is_continued` 紅，
+  其餘 13 條綠（含「壞的 traceparent 要被忽略」那條，證明它測的是另一件事）。
+- 關卡：`./scripts/check.sh all` 全綠（fmt／clippy --all-targets／14 條測試 0 skipped／
   loop 檔／禁用構件／死檔／關卡自測 25 條）。
 
 ## 來源
@@ -225,12 +234,10 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
-1. **接收端 `traceparent` 傳遞**：現在不讀 Client 送來的 W3C 標頭，每個請求都是新 trace，跨系統串不起來。
-   要一起做陰性對照：假的 traceparent 不能讓請求失敗。
-2. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
+1. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
    要照「先程式後設定」的順序做。
-3. **部署後才能做的**：把日誌送進 CloudWatch log group，用
+2. **部署後才能做的**：把日誌送進 CloudWatch log group，用
    `{ $.severity_number >= 17 || $.http.response.status_code >= 500 }` 實跑一次
    ——目前只用 `jq` 驗過結構，AWS filter pattern 的語意未驗證。
-4. **等別的段落**（含規格 §57 的 13 個指標對帳，要 cash 提供清單）：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
+3. **等別的段落**（含規格 §57 的 13 個指標對帳，要 cash 提供清單）：`token.estimate`／`scheduler.queue`／`router.select` 三個 span（W10／W12／W13）、
    串流不中斷的陰性對照（W05）、`principal`（W03）、`gen_ai.*`（W10）。

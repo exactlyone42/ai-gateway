@@ -7,6 +7,7 @@ use axum::{
 };
 
 use tracing::Instrument as _;
+use tracing_opentelemetry::{OpenTelemetrySpanExt as _, SetParentError};
 
 use crate::{
     auth,
@@ -43,8 +44,28 @@ pub async fn access_log(
     next: Next,
 ) -> Response {
     // The span is what gives the request its trace id; everything below runs
-    // inside it, so the handlers' own spans become its children.
+    // inside it, so the handlers' own spans become its children. If the caller
+    // sent a `traceparent`, this span joins that trace instead of starting a
+    // new one -- otherwise a request that crosses two services looks like two
+    // unrelated requests.
+    let parent = logging::parent_context(request.headers());
     let span = tracing::info_span!("gateway.request");
+    // `LayerNotFound` and `SpanDisabled` mean tracing is simply not
+    // installed or not sampled -- both are deployment choices, and logging
+    // them would put a line on every request. Anything else is a real
+    // failure to continue the caller's trace and must not pass silently.
+    if let Err(error) = span.set_parent(parent)
+        && !matches!(
+            error,
+            SetParentError::LayerNotFound | SetParentError::SpanDisabled
+        )
+    {
+        tracing::warn!(
+            error.type = "trace_parent_not_applied",
+            exception.message = ?error,
+            "the caller's trace was not continued"
+        );
+    }
     record(state, request, next).instrument(span).await
 }
 

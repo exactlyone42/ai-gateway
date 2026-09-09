@@ -73,6 +73,18 @@ gateway.request                 存取記錄層（src/middleware.rs）
 每個 span 都用 `#[tracing::instrument(skip_all)]`。`skip_all` 不是風格選擇：
 `authorize` 的參數帶著呼叫者的金鑰、`forward` 的參數帶著 prompt，span 欄位跟日誌欄位一樣會被寫出去。
 
+### 跨系統：`traceparent` 進來也出去
+
+Client 送 W3C `traceparent` 時，這個請求會**接續**那條 trace，而不是自己開一條——否則一個
+跨兩個服務的請求在畫面上是兩件不相關的事，而使用者回報時引用的那個編號在這裡查不到。
+往上游的呼叫也會帶上 `traceparent`，所以 provider 慢是同一條 trace 裡的一段，不是一個空白。
+
+壞的 `traceparent` 直接忽略：呼叫方的追蹤壞掉不是拒絕他請求的理由。它會拿到自己的新 trace。
+
+實測 2026-09-09：送 `00-4bf92f3577b34da6a3ce929d0e0e4736-…`，閘道紀錄的 `trace_id` 就是它，
+而假裝是上游的服務收到 `00-4bf92f3577b34da6a3ce929d0e0e4736-7b76c6fb858460d3-01`
+（同一個 trace、新的 span）。
+
 ### exporter 是可缺席的
 
 `OTEL_EXPORTER_OTLP_ENDPOINT` 沒設 → 完全不裝 exporter，**連 tracer provider 都沒有，所以日誌也沒有
@@ -177,8 +189,7 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 
 `principal`（要等 W03 身分）、`gen_ai.request.model`／`gen_ai.system`／`gen_ai.usage.*`
 （要等模型註冊表）、**與規格 §57 的 13 個指標對帳**（清單不在 repo）、
-以及**接收端的 `traceparent` 傳遞**——目前不讀 Client 送來的 W3C 標頭，每個請求都是新的 trace，
-所以跨系統串不起來（要自己的陰性對照：假的 traceparent 不能讓請求失敗）。
+以及正式環境把日誌送進 CloudWatch 後的 filter pattern 實跑。
 
 ## 檔案地圖
 
