@@ -28,7 +28,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         ));
 
     Router::new()
-        .route("/healthz", get(health::handle))
+        // `/healthz` is the name the old single endpoint had. Keeping it as
+        // an alias means existing callers do not break on this change.
+        .route("/healthz", get(health::live))
+        .route("/health", get(health::live))
+        .route("/ready", get(health::ready))
         .merge(authenticated)
         .with_state(state.clone())
         // Innermost first: the access log needs the id already set and the
@@ -54,7 +58,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::router;
-    use crate::{config::Config, logging, state::AppState};
+    use crate::{config::Config, db, logging, state::AppState};
 
     fn test_config() -> Config {
         Config {
@@ -64,7 +68,20 @@ mod tests {
             bootstrap_client_key: "client-key".to_owned(),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
+            // Port 1 has no listener. The pool is lazy, so building it costs
+            // nothing; any test that actually queries would fail, which is
+            // what we want -- these tests must not depend on a live database.
+            database_url: "postgres://gateway@127.0.0.1:1/gateway".to_owned(),
+            database_max_connections: 1,
         }
+    }
+
+    /// Builds the state these tests share: real router, no live database.
+    fn test_state() -> Arc<AppState> {
+        let config = test_config();
+        let pool = db::pool(&config.database_url, config.database_max_connections)
+            .expect("the test connection string is valid");
+        Arc::new(AppState::new(config, pool))
     }
 
     /// The one failure this guards against is silent: if the access log stops
@@ -76,7 +93,7 @@ mod tests {
         let (subscriber, _provider) = logging::test_subscriber(buffer.clone());
         let guard = tracing::subscriber::set_default(subscriber);
 
-        let state = Arc::new(AppState::new(test_config()));
+        let state = test_state();
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -116,7 +133,7 @@ mod tests {
         let (subscriber, _provider) = logging::test_subscriber(buffer.clone());
         let guard = tracing::subscriber::set_default(subscriber);
 
-        let state = Arc::new(AppState::new(test_config()));
+        let state = test_state();
         let response = router(state).oneshot(request).await.unwrap();
         let status = response.status();
         drop(guard);
@@ -128,6 +145,41 @@ mod tests {
             .unwrap_or_else(|| panic!("no access log line in {lines:?}"))
             .clone();
         (status, access)
+    }
+
+    /// Liveness and readiness must not be the same answer wearing two names.
+    ///
+    /// The test database points at a port nobody listens on, so this is the
+    /// negative control for the split: the dependency is down, and only the
+    /// endpoint that is supposed to notice does.
+    #[tokio::test]
+    async fn readiness_fails_while_liveness_holds_when_the_database_is_down() {
+        for path in ["/health", "/healthz"] {
+            let response = router(test_state())
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{path} must not depend on the database"
+            );
+        }
+
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/ready reported ready with an unreachable database"
+        );
     }
 
     /// A caller's trace must continue through the gateway. Without this, one

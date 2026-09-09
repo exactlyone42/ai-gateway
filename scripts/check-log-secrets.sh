@@ -31,6 +31,20 @@ trap 'rm -f "$log"' EXIT
 
 cargo build --quiet
 
+# The gateway runs its migrations at startup, so booting it for real now needs
+# a real database. Docker does the waiting through the compose health check --
+# a polling loop here would be the wrong shape and would hammer the port.
+if [ -z "${DATABASE_URL:-}" ]; then
+  if ! docker compose -f deploy/docker-compose.yml up -d --wait postgres >/dev/null 2>&1; then
+    echo "cannot start the database, so this check did not run." >&2
+    echo "Start it yourself and set DATABASE_URL, or make docker available." >&2
+    # 3, not 0: "not verified" is not "passed".
+    exit 3
+  fi
+  DATABASE_URL="postgres://gateway:gateway-dev@127.0.0.1:${POSTGRES_PORT:-15432}/gateway"
+fi
+
+DATABASE_URL="$DATABASE_URL" \
 LISTEN_ADDRESS="127.0.0.1:$port" \
 LITELLM_BASE_URL="http://127.0.0.1:1/" \
 LITELLM_MASTER_KEY="$upstream_key" \

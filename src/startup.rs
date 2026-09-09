@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::{config::Config, logging, metrics, routes, state::AppState};
+use crate::{config::Config, db, logging, metrics, routes, state::AppState};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
@@ -12,7 +12,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let traces = logging::init(config.otlp_endpoint.as_deref());
     let meters = metrics::init(config.otlp_endpoint.as_deref());
     let address = config.listen_address;
-    let state = Arc::new(AppState::new(config));
+
+    // Migrations run before the listener binds. A gateway serving requests
+    // against a half-migrated schema is worse than one that did not start, so
+    // this failure is fatal and says so.
+    let pool = db::pool(&config.database_url, config.database_max_connections)?;
+    db::migrate(&pool).await?;
+    info!("database schema is up to date");
+
+    let state = Arc::new(AppState::new(config, pool));
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "agent pool gateway started");
