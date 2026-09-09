@@ -55,8 +55,19 @@ commands actually exist.
 
 ```bash
 cp .env.example .env
+docker compose -f deploy/docker-compose.yml up -d --wait postgres
 cargo run
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/health   # liveness: the process answers
+curl http://127.0.0.1:8080/ready    # readiness: the database answers too
+```
+
+Migrations run during startup, so a database is required to boot. A failing
+migration stops the process rather than serving against a half-migrated schema.
+
+The whole stack, including the gateway image:
+
+```bash
+docker compose -f deploy/docker-compose.yml up --build
 ```
 
 Never commit real provider credentials or client keys.

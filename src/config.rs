@@ -13,6 +13,13 @@ pub struct Config {
     /// provider at all, so log records carry no `trace_id` either -- only the
     /// request id. Correlating one request across services needs this set.
     pub otlp_endpoint: Option<String>,
+    /// `DATABASE_URL`. Required: the gateway keeps its identities, policies
+    /// and usage ledger here, so starting without one would mean starting
+    /// something that cannot do its job.
+    pub database_url: String,
+    /// `DATABASE_MAX_CONNECTIONS`. Postgres has a global connection ceiling,
+    /// so this is a share of it, not a throughput dial.
+    pub database_max_connections: u32,
 }
 
 #[derive(Debug, Error)]
@@ -21,6 +28,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("invalid LISTEN_ADDRESS: {0}")]
     InvalidAddress(#[from] std::net::AddrParseError),
+    #[error("invalid DATABASE_MAX_CONNECTIONS: {0}")]
+    InvalidPoolSize(#[from] std::num::ParseIntError),
 }
 
 impl Config {
@@ -46,6 +55,11 @@ impl Config {
             .map(|value| value.trim().trim_end_matches('/').to_owned())
             .filter(|value| !value.is_empty());
 
+        let database_url = required("DATABASE_URL")?;
+        let database_max_connections = env::var("DATABASE_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "10".to_owned())
+            .parse()?;
+
         Ok(Self {
             listen_address,
             litellm_base_url,
@@ -53,6 +67,8 @@ impl Config {
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,
+            database_url,
+            database_max_connections,
         })
     }
 }
