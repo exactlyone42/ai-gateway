@@ -56,6 +56,8 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
   application request ID 只用於 trace／用量／重試／稽核／除錯。
 - 規格 §40：已開始串流之後不得無腦重試（已產生 token 成本、工具可能有副作用）。
 
+- W07 移交（2026-09-09）：`docs/observability.md` 的「陰性對照 2」需要真的長命串流才驗得到（`docker stop` OTel collector 時串流不得中斷）。這一段做出串流後要把那條對照補上。
+
 ## 已做
 - （待填）
 

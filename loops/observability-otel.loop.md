@@ -7,7 +7,7 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中（日誌完成，metric／trace 未開始） |
+| 狀態 | 可做的都完成；三條判準已移交（見「下一步」） |
 | 優先度 | P1 |
 | 前置 | `workspace-foundation` |
 | 開始 | 2026-09-09 |
@@ -150,6 +150,10 @@
 - `2026-09-09` tick 6：**測試又抓到一次「測試走平行組態」**——propagator 原本只裝在 `init()`，
   測試的 subscriber 沒裝，於是「延續 trace」在正式版會動、在測試裡靜靜地不動。改成兩邊共用一個函式。
 
+- `2026-09-09` tick 6 的**自己犯的錯**：我用 `grep` 看 `check.sh all` 的輸出來判斷有沒有過，
+  grep 有命中就回 0，於是 clippy 紅的情況下 commit 還是跑了。**守門要看結束碼，不是看輸出**。
+  已修並 amend；HEAD 現在用結束碼確認過是綠的。
+
 ## 已確定不可行
 - **靜態 grep 當遮蔽檢查**：要抓的不是「程式碼裡有沒有寫 token」，而是執行期的值透過沒人想到的
   欄位流出去（標頭、錯誤訊息、依賴自己印的東西）。實測 tick 4：把 `authorization` 標頭記成一個欄位，
@@ -234,6 +238,19 @@
 | 缺值 | 不輸出該欄位 | 填空字串／`unknown` | 空值會讀成「這個請求沒有 route」而不是「我們不知道」 |
 
 ## 下一步
+
+**這一段能自己做的都做完了。** 剩下三條判準沒有自助路徑，已寫進擁有它們的 loop 檔：
+
+| 缺什麼 | 為什麼這一段做不到 | 移交去哪 |
+| --- | --- | --- |
+| span 樹的 `token.estimate`／`router.select` | 程式碼不存在 | `loops/model-registry-router.loop.md` |
+| span 樹的 `scheduler.queue` | 程式碼不存在 | `loops/scheduler-admission.loop.md` |
+| 陰性對照 2（串流不中斷） | 現況是整包轉發，沒有長命串流可以中斷 | `loops/anthropic-native.loop.md` |
+| 日誌的 `principal` | 身分模型不存在 | `loops/identity-credential.loop.md` |
+| 規格 §57 的 13 個指標對帳 | **清單不在這個 repo**，只有「13 個」這個數字 | **要 cash 提供清單** |
+
+還沒做但不屬於這一段的：
+
 1. **aletheia 端的三個改動**（另一個 repo、另一張卡）：接口已寫在 `docs/observability.md`，
    要照「先程式後設定」的順序做。
 2. **部署後才能做的**：把日誌送進 CloudWatch log group，用

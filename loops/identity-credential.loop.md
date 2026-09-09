@@ -35,6 +35,8 @@
 - 規格 §13 建議一把金鑰對應單一 Principal，不推薦一把金鑰跨 Mac／Windows／CI／Server。
 - Admin 憑證與 Client API Key 是**兩套語意**，不共用（規格 §14）。這裡只做 Client 側。
 
+- W07 移交（2026-09-09）：日誌缺 `principal` 欄位（誰發的請求）。這一段做出身分解析後，在 `src/middleware.rs` 的存取紀錄補上該欄位。
+
 ## 已做
 - （待填）
 
