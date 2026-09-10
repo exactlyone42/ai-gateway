@@ -32,6 +32,8 @@
 
 ## 已知
 - 現況沒有任何速率或配額控制。
+- W08 擁有 Quota 的 tenant-safe、immutable-version draft CRUD schema；W12 接手啟用、視窗與
+  enforcement，不能另建平行資料表，啟用／換版必須留下 audit。
 - 規格 §30 明確要求「估算 token／分鐘」也要有限制，不只請求數。
 - 規格 §31：soft／hard 的差別由 Admin 設定，不是寫死。
 - 第一版**不做**分散式計數器（規格 §82 禁止 Redis Cluster）。單機做對，測到瓶頸再談。

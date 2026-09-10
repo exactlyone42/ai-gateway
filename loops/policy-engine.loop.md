@@ -34,6 +34,8 @@
 
 ## 已知
 - 現況沒有政策概念，只有一份環境變數模型白名單。
+- W08 擁有 Policy 的 tenant-safe、immutable-version draft CRUD schema；W11 接手啟用與合併行為，
+  不能另建平行資料表，啟用／換版必須留下 audit。
 - 規格 §23 的理由很關鍵：`autocomplete` 是「非常急 ＋ economy」，
   `architecture analysis` 是「不急 ＋ premium」。壓成單一優先權數字就表達不出來。
 - 規格 §26：合併結果要存進請求記錄，否則事後無法解釋。

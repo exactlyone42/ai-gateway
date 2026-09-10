@@ -56,7 +56,36 @@ pub async fn migrate(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
     // schema changes are expand-only, so unknown newer versions are safe to
     // leave in place and must not prevent the old binary from starting.
     migrations.set_ignore_missing(true);
-    migrations.run(pool).await.map_err(DatabaseError::Migrate)
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    let original_timeouts = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false)",
+    )
+    .bind("30s")
+    .bind("5s")
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    let migration_result = migrations.run(&mut *connection).await;
+    let restore_result = sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false)",
+    )
+    .bind(&original_timeouts.0)
+    .bind(&original_timeouts.1)
+    .execute(&mut *connection)
+    .await;
+    migration_result.map_err(DatabaseError::Migrate)?;
+    restore_result
+        .map(|_| ())
+        .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))
 }
 
 /// Answers whether the database can serve a query right now.
@@ -67,5 +96,28 @@ pub async fn is_reachable(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     match tokio::time::timeout(PROBE_TIMEOUT, sqlx::query("SELECT 1").execute(pool)).await {
         Ok(result) => result.map(|_| ()),
         Err(_elapsed) => Err(sqlx::Error::PoolTimedOut),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    async fn startup_migration_path_accepts_the_timeout_configuration(pool: PgPool) {
+        let before = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        super::migrate(&pool).await.unwrap();
+        let after = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
     }
 }

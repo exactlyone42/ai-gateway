@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P0 |
 | 前置 | 無 |
 | 開始 | `2026-09-08T21:50+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T01:57+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -75,6 +75,8 @@
   「等於公開」絕對句。精確 capture 也推翻舊的 GET models／全 function tools 敘述，已刪除。
 - `2026-09-11` PR 級檢查：69 lib＋2 schema＝71 passed、0 failed、0 ignored；29/29 gate
   selftests；client capture schema、log secrets、loops、bans、deadfiles 全綠。
+- `2026-09-11` PR #33 合進 `dev`（merge `38d2e103c6cbd78f4a8658f1ecafc4cab9798363`）；
+  CI `rust` 與兩個 board sync 共 3/3 completed success，W01 收工。
 
 ## 已確定不可行
 - **Claude Desktop 用 `ANTHROPIC_BASE_URL`**：Desktop 走的是 Claude apps gateway 的
@@ -109,6 +111,8 @@
   `unapproved fields: ['authorization']` 變紅；還原後通過。
 - harness 安全陰性對照：缺 mutation flag 與帶 `production` DB 名稱各自 exit 2，均在啟動
   mock／gateway 前停止；證明文件提醒已變成程式守門，不會誤連正式 DB。
+- GitHub PR #33 的 merge commit 為 `38d2e103c6cbd78f4a8658f1ecafc4cab9798363`；該 PR
+  `rust` CI 與兩個 board sync 均為 `COMPLETED/SUCCESS`。
 
 ## 來源
 - <https://code.claude.com/docs/en/llm-gateway-protocol>（閘道相容契約）2026-09-08
@@ -130,5 +134,5 @@
 | 子 Agent 查證 | 子 Agent 廣搜 → 主 session 覆核關鍵 URL | 主 session 自己全查 | 全查會把數十頁文件讀進主 context；但「其它 Agent 的報告」不算證據，關鍵條目要自己覆核 |
 
 ## 下一步
-1. 提交、PR、合 `dev`，確認 CI。
-2. Claude apps gateway 採用與否仍是產品範圍決策，不阻塞 W01；Codex UI client 實測可另開卡。
+1. W01 已完成；Claude apps gateway 採用與否仍是產品範圍決策，不阻塞後續段落。
+2. Codex UI client 實測屬後續獨立範圍，不重開 W01。

@@ -85,6 +85,7 @@ for which problem, so you do not have to load everything.
 - `docs/task-ledger.md` — time and token cost per segment, plus trade-offs
 - `docs/architecture.md` — three planes, request path, failure model
 - `docs/security-and-compliance.md` — credential and subscription boundary
+- `docs/admin.md` — Admin authentication, RBAC and control-plane API contract
 - `docs/product-requirements.md` — roles, policies and acceptance criteria
 - `docs/client-compatibility.md` — integration contract by client
 - `docs/operations.md` — rollout and incident controls

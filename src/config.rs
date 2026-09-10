@@ -1,6 +1,12 @@
-use std::{collections::HashSet, env, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
 
@@ -31,6 +37,7 @@ pub struct Config {
     /// `DATABASE_MAX_CONNECTIONS`. Postgres has a global connection ceiling,
     /// so this is a share of it, not a throughput dial.
     pub database_max_connections: u32,
+    pub admin_database_max_connections: u32,
     /// Server-side key for HMAC credential hashes. It never enters the database.
     pub credential_hash_key: Vec<u8>,
     /// Non-secret identifier persisted beside hashes so server keys can overlap.
@@ -41,6 +48,11 @@ pub struct Config {
     pub credential_environment: String,
     pub credential_cache_capacity: usize,
     pub credential_cache_ttl_seconds: u64,
+    pub admin_bootstrap_token: Option<String>,
+    pub admin_bootstrap_tenant_id: Option<Uuid>,
+    pub admin_session_ttl_seconds: u64,
+    pub admin_allowed_origin: Option<String>,
+    pub admin_trusted_proxy_ips: Vec<IpAddr>,
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
@@ -54,6 +66,8 @@ pub enum ConfigError {
     InvalidAddress(#[from] std::net::AddrParseError),
     #[error("invalid DATABASE_MAX_CONNECTIONS: {0}")]
     InvalidPoolSize(#[from] std::num::ParseIntError),
+    #[error("invalid ADMIN_DATABASE_MAX_CONNECTIONS: {0}")]
+    InvalidAdminPoolSize(String),
     #[error("CREDENTIAL_HASH_KEY must contain at least 32 bytes")]
     WeakCredentialHashKey,
     #[error("credential hash key ids must use lowercase ASCII letters, digits or hyphens")]
@@ -82,6 +96,18 @@ pub enum ConfigError {
     InvalidOpenAiRequestLimit(String),
     #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
     InvalidStreamEventLimit(String),
+    #[error("ADMIN_BOOTSTRAP_TOKEN and ADMIN_BOOTSTRAP_TENANT_ID must be configured together")]
+    IncompleteAdminBootstrap,
+    #[error("ADMIN_BOOTSTRAP_TOKEN must contain at least 32 bytes")]
+    WeakAdminBootstrapToken,
+    #[error("invalid ADMIN_BOOTSTRAP_TENANT_ID: {0}")]
+    InvalidAdminBootstrapTenant(String),
+    #[error("invalid ADMIN_SESSION_TTL_SECONDS: {0}")]
+    InvalidAdminSessionTtl(String),
+    #[error("ADMIN_ALLOWED_ORIGIN must be one exact http or https origin without a path")]
+    InvalidAdminOrigin,
+    #[error("invalid ADMIN_TRUSTED_PROXY_IPS: {0}")]
+    InvalidAdminTrustedProxy(String),
 }
 
 impl Config {
@@ -151,6 +177,11 @@ impl Config {
         let database_max_connections = env::var("DATABASE_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "10".to_owned())
             .parse()?;
+        let admin_database_max_connections = env::var("ADMIN_DATABASE_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "2".to_owned())
+            .parse::<u32>()
+            .map_err(|error| ConfigError::InvalidAdminPoolSize(error.to_string()))?;
+        validate_pool_budget(database_max_connections, admin_database_max_connections)?;
         let credential_environment =
             env::var("CREDENTIAL_ENVIRONMENT").unwrap_or_else(|_| "dev".to_owned());
         if !valid_tag(&credential_environment) {
@@ -200,6 +231,53 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let admin_bootstrap_token = env::var("ADMIN_BOOTSTRAP_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let admin_bootstrap_tenant_id = env::var("ADMIN_BOOTSTRAP_TENANT_ID")
+            .ok()
+            .map(|value| {
+                Uuid::parse_str(value.trim())
+                    .map_err(|error| ConfigError::InvalidAdminBootstrapTenant(error.to_string()))
+            })
+            .transpose()?;
+        if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
+            return Err(ConfigError::IncompleteAdminBootstrap);
+        }
+        if admin_bootstrap_token
+            .as_ref()
+            .is_some_and(|value| value.len() < 32)
+        {
+            return Err(ConfigError::WeakAdminBootstrapToken);
+        }
+        let admin_session_ttl_seconds = env::var("ADMIN_SESSION_TTL_SECONDS")
+            .unwrap_or_else(|_| "900".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidAdminSessionTtl(error.to_string()))?;
+        if !(60..=3600).contains(&admin_session_ttl_seconds) {
+            return Err(ConfigError::InvalidAdminSessionTtl(
+                "must be between 60 and 3600".to_owned(),
+            ));
+        }
+        let admin_allowed_origin = env::var("ADMIN_ALLOWED_ORIGIN")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
+        if admin_allowed_origin
+            .as_deref()
+            .is_some_and(|value| !valid_origin(value, &credential_environment))
+        {
+            return Err(ConfigError::InvalidAdminOrigin);
+        }
+        let admin_trusted_proxy_ips = env::var("ADMIN_TRUSTED_PROXY_IPS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<IpAddr>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ConfigError::InvalidAdminTrustedProxy(error.to_string()))?;
         let ledger_spool_dir = PathBuf::from(
             env::var("LEDGER_SPOOL_DIR").unwrap_or_else(|_| "var/ledger-spool".to_owned()),
         );
@@ -239,17 +317,62 @@ impl Config {
             otlp_endpoint,
             database_url,
             database_max_connections,
+            admin_database_max_connections,
             credential_hash_key,
             credential_hash_key_id,
             credential_retiring_hash_keys,
             credential_environment,
             credential_cache_capacity,
             credential_cache_ttl_seconds,
+            admin_bootstrap_token,
+            admin_bootstrap_tenant_id,
+            admin_session_ttl_seconds,
+            admin_allowed_origin,
+            admin_trusted_proxy_ips,
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
         })
     }
+
+    pub fn data_database_max_connections(&self) -> u32 {
+        self.database_max_connections - self.admin_database_max_connections
+    }
+}
+
+fn valid_origin(value: &str, environment: &str) -> bool {
+    let Ok(uri) = value.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let path_is_origin = uri.path().is_empty() || uri.path() == "/";
+    let secure = scheme == "https";
+    let development_loopback = environment == "dev"
+        && scheme == "http"
+        && matches!(authority.host(), "localhost" | "127.0.0.1" | "[::1]");
+    path_is_origin
+        && uri.query().is_none()
+        && !authority.as_str().contains('@')
+        && (secure || development_loopback)
+}
+
+fn validate_pool_budget(total: u32, admin: u32) -> Result<(), ConfigError> {
+    if admin == 0 {
+        return Err(ConfigError::InvalidAdminPoolSize(
+            "must be greater than zero".to_owned(),
+        ));
+    }
+    if admin >= total {
+        return Err(ConfigError::InvalidAdminPoolSize(
+            "must leave at least one connection for the data plane".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_name(variable: &'static str, default: &str) -> Result<String, ConfigError> {
@@ -365,5 +488,29 @@ mod tests {
             retiring_hash_keys("v2=duplicate-active-hash-key-at-least-32".to_owned(), "v2"),
             Err(ConfigError::InvalidRetiringHashKey(_))
         ));
+    }
+
+    #[test]
+    fn admin_pool_is_reserved_inside_the_total_database_budget() {
+        validate_pool_budget(10, 2).unwrap();
+        assert!(matches!(
+            validate_pool_budget(10, 0),
+            Err(ConfigError::InvalidAdminPoolSize(_))
+        ));
+        assert!(matches!(
+            validate_pool_budget(2, 2),
+            Err(ConfigError::InvalidAdminPoolSize(_))
+        ));
+    }
+
+    #[test]
+    fn admin_origin_is_exact_and_secure_outside_development() {
+        assert!(valid_origin("https://admin.example.com", "prod"));
+        assert!(!valid_origin("http://admin.example.com", "prod"));
+        assert!(!valid_origin("https://admin.example.com/path", "prod"));
+        assert!(!valid_origin("https://admin.example.com?tenant=a", "prod"));
+        assert!(valid_origin("http://127.0.0.1:5173", "dev"));
+        assert!(valid_origin("http://[::1]:5173", "dev"));
+        assert!(!valid_origin("http://192.168.1.10:5173", "dev"));
     }
 }

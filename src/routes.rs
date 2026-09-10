@@ -1,3 +1,4 @@
+mod admin;
 mod chat_completions;
 mod health;
 mod messages;
@@ -43,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_client_key,
         ));
+    let admin = admin::router(&state);
 
     Router::new()
         // `/healthz` is the name the old single endpoint had. Keeping it as
@@ -52,6 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ready", get(health::ready))
         .route("/api/hello", head(messages::hello))
         .merge(authenticated)
+        .merge(admin)
         .with_state(state.clone())
         // Innermost first: the access log needs the id already set and the
         // status already final, so it sits inside the two id layers and
@@ -112,7 +115,7 @@ mod tests {
         state::AppState,
     };
 
-    fn test_config() -> Config {
+    pub(super) fn test_config() -> Config {
         Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
@@ -132,12 +135,18 @@ mod tests {
             // what we want -- these tests must not depend on a live database.
             database_url: "postgres://gateway@127.0.0.1:1/gateway".to_owned(),
             database_max_connections: 1,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "dev".to_owned(),
             credential_cache_capacity: 8,
             credential_cache_ttl_seconds: 60,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-route-test-{}",
                 uuid::Uuid::new_v4()

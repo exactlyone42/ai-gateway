@@ -127,7 +127,7 @@ metric 命名與 cardinality 規則（`request_id` 這類只進 trace／log，�
 
 | 編號 | Slug | 優先度 | 前置 |
 | --- | --- | --- | --- |
-| W08 | `admin-api-rbac` | P1 | W03 |
+| W08 | `admin-api-rbac` | P1 | W03, W04 |
 
 **目的**：後台的權限在 API 層擋得住，不是靠前端藏按鈕。
 **交付**：Admin 登入（短效 token／安全 session，與 Client API Key 分開兩套語意）；
