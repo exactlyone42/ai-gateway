@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P0 |
 | 前置 | `workspace-foundation` |
-| 開始 | 2026-09-10 15:52 CST |
-| 結束 | — |
+| 開始 | 2026-09-10T15:52+08:00 |
+| 結束 | 2026-09-10T17:07+08:00 |
 | Token | 未量得：本輪由 Codex 執行；Claude-only ledger 正確回 exit 3，未填 0 |
 
 ## 目的
@@ -49,6 +49,7 @@
 - 2026-09-10 16:45 CST：完整 diff reviewer 的 3 高／2 中全部採納；補 cache／生命週期線性化、HMAC key 版本 overlap、dev-only bootstrap、唯一 successor 與解析時到期落庫。
 - 2026-09-10 16:51 CST：撤銷 cache invalidation 負面變異讓真 router 由預期 401 變 502；還原後測試恢復通過。
 - 2026-09-10 17:00 CST：修正 row lock 無界阻塞；真 DB 鎖列在 1 秒內回 503，放寬成 3 秒的負面變異於 3.19 秒紅燈；最終 reviewer 回報高 0／中 0。
+- 2026-09-10 17:07 CST：commit `a05dad8` 的 CI 綠；PR #27 合併至 `dev`，merge commit `91c49cc`。W03 完成，#16 保留給 W08。
 
 ## 已確定不可行
 - 所有環境保留 bootstrap：會繞過 tenant、DB 撤銷與生命週期；只在明確 `dev` 設定載入，其他環境誤設時拒絕啟動。
@@ -78,6 +79,5 @@
 | HMAC key 輪替 | DB 存非秘密版本 ID，設定載入 active ＋ retiring keys | 換 server key 時全體 credential 失效 | 舊版本可在短期 overlap 解析，移除過早則 503 fail closed |
 
 ## 下一步
-1. 提交並推送目前 diff。
-2. 等 PR #27 最新 SHA 的 CI 綠後轉 ready、合併 `dev`。
-3. 回填結束時間、token ledger 結果與索引狀態。
+1. W04 `usage-ledger` 可與後續工作並行，補每筆請求與用量的 durable ledger。
+2. W08 `admin-api-rbac` 使用本段生命週期 service，補控制面端點、RBAC 與 audit；#16 在該段完成後才關閉。
