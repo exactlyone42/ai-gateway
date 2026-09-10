@@ -32,7 +32,7 @@
 | `docs/task-ledger.md` | 要看每段落花多少時間／token、當初的 trade-off | — |
 | `docs/loadtest-journal.md` | 要引用效能數字，或要加一輪壓測 | W18 |
 | `docs/provider-protocols.md` | 要接新的 Provider，或處理協定轉換落差 | W05／W06 |
-| `docs/identity.md` | 要動身分／憑證／Principal 解析 | W03 |
+| `docs/identity.md` | 要動身分／憑證／Principal 解析 | — |
 | `docs/request-policy.md` | 要動政策合併、workload 分類、配額 | W11／W12 |
 | `docs/scheduler.md` | 要動排隊、優先權、保留容量、併發上限 | W13 |
 | `docs/observability.md` | 要加 metric／trace／log，或查「為什麼看不到」 | —（W07 已交付；後續缺口看 `loops/observability-otel.loop.md` 移交） |

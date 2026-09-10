@@ -1,13 +1,13 @@
-use std::{env, net::SocketAddr};
+use std::{collections::HashSet, env, net::SocketAddr};
 
 use thiserror::Error;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub listen_address: SocketAddr,
     pub litellm_base_url: String,
     pub litellm_master_key: String,
-    pub bootstrap_client_key: String,
+    pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
     /// provider at all, so log records carry no `trace_id` either -- only the
@@ -20,6 +20,16 @@ pub struct Config {
     /// `DATABASE_MAX_CONNECTIONS`. Postgres has a global connection ceiling,
     /// so this is a share of it, not a throughput dial.
     pub database_max_connections: u32,
+    /// Server-side key for HMAC credential hashes. It never enters the database.
+    pub credential_hash_key: Vec<u8>,
+    /// Non-secret identifier persisted beside hashes so server keys can overlap.
+    pub credential_hash_key_id: String,
+    /// Old server-side keys accepted while credentials are being rotated.
+    pub credential_retiring_hash_keys: Vec<(String, Vec<u8>)>,
+    /// Lowercase environment tag embedded in newly issued keys.
+    pub credential_environment: String,
+    pub credential_cache_capacity: usize,
+    pub credential_cache_ttl_seconds: u64,
 }
 
 #[derive(Debug, Error)]
@@ -30,6 +40,24 @@ pub enum ConfigError {
     InvalidAddress(#[from] std::net::AddrParseError),
     #[error("invalid DATABASE_MAX_CONNECTIONS: {0}")]
     InvalidPoolSize(#[from] std::num::ParseIntError),
+    #[error("CREDENTIAL_HASH_KEY must contain at least 32 bytes")]
+    WeakCredentialHashKey,
+    #[error("credential hash key ids must use lowercase ASCII letters, digits or hyphens")]
+    InvalidCredentialHashKeyId,
+    #[error("invalid CREDENTIAL_RETIRING_HASH_KEYS entry: {0}")]
+    InvalidRetiringHashKey(String),
+    #[error("BOOTSTRAP_CLIENT_KEY is allowed only when CREDENTIAL_ENVIRONMENT=dev")]
+    BootstrapOutsideDevelopment,
+    #[error("BOOTSTRAP_CLIENT_KEY requires ENABLE_DEVELOPMENT_BOOTSTRAP=true")]
+    BootstrapNotEnabled,
+    #[error("ENABLE_DEVELOPMENT_BOOTSTRAP must be true or false")]
+    InvalidDevelopmentBootstrapFlag,
+    #[error("CREDENTIAL_ENVIRONMENT must use lowercase ASCII letters, digits or hyphens")]
+    InvalidCredentialEnvironment,
+    #[error("invalid CREDENTIAL_CACHE_CAPACITY: {0}")]
+    InvalidCredentialCacheCapacity(String),
+    #[error("invalid CREDENTIAL_CACHE_TTL_SECONDS: {0}")]
+    InvalidCredentialCacheTtl(String),
 }
 
 impl Config {
@@ -41,7 +69,6 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
         let litellm_master_key = required("LITELLM_MASTER_KEY")?;
-        let bootstrap_client_key = required("BOOTSTRAP_CLIENT_KEY")?;
         let allowed_models = env::var("ALLOWED_MODELS")
             .unwrap_or_else(|_| "company-default".to_owned())
             .split(',')
@@ -59,6 +86,55 @@ impl Config {
         let database_max_connections = env::var("DATABASE_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "10".to_owned())
             .parse()?;
+        let credential_environment =
+            env::var("CREDENTIAL_ENVIRONMENT").unwrap_or_else(|_| "dev".to_owned());
+        if !valid_tag(&credential_environment) {
+            return Err(ConfigError::InvalidCredentialEnvironment);
+        }
+        let development_bootstrap_enabled = env::var("ENABLE_DEVELOPMENT_BOOTSTRAP")
+            .unwrap_or_else(|_| "false".to_owned())
+            .parse::<bool>()
+            .map_err(|_| ConfigError::InvalidDevelopmentBootstrapFlag)?;
+        let bootstrap_client_key = bootstrap_client_key(
+            &credential_environment,
+            development_bootstrap_enabled,
+            env::var("BOOTSTRAP_CLIENT_KEY").ok(),
+        )?;
+        let credential_hash_key = required("CREDENTIAL_HASH_KEY")?.into_bytes();
+        if credential_hash_key.len() < 32 {
+            return Err(ConfigError::WeakCredentialHashKey);
+        }
+        let credential_hash_key_id =
+            env::var("CREDENTIAL_HASH_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
+        if !valid_tag(&credential_hash_key_id) {
+            return Err(ConfigError::InvalidCredentialHashKeyId);
+        }
+        let credential_retiring_hash_keys = retiring_hash_keys(
+            env::var("CREDENTIAL_RETIRING_HASH_KEYS").unwrap_or_default(),
+            &credential_hash_key_id,
+        )?;
+        let credential_cache_capacity = env::var("CREDENTIAL_CACHE_CAPACITY")
+            .unwrap_or_else(|_| "1024".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidCredentialCacheCapacity(error.to_string())
+            })?;
+        if credential_cache_capacity == 0 {
+            return Err(ConfigError::InvalidCredentialCacheCapacity(
+                "must be greater than zero".to_owned(),
+            ));
+        }
+        let credential_cache_ttl_seconds = env::var("CREDENTIAL_CACHE_TTL_SECONDS")
+            .unwrap_or_else(|_| "60".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidCredentialCacheTtl(error.to_string())
+            })?;
+        if credential_cache_ttl_seconds == 0 {
+            return Err(ConfigError::InvalidCredentialCacheTtl(
+                "must be greater than zero".to_owned(),
+            ));
+        }
 
         Ok(Self {
             listen_address,
@@ -69,10 +145,103 @@ impl Config {
             otlp_endpoint,
             database_url,
             database_max_connections,
+            credential_hash_key,
+            credential_hash_key_id,
+            credential_retiring_hash_keys,
+            credential_environment,
+            credential_cache_capacity,
+            credential_cache_ttl_seconds,
         })
     }
 }
 
+fn valid_tag(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn bootstrap_client_key(
+    environment: &str,
+    enabled: bool,
+    value: Option<String>,
+) -> Result<Option<String>, ConfigError> {
+    let value = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if value.is_some() && !enabled {
+        Err(ConfigError::BootstrapNotEnabled)
+    } else if value.is_some() && environment != "dev" {
+        Err(ConfigError::BootstrapOutsideDevelopment)
+    } else {
+        Ok(value)
+    }
+}
+
+fn retiring_hash_keys(
+    value: String,
+    active_id: &str,
+) -> Result<Vec<(String, Vec<u8>)>, ConfigError> {
+    let mut ids = HashSet::from([active_id.to_owned()]);
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (id, secret) = entry.split_once('=').ok_or_else(|| {
+                ConfigError::InvalidRetiringHashKey("expected id=secret".to_owned())
+            })?;
+            if !valid_tag(id) {
+                return Err(ConfigError::InvalidCredentialHashKeyId);
+            }
+            if secret.len() < 32 {
+                return Err(ConfigError::InvalidRetiringHashKey(format!(
+                    "{id} secret must contain at least 32 bytes"
+                )));
+            }
+            if !ids.insert(id.to_owned()) {
+                return Err(ConfigError::InvalidRetiringHashKey(format!(
+                    "duplicate key id {id}"
+                )));
+            }
+            Ok((id.to_owned(), secret.as_bytes().to_vec()))
+        })
+        .collect()
+}
+
 fn required(name: &'static str) -> Result<String, ConfigError> {
     env::var(name).map_err(|_| ConfigError::Missing(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_is_explicitly_development_only() {
+        assert!(matches!(
+            bootstrap_client_key("prod", true, Some("key".to_owned())),
+            Err(ConfigError::BootstrapOutsideDevelopment)
+        ));
+        assert!(matches!(
+            bootstrap_client_key("dev", false, Some("key".to_owned())),
+            Err(ConfigError::BootstrapNotEnabled)
+        ));
+        assert_eq!(
+            bootstrap_client_key("dev", true, Some(" key ".to_owned())).unwrap(),
+            Some("key".to_owned())
+        );
+    }
+
+    #[test]
+    fn retiring_hash_key_ids_are_unique_and_secrets_are_strong() {
+        let parsed =
+            retiring_hash_keys("v1=old-credential-hash-key-at-least-32".to_owned(), "v2").unwrap();
+        assert_eq!(parsed[0].0, "v1");
+        assert!(matches!(
+            retiring_hash_keys("v2=duplicate-active-hash-key-at-least-32".to_owned(), "v2"),
+            Err(ConfigError::InvalidRetiringHashKey(_))
+        ));
+    }
 }

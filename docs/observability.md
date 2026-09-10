@@ -187,7 +187,8 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 
 ## 還沒有的
 
-`principal`（要等 W03 身分）、`gen_ai.request.model`／`gen_ai.system`／`gen_ai.usage.*`
+`principal` 已由 W03 在成功認證的 access log 寫入 opaque credential UUID；完整 display name
+不進 telemetry。還缺 `gen_ai.request.model`／`gen_ai.system`／`gen_ai.usage.*`
 （要等模型註冊表）、**與規格 §57 的 13 個指標對帳**（清單不在 repo）、
 以及正式環境把日誌送進 CloudWatch 後的 filter pattern 實跑。
 

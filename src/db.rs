@@ -11,6 +11,8 @@ use thiserror::Error;
 /// poll interval. A probe that hangs is read as "up" by some balancers and
 /// "down" by others, which is worse than a quick, definite "not ready".
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const STATEMENT_TIMEOUT: &str = "2s";
+const LOCK_TIMEOUT: &str = "1s";
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -27,10 +29,20 @@ pub enum DatabaseError {
 /// connection happens in [`migrate`], which is where a bad URL or an
 /// unreachable server is reported.
 pub fn pool(url: &str, max_connections: u32) -> Result<Pool<Postgres>, DatabaseError> {
-    let options = PgConnectOptions::from_str(url).map_err(DatabaseError::Url)?;
+    let options = gateway_options(PgConnectOptions::from_str(url).map_err(DatabaseError::Url)?);
     Ok(PgPoolOptions::new()
         .max_connections(max_connections)
+        .acquire_timeout(PROBE_TIMEOUT)
         .connect_lazy_with(options))
+}
+
+pub(crate) fn gateway_options(options: PgConnectOptions) -> PgConnectOptions {
+    // Identity resolution holds a consistency gate while querying. Server-side
+    // bounds ensure a locked row cannot turn that gate into a gateway-wide hang.
+    options.options([
+        ("statement_timeout", STATEMENT_TIMEOUT),
+        ("lock_timeout", LOCK_TIMEOUT),
+    ])
 }
 
 /// Applies every pending migration, and refuses to continue if any fails.

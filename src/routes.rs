@@ -65,7 +65,7 @@ mod tests {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             litellm_base_url: "http://127.0.0.1:1".to_owned(),
             litellm_master_key: "upstream-key".to_owned(),
-            bootstrap_client_key: "client-key".to_owned(),
+            bootstrap_client_key: Some("client-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
             // Port 1 has no listener. The pool is lazy, so building it costs
@@ -73,6 +73,12 @@ mod tests {
             // what we want -- these tests must not depend on a live database.
             database_url: "postgres://gateway@127.0.0.1:1/gateway".to_owned(),
             database_max_connections: 1,
+            credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
+            credential_hash_key_id: "v1".to_owned(),
+            credential_retiring_hash_keys: Vec::new(),
+            credential_environment: "dev".to_owned(),
+            credential_cache_capacity: 8,
+            credential_cache_ttl_seconds: 60,
         }
     }
 

@@ -5,13 +5,17 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
+getrandom = "0.3"
+hmac = "0.12"
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls", "internal-logs"] }
 opentelemetry_sdk = "0.32.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
@@ -20,7 +24,7 @@ tower-http = { version = "0.6", features = ["request-id"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }

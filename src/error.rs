@@ -6,12 +6,16 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
+use crate::identity::IdentityError;
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("invalid or missing API key")]
     Unauthorized,
     #[error("model is not allowed by policy")]
     ModelForbidden,
+    #[error("authentication service is unavailable")]
+    AuthenticationUnavailable(#[source] IdentityError),
     #[error("upstream request failed")]
     Upstream(#[from] reqwest::Error),
     #[error("failed to build the response")]
@@ -37,6 +41,7 @@ impl GatewayError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
+            Self::AuthenticationUnavailable(_) => "authentication_unavailable",
             Self::Upstream(_) => "upstream_unavailable",
             Self::ResponseBuild(_) => "response_build_failed",
         }
@@ -48,6 +53,7 @@ impl GatewayError {
     fn cause(&self) -> Option<String> {
         match self {
             Self::Unauthorized | Self::ModelForbidden => None,
+            Self::AuthenticationUnavailable(error) => Some(error.to_string()),
             Self::Upstream(error) => Some(error.to_string()),
             Self::ResponseBuild(error) => Some(error.to_string()),
         }
@@ -63,6 +69,7 @@ impl IntoResponse for GatewayError {
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
+            Self::AuthenticationUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

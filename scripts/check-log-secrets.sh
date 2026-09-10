@@ -24,6 +24,8 @@ body_token="sentinel_body_token_do_not_log"
 person="sentinel.person@example.invalid"
 prompt="sentinel_prompt_content_do_not_log"
 wrong_key="sentinel_wrong_key_do_not_log"
+credential_hash_key="sentinel_credential_hash_key_never_log_32"
+retiring_hash_key="sentinel_retiring_hash_key_never_log_32"
 
 port=18190
 log="$(mktemp)"
@@ -48,7 +50,11 @@ DATABASE_URL="$DATABASE_URL" \
 LISTEN_ADDRESS="127.0.0.1:$port" \
 LITELLM_BASE_URL="http://127.0.0.1:1/" \
 LITELLM_MASTER_KEY="$upstream_key" \
+ENABLE_DEVELOPMENT_BOOTSTRAP="true" \
 BOOTSTRAP_CLIENT_KEY="$client_key" \
+CREDENTIAL_HASH_KEY="$credential_hash_key" \
+CREDENTIAL_HASH_KEY_ID="v2" \
+CREDENTIAL_RETIRING_HASH_KEYS="v1=$retiring_hash_key" \
 ALLOWED_MODELS="company-default" \
   ./target/debug/agent-pool-gateway >"$log" 2>&1 &
 pid=$!
@@ -88,7 +94,7 @@ if [ "$selftest" = 1 ]; then
 fi
 
 failed=0
-for secret in "$client_key" "$upstream_key" "$body_token" "$person" "$prompt" "$wrong_key"; do
+for secret in "$client_key" "$upstream_key" "$body_token" "$person" "$prompt" "$wrong_key" "$credential_hash_key" "$retiring_hash_key"; do
   if grep -nF "$secret" "$log" >/dev/null; then
     echo "secret in the log output: $secret"
     grep -nF "$secret" "$log" | sed 's/^/    /'
