@@ -22,7 +22,7 @@
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 18 個可獨立審查的段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 進行中 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
-| [identity-credential](./identity-credential.loop.md) | W03 | 進行中 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
+| [identity-credential](./identity-credential.loop.md) | W03 | 已交付 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
 | [usage-ledger](./usage-ledger.loop.md) | W04 | 未開始 | P0 | 每一筆請求與用量都落在 PostgreSQL，DB 短暫不可用也不會無聲遺失 |
 | [anthropic-native](./anthropic-native.loop.md) | W05 | 未開始 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
 | [openai-native](./openai-native.loop.md) | W06 | 未開始 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
