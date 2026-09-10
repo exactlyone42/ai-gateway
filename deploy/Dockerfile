@@ -1,4 +1,11 @@
-# Two stages: build with the toolchain, ship without it.
+# Build both artifacts, then ship without either toolchain.
+
+FROM node:22-bookworm-slim AS web-build
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
 
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
@@ -10,6 +17,7 @@ COPY migrations ./migrations
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
+WORKDIR /app
 # ca-certificates for outbound TLS to providers; curl is the container health
 # check and nothing else.
 RUN apt-get update \
@@ -19,5 +27,6 @@ RUN apt-get update \
 RUN useradd --system --create-home --uid 10001 gateway
 USER gateway
 COPY --from=build /src/target/release/agent-pool-gateway /usr/local/bin/
+COPY --from=web-build /web/dist ./web/dist
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/agent-pool-gateway"]

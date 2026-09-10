@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `identity-credential`, `usage-ledger` |
 | 開始 | `2026-09-11T01:54+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T03:11+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -79,13 +79,14 @@
 - `2026-09-11T02:45+08:00` Admin auth 核心接入實際 router：bootstrap token 綁 tenant、DB one-shot；
   長效 login credential 換短效 session；DB 只存 domain-separated HMAC。並行 bootstrap、完整
   login/logout、account version 失效共 2/2 通過，0 ignored。
-- `2026-09-11T03:35+08:00` 九類 tenant-scoped CRUD、UUID cursor、version CAS、draft archive、
+- `2026-09-11T03:00+08:00` 九類 tenant-scoped CRUD、UUID cursor、version CAS、draft archive、
   credential create/rotate/revoke 與同 transaction before/after audit 已接通；viewer 直打 mutation
   回 403 並 audit，operator 成功。Admin/data pool 分離、exact CORS、trusted proxy、1 MiB body limit。
-- `2026-09-11T03:55+08:00` 完整 diff review 後修正：tenant advisory transaction lock 序列化
+- `2026-09-11T03:05+08:00` 完整 diff review 後修正：tenant advisory transaction lock 序列化
   最後-admin invariant；mutation 在同一 transaction `FOR UPDATE` 取得 before；migration 前保存並
   在成功或失敗後恢復 timeout；所有資源 SQL 改固定 statement＋參數；停用任一 Principal 維度後
   解析 fail closed，credential 所有生命週期異動同步 version／updated_at。補 `docs/admin.md`。
+- `2026-09-11T03:11+08:00` PR #34 合入 `dev`（merge `729fd0e`）；Rust CI 隨後完成 success。
 
 ## 已確定不可行
 - `claude -p --model opus` reviewer：組織停用 Claude subscription，無法執行；改用獨立 Codex reviewer。
@@ -126,6 +127,4 @@
 | 未生效設定 | 只允許 `draft` | 先暴露 enabled/active | 避免控制面狀態與資料面實際行為分裂 |
 
 ## 下一步
-1. 提交並推 `feature/admin-api-rbac`，開 PR 到 `dev`。
-2. 等 CI 綠後合併，回填 merge SHA、卡片與 loop 狀態。
-3. 從最新 `dev` 接手 W09 `admin-console`。
+1. W09 依 `docs/admin.md` 契約實作 Admin Web 與 read models。

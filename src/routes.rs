@@ -12,10 +12,14 @@ use axum::{
     Router,
     body::Bytes,
     extract::{DefaultBodyLimit, rejection::BytesRejection},
-    http::HeaderName,
+    http::{HeaderName, HeaderValue, header},
     routing::{get, head, post},
 };
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+};
 
 use crate::{
     middleware::{REQUEST_ID_HEADER, access_log, require_client_key},
@@ -45,6 +49,19 @@ pub fn router(state: Arc<AppState>) -> Router {
             require_client_key,
         ));
     let admin = admin::router(&state);
+    let admin_ui = Router::new()
+        .nest_service(
+            "/admin",
+            ServeDir::new("web/dist")
+                .append_index_html_on_directories(true)
+                .fallback(ServeFile::new("web/dist/index.html")),
+        )
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            ),
+        ));
 
     Router::new()
         // `/healthz` is the name the old single endpoint had. Keeping it as
@@ -55,6 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/hello", head(messages::hello))
         .merge(authenticated)
         .merge(admin)
+        .merge(admin_ui)
         .with_state(state.clone())
         // Innermost first: the access log needs the id already set and the
         // status already final, so it sits inside the two id layers and
@@ -162,6 +180,41 @@ mod tests {
         let pool = db::pool(&config.database_url, config.database_max_connections)
             .expect("the test connection string is valid");
         Arc::new(AppState::new(config, pool).unwrap())
+    }
+
+    #[tokio::test]
+    async fn admin_spa_has_strict_csp_and_does_not_shadow_the_api() {
+        let app = router(test_state());
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/requests")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(
+            page.headers()
+                .get("content-security-policy")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        );
+
+        let api = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/v1/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(api.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// The one failure this guards against is silent: if the access log stops

@@ -73,6 +73,9 @@ The whole stack, including the gateway image:
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
+The Admin Web UI is served by the gateway at `http://127.0.0.1:8080/admin/` and uses the
+short-lived Admin session flow documented in `docs/admin.md`.
+
 Never commit real provider credentials or client keys.
 
 ## Documentation
@@ -86,6 +89,7 @@ for which problem, so you do not have to load everything.
 - `docs/architecture.md` — three planes, request path, failure model
 - `docs/security-and-compliance.md` — credential and subscription boundary
 - `docs/admin.md` — Admin authentication, RBAC and control-plane API contract
+- `docs/admin-web.md` — Admin report definitions, operator questions and browser security
 - `docs/product-requirements.md` — roles, policies and acceptance criteria
 - `docs/client-compatibility.md` — integration contract by client
 - `docs/operations.md` — rollout and incident controls

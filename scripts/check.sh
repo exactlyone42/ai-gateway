@@ -7,6 +7,7 @@
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
 #   ./scripts/check.sh clients     # client compatibility document contract
+#   ./scripts/check.sh frontend    # admin UI lint + types + tests + build
 #   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
@@ -30,6 +31,21 @@ test_all() {
     export DATABASE_URL="postgres://gateway:gateway-dev@127.0.0.1:${POSTGRES_PORT:-15432}/gateway"
   fi
   cargo test --workspace --all-features
+}
+
+frontend() {
+  step "admin frontend"
+  if grep -RInE 'localStorage|sessionStorage' web/src; then
+    echo "persistent browser storage is forbidden for Admin sessions"
+    return 1
+  fi
+  (
+    cd web
+    npm run lint
+    npm run typecheck
+    npm run test
+    npm run build
+  )
 }
 
 # Machine-checkable loop-file rules. A loop file that drifts from the format is
@@ -293,10 +309,11 @@ case "${1:-gate}" in
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
   clients)   clients ;;
+  frontend)  frontend ;;
   secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
   all|pre-push)
-    fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
+    frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh
     ;;

@@ -13,9 +13,9 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, DeleteQuery, ListQuery, ResourceKind,
-        ResourceMutationOutput, ResourcePage, ResourceTarget, RotateCredentialInput, SessionOutput,
-        authorize,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, ListQuery, ReportListQuery,
+        ReportWindowQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
+        RotateCredentialInput, SessionOutput, UsageQuery, authorize,
     },
     middleware::REQUEST_ID_HEADER,
     state::AppState,
@@ -24,6 +24,15 @@ use crate::{
 pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/admin/v1/session", delete(logout))
+        .route("/admin/v1/overview", get(overview))
+        .route("/admin/v1/identity-map", get(identity_map))
+        .route("/admin/v1/requests", get(request_page))
+        .route("/admin/v1/requests/{id}", get(request_report))
+        .route("/admin/v1/usage", get(usage_report))
+        .route("/admin/v1/audit", get(audit_page))
+        .route("/admin/v1/catalog", get(catalog_report))
+        .route("/admin/v1/governance", get(governance_report))
+        .route("/admin/v1/system-health", get(system_health_report))
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
             "/admin/v1/admin-accounts",
@@ -53,6 +62,79 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(protected)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(cors(state.config.admin_allowed_origin.as_deref()))
+}
+
+async fn overview(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportWindowQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.overview_report(&context, query).await?))
+}
+
+async fn identity_map(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.identity_map(&context).await?))
+}
+
+async fn request_page(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportListQuery>,
+) -> Result<Json<CursorPage>, AdminError> {
+    Ok(Json(state.admin.request_page(&context, query).await?))
+}
+
+async fn request_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.request_report(&context, id).await?))
+}
+
+async fn usage_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.usage_report(&context, query).await?))
+}
+
+async fn audit_page(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportListQuery>,
+) -> Result<Json<CursorPage>, AdminError> {
+    Ok(Json(state.admin.audit_page(&context, query).await?))
+}
+
+async fn catalog_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.catalog_report(&context).await?))
+}
+
+async fn governance_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.governance_report(&context).await?))
+}
+
+async fn system_health_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .system_health_report(&context, state.config.otlp_endpoint.is_some())
+            .await?,
+    ))
 }
 
 async fn bootstrap(
@@ -381,6 +463,7 @@ mod tests {
         response::IntoResponse as _,
         routing::get,
     };
+    use chrono::{Duration, SecondsFormat, Utc};
     use serde_json::json;
     use sqlx::{PgPool, Row as _};
     use tower::ServiceExt as _;
@@ -543,6 +626,22 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let from = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let to = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let viewer_read = Request::builder()
+            .uri(format!("/admin/v1/overview?from={from}&to={to}"))
+            .header(
+                "authorization",
+                format!("Bearer {}", viewer_session.access_token),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let readable = routes::router(state.clone())
+            .oneshot(viewer_read)
+            .await
+            .unwrap();
+        assert_eq!(readable.status(), StatusCode::OK);
 
         let mut viewer_request = Request::builder()
             .method("POST")
