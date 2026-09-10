@@ -9,6 +9,7 @@ mod logging;
 mod metrics;
 mod middleware;
 mod model_registry;
+mod policy;
 mod routes;
 mod services;
 pub mod startup;

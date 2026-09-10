@@ -6,7 +6,10 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
-use crate::{identity::IdentityError, ledger::LedgerError, model_registry::RegistryError};
+use crate::{
+    identity::IdentityError, ledger::LedgerError, model_registry::RegistryError,
+    policy::PolicyError,
+};
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
@@ -14,6 +17,10 @@ pub enum GatewayError {
     Unauthorized,
     #[error("model is not allowed by policy")]
     ModelForbidden,
+    #[error("request policy hint is invalid")]
+    InvalidPolicyHint,
+    #[error("request denied by policy")]
+    PolicyDenied,
     #[error("model cannot satisfy required capability: {0}")]
     CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
@@ -36,6 +43,8 @@ pub enum GatewayError {
     LedgerUnavailable(#[from] LedgerError),
     #[error("model registry is unavailable")]
     RegistryUnavailable(#[source] RegistryError),
+    #[error("policy service is unavailable")]
+    PolicyUnavailable(#[source] PolicyError),
 }
 
 /// Carries the failure from the error boundary to the access log, which is the
@@ -57,6 +66,8 @@ impl GatewayError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
+            Self::InvalidPolicyHint => "invalid_policy_hint",
+            Self::PolicyDenied => "policy_denied",
             Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
@@ -68,6 +79,7 @@ impl GatewayError {
             Self::ResponseBuild(_) => "response_build_failed",
             Self::LedgerUnavailable(_) => "ledger_unavailable",
             Self::RegistryUnavailable(_) => "model_registry_unavailable",
+            Self::PolicyUnavailable(_) => "policy_unavailable",
         }
     }
 
@@ -78,6 +90,8 @@ impl GatewayError {
         match self {
             Self::Unauthorized
             | Self::ModelForbidden
+            | Self::InvalidPolicyHint
+            | Self::PolicyDenied
             | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
@@ -89,6 +103,7 @@ impl GatewayError {
             Self::ResponseBuild(error) => Some(error.to_string()),
             Self::LedgerUnavailable(error) => Some(error.to_string()),
             Self::RegistryUnavailable(error) => Some(error.to_string()),
+            Self::PolicyUnavailable(error) => Some(error.to_string()),
         }
     }
 }
@@ -102,6 +117,8 @@ impl IntoResponse for GatewayError {
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
+            Self::InvalidPolicyHint => StatusCode::BAD_REQUEST,
+            Self::PolicyDenied => StatusCode::FORBIDDEN,
             Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
@@ -113,6 +130,7 @@ impl IntoResponse for GatewayError {
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::LedgerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::RegistryUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::PolicyUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         let mut response = (
             status,
@@ -121,6 +139,19 @@ impl IntoResponse for GatewayError {
             .into_response();
         response.extensions_mut().insert(failure);
         response
+    }
+}
+
+impl From<PolicyError> for GatewayError {
+    fn from(error: PolicyError) -> Self {
+        match error {
+            PolicyError::InvalidHint => Self::InvalidPolicyHint,
+            error @ (PolicyError::InvalidTenant
+            | PolicyError::InvalidDocument(_)
+            | PolicyError::InvalidValue
+            | PolicyError::CacheUnavailable
+            | PolicyError::Database(_)) => Self::PolicyUnavailable(error),
+        }
     }
 }
 

@@ -119,6 +119,7 @@ mod tests {
     use sqlx::{PgPool, Row as _};
     use tokio::sync::Notify;
     use tower::ServiceExt as _;
+    use tracing::instrument::WithSubscriber as _;
     use uuid::Uuid;
 
     use super::router;
@@ -130,6 +131,7 @@ mod tests {
         identity::PrincipalContext,
         ledger::{Ledger, RequestCompletion, RequestStart},
         logging,
+        services::openai::{self, Operation as OpenAiOperation, RequestContext},
         state::AppState,
     };
 
@@ -160,6 +162,8 @@ mod tests {
             credential_environment: "dev".to_owned(),
             credential_cache_capacity: 8,
             credential_cache_ttl_seconds: 60,
+            policy_cache_capacity: 8,
+            policy_cache_ttl_seconds: 60,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
             provider_allowed_tenant_ids: vec![Uuid::nil()],
@@ -225,7 +229,6 @@ mod tests {
     async fn every_request_is_logged_with_a_trace_id() {
         let buffer = logging::capture::Buffer::default();
         let (subscriber, _provider) = logging::test_subscriber(buffer.clone());
-        let guard = tracing::subscriber::set_default(subscriber);
 
         let state = test_state();
         let response = router(state)
@@ -235,10 +238,10 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .with_subscriber(subscriber)
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        drop(guard);
 
         let lines = buffer.lines();
         let access = lines
@@ -265,12 +268,14 @@ mod tests {
     async fn access_line(request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let buffer = logging::capture::Buffer::default();
         let (subscriber, _provider) = logging::test_subscriber(buffer.clone());
-        let guard = tracing::subscriber::set_default(subscriber);
 
         let state = test_state();
-        let response = router(state).oneshot(request).await.unwrap();
+        let response = router(state)
+            .oneshot(request)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
         let status = response.status();
-        drop(guard);
 
         let lines = buffer.lines();
         let access = lines
@@ -567,6 +572,142 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn policy_denial_is_durable_and_never_reaches_model_or_provider(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO policies (
+                id, tenant_id, policy_key, revision, configuration, lifecycle_state
+            ) VALUES ($1, $2, 'global-deny', 1,
+                '{"deny":true,"deny_reason":"maintenance"}', 'active')
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config();
+        let spool_dir = config.ledger_spool_dir.clone();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "policy-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"not-in-registry"}"#),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::PolicyDenied)
+        ));
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'status', gr.status,
+                'quality', gr.quality,
+                'denied', gr.policy_decision->'denied',
+                'reason', gr.policy_decision->'denial_reason',
+                'attempts', (SELECT count(*) FROM provider_attempts pa
+                    WHERE (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id))
+            )
+            FROM gateway_requests gr WHERE gr.tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["status"], "rejected");
+        assert_eq!(evidence["quality"], "standard");
+        assert_eq!(evidence["denied"], true);
+        assert_eq!(evidence["reason"], "maintenance");
+        assert_eq!(evidence["attempts"], 0);
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn model_allowlist_rejection_has_a_consistent_durable_decision(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO policies (
+                id, tenant_id, policy_key, revision, configuration, lifecycle_state
+            ) VALUES ($1, $2, 'global-models', 1,
+                '{"constraints":{"allowed_models":["allowed-model"]}}', 'active')
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config();
+        let spool_dir = config.ledger_spool_dir.clone();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "policy-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"blocked-model"}"#),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::ModelForbidden)
+        ));
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value =
+            sqlx::query_scalar("SELECT policy_decision FROM gateway_requests WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(evidence["denied"], true);
+        assert_eq!(evidence["denial_reason"], "model_not_allowed");
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
     async fn a_database_outage_does_not_change_the_upstream_response_and_recovers(pool: PgPool) {
         let upstream = Router::new().route(
             "/v1/chat/completions",
@@ -677,6 +818,7 @@ mod tests {
                 budget_class: None,
                 estimated_tokens: None,
                 selection: None,
+                policy: None,
                 principal: PrincipalContext::bootstrap(),
                 created_at: Utc::now(),
             })

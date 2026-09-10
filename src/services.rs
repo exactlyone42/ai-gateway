@@ -2,5 +2,6 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod request_policy;
 pub mod sse;
 pub mod streaming;

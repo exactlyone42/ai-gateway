@@ -190,3 +190,26 @@ async fn migration_keeps_legacy_identity_and_audit_writes_compatible(pool: PgPoo
         "legacy audit row was no longer append-only"
     );
 }
+
+#[sqlx::test]
+async fn policy_and_ledger_bounds_do_not_revalidate_legacy_rows_during_deploy(pool: PgPool) {
+    let names = [
+        "policies_non_nil_tenant_check",
+        "policies_key_size_check",
+        "policies_configuration_size_check",
+        "gateway_requests_max_queue_time_check",
+        "gateway_requests_policy_decision_check",
+        "gateway_requests_workload_class_check",
+        "gateway_requests_urgency_check",
+        "gateway_requests_quality_check",
+        "gateway_requests_budget_class_check",
+    ];
+    let unvalidated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint WHERE conname = ANY($1) AND NOT convalidated",
+    )
+    .bind(names.as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unvalidated, i64::try_from(names.len()).unwrap());
+}

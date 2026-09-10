@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::error::ErrorType;
 use crate::identity::CredentialService;
 use crate::model_registry::ProviderProfiles;
+use crate::policy::PolicyEngine;
 
 mod accounts;
 mod reports;
@@ -40,6 +41,7 @@ pub struct AdminService {
     session_ttl: Duration,
     credentials: CredentialService,
     provider_profiles: Option<ProviderProfiles>,
+    policies: Option<PolicyEngine>,
 }
 
 pub struct AdminServiceConfig {
@@ -350,11 +352,17 @@ impl AdminService {
             session_ttl: config.session_ttl,
             credentials,
             provider_profiles: None,
+            policies: None,
         }
     }
 
     pub fn with_provider_profiles(mut self, profiles: ProviderProfiles) -> Self {
         self.provider_profiles = Some(profiles);
+        self
+    }
+
+    pub fn with_policy_engine(mut self, policies: PolicyEngine) -> Self {
+        self.policies = Some(policies);
         self
     }
 

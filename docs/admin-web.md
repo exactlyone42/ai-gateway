@@ -44,7 +44,7 @@ unavailable until W13 supplies scheduler telemetry.
 | 11 | Which model and provider handled a request? | Requests detail and Catalog |
 | 12 | What provider attempts are persisted? | Request detail, ordered by attempt number |
 | 13 | Can retry/fallback history be inspected? | Explicit unavailable state until W17 |
-| 14 | What policy, quota and scheduler state is active? | Drafts plus explicit W11-W13 unavailable states |
+| 14 | What policy, quota and scheduler state is active? | Active policy runtime; quota and scheduler remain unavailable until W12-W13 |
 | 15 | Are gateway, database and telemetry configured? | System Health component status |
 | 16 | Who changed control-plane state? | Tenant-scoped, redacted Audit rows |
 

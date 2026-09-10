@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use crate::model_registry::GatewayOperation;
+use crate::{model_registry::GatewayOperation, policy::validate_document};
 
 use super::{
     AdminContext, AdminError, AdminService, AuditEntry, append_audit, map_conflict, validate_name,
@@ -609,12 +609,38 @@ impl AdminService {
             }
             ResourceKind::Policies => {
                 let input: PolicyCreate = decode(payload)?;
+                validate_name(&input.policy_key)?;
+                if input.revision <= 0
+                    || input.policy_key.len() > 200
+                    || [
+                        input.user_id,
+                        input.device_id,
+                        input.client_id,
+                        input.agent_id,
+                        input.credential_id,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .count()
+                        > 1
+                {
+                    return Err(AdminError::InvalidRequest);
+                }
+                let configuration = Value::Object(input.configuration);
+                validate_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
                 let value: Value = sqlx::query_scalar(
                     r#"
                     INSERT INTO policies (
                         id, tenant_id, policy_key, revision, user_id, device_id, client_id,
                         agent_id, credential_id, configuration
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8,
+                        COALESCE((
+                            SELECT COALESCE(rotation_root_id, id)
+                            FROM credentials WHERE tenant_id = $2 AND id = $9
+                        ), $9),
+                        $10
+                    )
                     RETURNING to_jsonb(policies)
                     "#,
                 )
@@ -627,7 +653,7 @@ impl AdminService {
                 .bind(input.client_id)
                 .bind(input.agent_id)
                 .bind(input.credential_id)
-                .bind(Value::Object(input.configuration))
+                .bind(configuration)
                 .fetch_one(&mut *transaction)
                 .await?;
                 (value, None)
@@ -678,6 +704,11 @@ impl AdminService {
         )
         .await?;
         transaction.commit().await?;
+        if kind == ResourceKind::Policies
+            && let Some(policies) = &self.policies
+        {
+            policies.clear_tenant_cache(context.tenant_id);
+        }
         Ok(ResourceMutationOutput { resource, secret })
     }
 
@@ -881,6 +912,10 @@ impl AdminService {
             }
             ResourceKind::Policies | ResourceKind::Quotas => {
                 let input: ConfigurationPatch = decode(payload)?;
+                let configuration = Value::Object(input.configuration);
+                if kind == ResourceKind::Policies {
+                    validate_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
+                }
                 let statement = match kind {
                     ResourceKind::Policies => {
                         "UPDATE policies SET configuration = $4, version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(policies)"
@@ -894,7 +929,7 @@ impl AdminService {
                     .bind(context.tenant_id)
                     .bind(id)
                     .bind(input.version)
-                    .bind(Value::Object(input.configuration))
+                    .bind(configuration)
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(AdminError::Conflict)?
@@ -944,6 +979,11 @@ impl AdminService {
         transaction.commit().await?;
         if kind.is_identity() || kind == ResourceKind::Credentials {
             self.credentials.clear_tenant_cache(context.tenant_id)?;
+        }
+        if kind == ResourceKind::Policies
+            && let Some(policies) = &self.policies
+        {
+            policies.clear_tenant_cache(context.tenant_id);
         }
         drop(lifecycle);
         Ok(ResourceMutationOutput {
@@ -1007,7 +1047,10 @@ impl AdminService {
         }
         if !matches!(
             kind,
-            ResourceKind::Providers | ResourceKind::Models | ResourceKind::ModelAliases
+            ResourceKind::Providers
+                | ResourceKind::Models
+                | ResourceKind::ModelAliases
+                | ResourceKind::Policies
         ) {
             return Err(AdminError::InvalidRequest);
         }
@@ -1024,6 +1067,8 @@ impl AdminService {
             load_registry_cascade(&mut transaction, context.tenant_id, kind, id).await?
         } else if kind == ResourceKind::ModelAliases {
             load_alias_replacement(&mut transaction, context.tenant_id, id).await?
+        } else if kind == ResourceKind::Policies {
+            load_policy_replacement(&mut transaction, context.tenant_id, id).await?
         } else {
             Vec::new()
         };
@@ -1047,6 +1092,28 @@ impl AdminService {
             if !trusted {
                 return Err(AdminError::InvalidRequest);
             }
+        }
+        if kind == ResourceKind::Policies && input.state == "active" {
+            validate_document(&before["configuration"]).map_err(|_| AdminError::InvalidRequest)?;
+            sqlx::query(
+                r#"
+                UPDATE policies current SET lifecycle_state = 'disabled',
+                    version = current.version + 1, updated_at = now()
+                FROM policies target
+                WHERE target.tenant_id = $1 AND target.id = $2
+                  AND current.tenant_id = target.tenant_id
+                  AND current.id <> target.id AND current.lifecycle_state = 'active'
+                  AND current.user_id IS NOT DISTINCT FROM target.user_id
+                  AND current.device_id IS NOT DISTINCT FROM target.device_id
+                  AND current.client_id IS NOT DISTINCT FROM target.client_id
+                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id
+                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id
+                "#,
+            )
+            .bind(context.tenant_id)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
         }
         if kind == ResourceKind::ModelAliases && input.state == "active" {
             sqlx::query(
@@ -1145,6 +1212,12 @@ impl AdminService {
             (ResourceKind::ModelAliases, "disabled") => {
                 "UPDATE model_aliases SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(model_aliases)"
             }
+            (ResourceKind::Policies, "active") => {
+                "UPDATE policies SET lifecycle_state = 'active', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(policies)"
+            }
+            (ResourceKind::Policies, "disabled") => {
+                "UPDATE policies SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(policies)"
+            }
             _ => return Err(AdminError::InvalidRequest),
         };
         let after: Value = sqlx::query_scalar(statement)
@@ -1182,6 +1255,11 @@ impl AdminService {
         )
         .await?;
         transaction.commit().await?;
+        if kind == ResourceKind::Policies
+            && let Some(policies) = &self.policies
+        {
+            policies.clear_tenant_cache(context.tenant_id);
+        }
         Ok(ResourceMutationOutput {
             resource: after,
             secret: None,
@@ -1224,11 +1302,12 @@ impl AdminService {
             ), inserted AS (
                 INSERT INTO credentials (
                     id, tenant_id, "type", display_name, secret_hash, hash_key_id, key_prefix,
-                    fingerprint, user_id, device_id, client_id, agent_id, expires_at, rotated_from_id
+                    fingerprint, user_id, device_id, client_id, agent_id, expires_at,
+                    rotated_from_id, rotation_root_id
                 )
                 SELECT $5, $1, "type", display_name, $6, $7, $8, $9,
                        user_id, device_id, client_id, agent_id,
-                       COALESCE($10, expires_at), $2
+                       COALESCE($10, expires_at), $2, COALESCE(rotation_root_id, id)
                 FROM shortened
                 RETURNING *
             )
@@ -1358,7 +1437,7 @@ impl AdminService {
                 "UPDATE model_aliases SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(model_aliases)"
             }
             ResourceKind::Policies => {
-                "UPDATE policies SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(policies)"
+                "UPDATE policies SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(policies)"
             }
             ResourceKind::Quotas => {
                 "UPDATE quotas SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(quotas)"
@@ -1390,6 +1469,11 @@ impl AdminService {
         )
         .await?;
         transaction.commit().await?;
+        if kind == ResourceKind::Policies
+            && let Some(policies) = &self.policies
+        {
+            policies.clear_tenant_cache(context.tenant_id);
+        }
         Ok(ResourceMutationOutput {
             resource: after,
             secret: None,
@@ -1523,6 +1607,36 @@ async fn load_alias_replacement(
     Ok(rows.as_array().cloned().unwrap_or_default())
 }
 
+async fn load_policy_replacement(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Vec<Value>, AdminError> {
+    let rows: Value = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'target_type', 'policy', 'id', current.id, 'before', to_jsonb(current)
+        )), '[]'::jsonb)
+        FROM policies target
+        JOIN policies current
+          ON current.tenant_id = target.tenant_id
+         AND current.id <> target.id
+         AND current.user_id IS NOT DISTINCT FROM target.user_id
+         AND current.device_id IS NOT DISTINCT FROM target.device_id
+         AND current.client_id IS NOT DISTINCT FROM target.client_id
+         AND current.agent_id IS NOT DISTINCT FROM target.agent_id
+         AND current.credential_id IS NOT DISTINCT FROM target.credential_id
+        WHERE target.tenant_id = $1 AND target.id = $2
+          AND current.lifecycle_state = 'active'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(rows.as_array().cloned().unwrap_or_default())
+}
+
 async fn append_registry_cascade_audits(
     transaction: &mut Transaction<'_, Postgres>,
     context: &AdminContext,
@@ -1553,10 +1667,14 @@ async fn append_registry_cascade_audits(
                'admin.' || (entries.value->>'target_type') || '.disabled',
                entries.value->>'target_type', (entries.value->>'id')::uuid,
                entries.value->'before',
-               (entries.value->'before') || jsonb_build_object(
-                   'lifecycle_state', 'disabled',
-                   'version', ((entries.value->'before'->>'version')::bigint + 1)
-               ),
+               CASE entries.value->>'target_type'
+                   WHEN 'policy' THEN (SELECT to_jsonb(p) FROM policies p
+                       WHERE p.tenant_id = $3 AND p.id = (entries.value->>'id')::uuid)
+                   WHEN 'model' THEN (SELECT to_jsonb(m) FROM models m
+                       WHERE m.tenant_id = $3 AND m.id = (entries.value->>'id')::uuid)
+                   WHEN 'model_alias' THEN (SELECT to_jsonb(a) FROM model_aliases a
+                       WHERE a.tenant_id = $3 AND a.id = (entries.value->>'id')::uuid)
+               END,
                now(), $6::inet, $7::inet, $8
         FROM entries JOIN ids USING (ordinal)
         "#,
@@ -1578,7 +1696,7 @@ async fn append_registry_cascade_audits(
 mod tests {
     use std::{net::IpAddr, str::FromStr as _, sync::Arc, time::Duration};
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sqlx::{PgPool, Row as _};
     use uuid::Uuid;
 
@@ -1826,7 +1944,7 @@ mod tests {
                     "policy_key": "default",
                     "revision": 1,
                     "credential_id": credential_id,
-                    "configuration": {"models": ["company-default"]}
+                    "configuration": {"constraints": {"allowed_models": ["company-default"]}}
                 }),
                 source,
                 source,
@@ -1968,7 +2086,7 @@ mod tests {
             .update_resource(
                 &context,
                 ResourceTarget::new(ResourceKind::Policies, policy_id),
-                json!({"version": 1, "configuration": {"models": ["company-default"]}}),
+                json!({"version": 1, "configuration": {"constraints": {"allowed_models": ["company-default"]}}}),
                 source,
                 source,
                 "update-policy",
@@ -2373,5 +2491,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[sqlx::test]
+    async fn policy_activation_replaces_one_scope_atomically_and_honors_cas(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'admin', 'admin')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let first = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({
+                    "policy_key": "global-default",
+                    "revision": 1,
+                    "configuration": {"defaults": {"quality": "standard"}}
+                }),
+                source,
+                source,
+                "create-policy-one",
+            )
+            .await
+            .unwrap();
+        let second = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({
+                    "policy_key": "global-default",
+                    "revision": 2,
+                    "configuration": {"defaults": {"quality": "advanced"}}
+                }),
+                source,
+                source,
+                "create-policy-two",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Policies, id(&first)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-policy-one",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Policies, id(&second)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-policy-two",
+            )
+            .await
+            .unwrap();
+
+        let stale = service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Policies, id(&first)),
+                LifecycleInput {
+                    version: 2,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "stale-reactivation",
+            )
+            .await;
+        assert!(matches!(stale, Err(AdminError::Conflict)));
+        let state: Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'first', (SELECT lifecycle_state FROM policies WHERE id = $1),
+                'second', (SELECT lifecycle_state FROM policies WHERE id = $2),
+                'active_count', (SELECT count(*) FROM policies
+                    WHERE tenant_id = $3 AND lifecycle_state = 'active'),
+                'replacement_audits', (SELECT count(*) FROM audit_logs
+                    WHERE tenant_id = $3 AND action = 'admin.policy.disabled'),
+                'replacement_audit_exact', (SELECT after_state = to_jsonb(p)
+                    FROM audit_logs a JOIN policies p
+                      ON (p.tenant_id, p.id) = (a.tenant_id, a.target_id)
+                    WHERE a.tenant_id = $3 AND a.action = 'admin.policy.disabled'
+                    LIMIT 1)
+            )
+            "#,
+        )
+        .bind(id(&first))
+        .bind(id(&second))
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state["first"], "disabled");
+        assert_eq!(state["second"], "active");
+        assert_eq!(state["active_count"], 1);
+        assert_eq!(state["replacement_audits"], 1);
+        assert_eq!(state["replacement_audit_exact"], true);
+    }
+
+    #[sqlx::test]
+    async fn concurrent_policy_activation_keeps_exactly_one_active_scope(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'admin', 'admin')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let first = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({"policy_key":"concurrent","revision":1,"configuration":{}}),
+                source,
+                source,
+                "create-concurrent-one",
+            )
+            .await
+            .unwrap();
+        let second = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({"policy_key":"concurrent","revision":2,"configuration":{}}),
+                source,
+                source,
+                "create-concurrent-two",
+            )
+            .await
+            .unwrap();
+        let first_service = service.clone();
+        let first_context = context.clone();
+        let (first_result, second_result) = tokio::join!(
+            first_service.set_registry_lifecycle(
+                &first_context,
+                ResourceTarget::new(ResourceKind::Policies, id(&first)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned()
+                },
+                source,
+                source,
+                "activate-concurrent-one",
+            ),
+            service.set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Policies, id(&second)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned()
+                },
+                source,
+                source,
+                "activate-concurrent-two",
+            )
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM policies WHERE tenant_id = $1 AND lifecycle_state = 'active'",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active, 1);
     }
 }

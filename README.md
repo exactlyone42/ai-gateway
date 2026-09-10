@@ -33,6 +33,8 @@ Exact compatibility is tracked in `docs/client-compatibility.md`; product
 capabilities can change and must be verified before declaring support.
 Model registry administration and lifecycle ordering are documented in
 `docs/model-registry.md`.
+Request policy resolution, hints, constraints, and rollout are documented in
+`docs/request-policy.md`.
 
 ## Current milestone
 
@@ -43,6 +45,7 @@ The repository contains the native Anthropic and OpenAI data-plane slice:
 - `POST /v1/responses` and `/v1/chat/completions`, including incremental SSE
 - tenant-scoped `GET /v1/models` and deterministic routing from the active PostgreSQL registry
 - tenant-scoped virtual credentials with constant-time HMAC verification
+- seven-layer request policy resolution with immutable decision snapshots
 - cancellation propagation, durable usage accounting, request IDs, traces,
   metrics, and structured JSON logs
 
@@ -94,6 +97,7 @@ for which problem, so you do not have to load everything.
 - `docs/admin-web.md` — Admin report definitions, operator questions and browser security
 - `docs/product-requirements.md` — roles, policies and acceptance criteria
 - `docs/client-compatibility.md` — integration contract by client
+- `docs/request-policy.md` — policy scopes, request hints, constraints and rollout
 - `docs/operations.md` — rollout and incident controls
 - `loops/` — one live status file per segment
 

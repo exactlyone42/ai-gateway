@@ -152,6 +152,9 @@ export function RequestsPage() {
     {selected && <div className="drawer-backdrop" onClick={() => setSelected(null)}><aside className="drawer" onClick={(event) => event.stopPropagation()}><header><h2>Request detail</h2><button className="icon-button" title="Close" onClick={() => setSelected(null)}><X /></button></header>
       <QueryBody query={detail}>{(data) => <><dl className="detail-list"><dt>Request ID</dt><dd>{data.request.request_id}</dd><dt>Trace ID</dt><dd>{data.request.trace_id ?? 'Unavailable'}</dd><dt>Status</dt><dd><Status value={data.request.status} /></dd><dt>Operation</dt><dd>{data.request.operation}</dd></dl>
         <h3>Registry selection</h3><dl className="detail-list"><dt>Selector</dt><dd>{data.request.selector_kind ? `${data.request.selector_kind}:${data.request.selector_value}` : 'Unavailable'}</dd><dt>Alias</dt><dd>{data.request.selected_alias_id ? `${data.request.selected_alias_id} v${data.request.selected_alias_version}` : 'Direct model'}</dd><dt>Model</dt><dd>{data.request.selected_model_id ? `${data.request.selected_model_id} v${data.request.selected_model_version}` : 'Unavailable'}</dd><dt>Provider</dt><dd>{data.request.selected_provider_id ? `${data.request.selected_provider_id} v${data.request.selected_provider_version}` : 'Unavailable'}</dd><dt>Provider model</dt><dd>{data.request.selected_provider_model_id ?? 'Unavailable'}</dd><dt>Cost metadata</dt><dd><code>{JSON.stringify(data.request.selected_cost_metadata ?? {})}</code></dd></dl>
+        <h3>Effective policy</h3>{data.request.policy_decision
+          ? <pre className="decision-json">{JSON.stringify(data.request.policy_decision, null, 2)}</pre>
+          : <Unavailable reason="No policy snapshot was recorded for this request." />}
         <h3>Provider attempts</h3><DataTable rows={data.attempts} columns={[{ key: 'attempt_number', label: '#' }, { key: 'provider', label: 'Provider' }, { key: 'model', label: 'Model' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />
         <Unavailable reason={data.retry_fallback_history?.unavailable_reason} /><Unavailable reason={data.trace_spans?.unavailable_reason} /></>}</QueryBody>
     </aside></div>}
@@ -253,12 +256,82 @@ function CatalogDialog({ kind, initial, providers, models, busy, onClose, onSubm
 }
 
 export function GovernancePage() {
+  const auth = useAuth()
+  const queryClient = useQueryClient()
   const query = useAdminQuery<JsonObject>(['governance'], '/governance')
-  return <Page title="Policies & Scheduler"><QueryBody query={query}>{(data) => <>
-    <div className="availability-grid"><Unavailable reason={data.policy_runtime?.unavailable_reason} /><Unavailable reason={data.quota_runtime?.unavailable_reason} /><Unavailable reason={data.scheduler?.unavailable_reason} /></div>
-    <section className="section"><h2>Policy drafts</h2><DataTable rows={data.policies ?? []} columns={[{ key: 'policy_key', label: 'Policy' }, { key: 'revision', label: 'Revision' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }]} /></section>
+  const identities = useAdminQuery<JsonObject>(['identity-map'], '/identity-map')
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<JsonObject | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const canWrite = auth.role !== 'viewer'
+  const canActivate = auth.role === 'admin'
+  const mutate = async (path: string, init: RequestInit) => {
+    setBusy(true); setError(null)
+    try {
+      await adminRequest(path, auth.token!, auth.clear, init)
+      setCreating(false); setEditing(null)
+      await queryClient.invalidateQueries({ queryKey: ['governance'] })
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
+    finally { setBusy(false) }
+  }
+  const lifecycle = (row: JsonObject) => mutate(`/policies/${row.id}/lifecycle`, { method: 'POST', body: JSON.stringify({ version: row.version, state: row.lifecycle_state === 'active' ? 'disabled' : 'active' }) })
+  return <Page title="Policies & Scheduler" actions={canWrite ? <button onClick={() => setCreating(true)}><Plus size={16} />Policy</button> : undefined}>
+    {error && <div className="state error">{error}</div>}
+    <QueryBody query={query}>{(data) => <>
+    <div className="health-summary"><div><span>Policy runtime</span><Status value={data.policy_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.policy_runtime?.active_count ?? 0} active</small></div>
+    <div className="availability-grid">{!data.quota_runtime?.available && <Unavailable reason={data.quota_runtime?.unavailable_reason} />}{!data.scheduler?.available && <Unavailable reason={data.scheduler?.unavailable_reason} />}</div>
+    <section className="section catalog-table"><h2>Policies</h2><DataTable rows={data.policies ?? []} columns={[{ key: 'policy_key', label: 'Policy' }, { key: 'revision', label: 'Revision' }, { key: 'scope', label: 'Scope', render: policyTarget }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }, ...((canWrite || canActivate) ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
+      {canWrite && row.lifecycle_state === 'draft' && <button className="icon-button" title="Edit policy" disabled={busy} onClick={() => setEditing(row)}><Pencil /></button>}
+      {canWrite && ['draft', 'disabled'].includes(row.lifecycle_state) && <button className="icon-button danger" title="Archive policy" disabled={busy} onClick={() => void mutate(`/policies/${row.id}?version=${row.version}`, { method: 'DELETE' })}><Trash2 /></button>}
+      {canActivate && row.lifecycle_state !== 'archived' && <button className={`icon-button ${row.lifecycle_state === 'active' ? 'danger' : ''}`} title={row.lifecycle_state === 'active' ? 'Disable policy' : 'Activate policy'} disabled={busy} onClick={() => void lifecycle(row)}>{row.lifecycle_state === 'active' ? <PowerOff /> : <CirclePower />}</button>}
+    </div> }] : [])]} /></section>
     <section className="section"><h2>Quota drafts</h2><DataTable rows={data.quotas ?? []} columns={[{ key: 'quota_key', label: 'Quota' }, { key: 'revision', label: 'Revision' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }]} /></section>
+    {(creating || editing) && <PolicyDialog initial={editing} identities={identities.data} busy={busy} onClose={() => { setCreating(false); setEditing(null) }} onSubmit={(path, body, method) => void mutate(path, { method, body: JSON.stringify(body) })} />}
   </>}</QueryBody></Page>
+}
+
+function policyScope(row: JsonObject) {
+  return ['user', 'device', 'client', 'agent', 'credential'].find((scope) => row[`${scope}_id`]) ?? 'global'
+}
+
+function policyTarget(row: JsonObject) {
+  const scope = policyScope(row)
+  if (scope === 'global') return scope
+  return `${scope} · ${String(row[`${scope}_id`]).slice(0, 8)}`
+}
+
+function PolicyDialog({ initial, identities, busy, onClose, onSubmit }: { initial: JsonObject | null; identities?: JsonObject; busy: boolean; onClose: () => void; onSubmit: (path: string, body: JsonObject, method: string) => void }) {
+  const [scope, setScope] = useState(initial ? policyScope(initial) : 'global')
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const entities = scope === 'global' ? [] : scope === 'credential'
+    ? (identities?.paths ?? []).map((path: JsonObject) => path.credential)
+    : principalEntities(identities, scope)
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setValidationError(null)
+    const data = new FormData(event.currentTarget)
+    let configuration: JsonObject
+    try { configuration = JSON.parse(String(data.get('configuration'))) }
+    catch { setValidationError('Configuration must be valid JSON.'); return }
+    if (!configuration || Array.isArray(configuration) || typeof configuration !== 'object') {
+      setValidationError('Configuration must be a JSON object.'); return
+    }
+    if (initial) { onSubmit(`/policies/${initial.id}`, { version: initial.version, configuration }, 'PATCH'); return }
+    const scopedId = scope === 'global' ? null : String(data.get('scope_id') || '')
+    if (scope !== 'global' && !scopedId) { setValidationError('Select a scope target.'); return }
+    onSubmit('/policies', {
+      policy_key: data.get('policy_key'), revision: Number(data.get('revision')),
+      user_id: scope === 'user' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
+      client_id: scope === 'client' ? scopedId : null, agent_id: scope === 'agent' ? scopedId : null,
+      credential_id: scope === 'credential' ? scopedId : null, configuration,
+    }, 'POST')
+  }
+  return <div className="dialog-backdrop"><form className="dialog policy-dialog" onSubmit={submit}><header><h2>{initial ? 'Edit policy' : 'Create policy'}</h2><button type="button" className="icon-button" title="Close" onClick={onClose}><X /></button></header>
+    {validationError && <div className="state error">{validationError}</div>}
+    {!initial && <><label>Policy key<input name="policy_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'device', 'client', 'agent', 'credential'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
+    <label>Configuration<textarea name="configuration" required spellCheck={false} defaultValue={JSON.stringify(initial?.configuration ?? { defaults: { workload_class: 'interactive', urgency: 'normal', quality: 'standard', budget_class: 'normal' } }, null, 2)} /></label>
+    <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>
+  </form></div>
 }
 
 export function HealthPage() {

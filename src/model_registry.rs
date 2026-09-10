@@ -985,6 +985,7 @@ mod tests {
                 budget_class: None,
                 estimated_tokens: Some(1),
                 selection: Some(snapshot.clone()),
+                policy: None,
                 principal: PrincipalContext {
                     tenant_id,
                     credential_id: Uuid::nil(),
