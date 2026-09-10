@@ -24,9 +24,10 @@
 | `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label、camelCase | 每次 |
 | `deadfiles` | 沒有任何 `mod` 走得到的 `.rs`（＝cargo 根本沒編譯它） | 每次 |
 | `clients` | 六個 Client 的 13 欄結構、重播產物存在性與去敏 capture schema | 改相容性文件／產物後 |
+| `frontend` | Admin Web lint、TypeScript project references、Vitest、production build | 改 `web/` 後 |
 | `secrets` | **起服務跑一輪，掃它印出來的每一行**：金鑰／prompt／PII 都不得出現 | PR 前（`all` 會跑） |
 | `selftest` | **證明 Rust bans／deadfiles 關卡真的抓得到東西**（29 條斷言，含正對照） | 改上述兩關後 |
-| `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `secrets` ＋ `selftest` | **PR 前、合併前** |
+| `all` / `pre-push` | 上面全部 ＋ `frontend` ＋ `clippy --all-targets` ＋ `cargo test` ＋ `secrets` ＋ `selftest` | **PR 前、合併前** |
 
 ### 關卡自己也要被驗
 

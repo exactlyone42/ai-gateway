@@ -19,8 +19,10 @@ use crate::error::ErrorType;
 use crate::identity::CredentialService;
 
 mod accounts;
+mod reports;
 mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
+pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, UsageQuery};
 pub use resources::{
     DeleteQuery, ListQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
     RotateCredentialInput,
@@ -84,6 +86,60 @@ pub const RBAC_RULES: &[RbacRule] = &[
     RbacRule {
         method: "GET",
         route: "/admin/v1/{resource}",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/overview",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/identity-map",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/requests",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/requests/{id}",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/usage",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/audit",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/catalog",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/governance",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/system-health",
         action: AdminAction::ReadResource,
         roles: ALL_ROLES,
     },
