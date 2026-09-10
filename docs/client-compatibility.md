@@ -15,7 +15,7 @@
 
 | Client | 狀態 | 自訂端點方式 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | **supported** | `ANTHROPIC_BASE_URL` | Anthropic Messages | 待做（W05） |
+| Claude Code CLI | **supported** | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2026-09-11 已通過 |
 | Codex CLI | **supported** | `~/.codex/config.toml` 的 `model_providers` | OpenAI Responses | 待做（W06） |
 | Claude Desktop | **pending** | 只有 Claude apps gateway 的 `/user/bootstrap` 協定 | 該協定自有格式 | — |
 | VS Code（Copilot Chat） | **supported**（聊天／agent 面） | `chatLanguageModels.json` 的 Custom Endpoint | Chat Completions／Responses／**Anthropic Messages** 三選一 | 待做 |
@@ -31,8 +31,8 @@
 | 欄位 | 值 |
 | --- | --- |
 | client | Claude Code CLI |
-| version | 2.1.263（本機 `claude --version`） |
-| verification_date | 2026-09-08 |
+| version | 2.1.267（本機 `claude --version`） |
+| verification_date | 2026-09-11 |
 | custom_endpoint | `ANTHROPIC_BASE_URL`（shell 環境變數、`settings.json` 的 `env` 區塊、或 managed settings） |
 | protocol | Anthropic Messages。端點 `POST /v1/messages`、`POST /v1/messages/count_tokens`（可選）。推論實際打 `/v1/messages?beta=true`，**比對 path 不要比對整個 URL** |
 | authentication | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer <值>`；或 `ANTHROPIC_API_KEY` → `x-api-key`。兩個都給時兩個標頭都會送 |
@@ -44,6 +44,12 @@
 | model discovery | `GET /v1/models?limit=1000`，3 秒逾時，**任何重導向都算失敗**（連 http→https 也算）。回 `data[]`，讀 `id`／`display_name`／`description`。**只保留 `id` 含 `claude` 或 `anthropic` 的項目**（不分大小寫；`vertex_ai/claude-...` 這種前綴也通得過）。Client 端要設 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，預設關閉 |
 | 送上門的歸屬標頭 | `x-claude-code-session-id`（session 關聯，不必解析 body）、`x-claude-code-agent-id`（子 Agent）、`x-claude-code-parent-agent-id`（巢狀）。**agent id 不是人的識別**，官方明文 |
 | official_source | <https://code.claude.com/docs/en/llm-gateway-protocol>、<https://code.claude.com/docs/en/llm-gateway>、<https://code.claude.com/docs/en/env-vars> |
+
+**實測往返**：Claude Code 2.1.267 以 `ANTHROPIC_BASE_URL` 與
+`ANTHROPIC_AUTH_TOKEN` 指向本機 gateway，gateway 再連可控 Anthropic SSE mock；
+`claude -p --model claude-test --max-turns 1` 最終輸出精確為
+`W05_CLAUDE_CODE_OK`。這證明 CLI 的 Messages 呼叫與 SSE 解析能走自架端點；
+不證明真 Anthropic 帳號、正式模型或計費已被實際使用。
 
 **設定範例**
 

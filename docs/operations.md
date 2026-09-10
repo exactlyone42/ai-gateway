@@ -34,13 +34,14 @@ restart after a rollback without deleting schema or migration history.
 
 ## Usage ledger spool
 
-Every accepted inference reserves two fixed-size files in `LEDGER_SPOOL_DIR`
+Every accepted inference reserves three fixed-size files in `LEDGER_SPOOL_DIR`
 before the provider is called. `LEDGER_SPOOL_MAX_BYTES` is a hard logical and
 physical ceiling; when it is full, the gateway rejects the new request before
 it can incur provider cost. One file preserves the interrupted state and the
-other is a preallocated completion workspace, so finishing never needs new disk
-space after provider cost. The default is 64 MiB with 32 KiB per file, allowing
-1,024 reserved requests.
+the other two are alternating preallocated checkpoint workspaces. The previous
+complete checkpoint remains intact while the next is written, so a torn write
+cannot erase all observed usage. The default is 64 MiB with 32 KiB per file,
+allowing 682 reserved requests.
 
 An envelope contains metadata only and is fsynced before a response is
 considered accounted for. The container mounts the directory from the

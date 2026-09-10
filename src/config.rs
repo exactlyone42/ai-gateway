@@ -9,11 +9,14 @@ pub struct Config {
     pub listen_address: SocketAddr,
     pub litellm_base_url: String,
     pub litellm_master_key: String,
+    /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
+    pub anthropic_base_url: String,
+    pub anthropic_api_key: String,
+    pub anthropic_request_max_bytes: usize,
     pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
-    /// provider at all, so log records carry no `trace_id` either -- only the
-    /// request id. Correlating one request across services needs this set.
+    /// exporter; local spans and trace ids remain available either way.
     pub otlp_endpoint: Option<String>,
     /// `DATABASE_URL`. Required: the gateway keeps its identities, policies
     /// and usage ledger here, so starting without one would mean starting
@@ -70,6 +73,8 @@ pub enum ConfigError {
     InvalidUpstreamProvider,
     #[error("invalid ledger spool capacity: {0}")]
     InvalidLedgerSpoolCapacity(String),
+    #[error("invalid ANTHROPIC_REQUEST_MAX_BYTES: {0}")]
+    InvalidAnthropicRequestLimit(String),
 }
 
 impl Config {
@@ -81,6 +86,22 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
         let litellm_master_key = required("LITELLM_MASTER_KEY")?;
+        let anthropic_base_url = env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
+            .trim_end_matches('/')
+            .to_owned();
+        let anthropic_api_key = required("ANTHROPIC_API_KEY")?;
+        let anthropic_request_max_bytes = env::var("ANTHROPIC_REQUEST_MAX_BYTES")
+            .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidAnthropicRequestLimit(error.to_string())
+            })?;
+        if anthropic_request_max_bytes == 0 {
+            return Err(ConfigError::InvalidAnthropicRequestLimit(
+                "must be greater than zero".to_owned(),
+            ));
+        }
         let allowed_models = env::var("ALLOWED_MODELS")
             .unwrap_or_else(|_| "company-default".to_owned())
             .split(',')
@@ -165,14 +186,14 @@ impl Config {
                 "LEDGER_SPOOL_ENTRY_MAX_BYTES must be at least {MIN_ENTRY_MAX_BYTES}"
             )));
         }
-        let reserved_bytes = ledger_spool_entry_max_bytes.checked_mul(2).ok_or_else(|| {
+        let reserved_bytes = ledger_spool_entry_max_bytes.checked_mul(3).ok_or_else(|| {
             ConfigError::InvalidLedgerSpoolCapacity(
                 "LEDGER_SPOOL_ENTRY_MAX_BYTES is too large".to_owned(),
             )
         })?;
         if ledger_spool_max_bytes < reserved_bytes {
             return Err(ConfigError::InvalidLedgerSpoolCapacity(
-                "LEDGER_SPOOL_MAX_BYTES must reserve two LEDGER_SPOOL_ENTRY_MAX_BYTES files"
+                "LEDGER_SPOOL_MAX_BYTES must reserve three LEDGER_SPOOL_ENTRY_MAX_BYTES files"
                     .to_owned(),
             ));
         }
@@ -181,6 +202,9 @@ impl Config {
             listen_address,
             litellm_base_url,
             litellm_master_key,
+            anthropic_base_url,
+            anthropic_api_key,
+            anthropic_request_max_bytes,
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,

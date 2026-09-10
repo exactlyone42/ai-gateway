@@ -1,12 +1,16 @@
 mod chat_completions;
 mod health;
+mod messages;
+
+pub(crate) use messages::StreamingResponse;
 
 use std::sync::Arc;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::HeaderName,
-    routing::{get, post},
+    routing::{get, head, post},
 };
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
@@ -19,9 +23,14 @@ use crate::{
 /// and the layers every request crosses.
 pub fn router(state: Arc<AppState>) -> Router {
     let request_id_header = HeaderName::from_static(REQUEST_ID_HEADER);
+    let request_max_bytes = state.config.anthropic_request_max_bytes;
 
     let authenticated = Router::new()
         .route("/v1/chat/completions", post(chat_completions::handle))
+        .route("/v1/messages", post(messages::messages))
+        .route("/v1/messages/count_tokens", post(messages::count_tokens))
+        .route("/v1/models", get(messages::models))
+        .layer(DefaultBodyLimit::max(request_max_bytes))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_client_key,
@@ -33,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(health::live))
         .route("/health", get(health::live))
         .route("/ready", get(health::ready))
+        .route("/api/hello", head(messages::hello))
         .merge(authenticated)
         .with_state(state.clone())
         // Innermost first: the access log needs the id already set and the
@@ -50,19 +60,25 @@ pub fn router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
+    use std::time::Duration;
 
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
+        extract::OriginalUri,
         http::{Request, StatusCode},
+        response::Response,
         routing::post,
     };
+    use futures_util::StreamExt as _;
     use serde_json::json;
     use sqlx::{PgPool, Row as _};
+    use tokio::sync::Notify;
     use tower::ServiceExt as _;
+    use uuid::Uuid;
 
     use super::router;
     use chrono::Utc;
@@ -81,6 +97,9 @@ mod tests {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             litellm_base_url: "http://127.0.0.1:1".to_owned(),
             litellm_master_key: "upstream-key".to_owned(),
+            anthropic_base_url: "http://127.0.0.1:1".to_owned(),
+            anthropic_api_key: "provider-key".to_owned(),
+            anthropic_request_max_bytes: 32 * 1024 * 1024,
             bootstrap_client_key: Some("client-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -484,7 +503,7 @@ mod tests {
 
         let mut config = test_config();
         config.litellm_base_url = format!("http://{address}");
-        config.ledger_spool_max_bytes = 64 * 1024;
+        config.ledger_spool_max_bytes = 96 * 1024;
         config.ledger_spool_entry_max_bytes = 32 * 1024;
         let spool_dir = config.ledger_spool_dir.clone();
         let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
@@ -575,6 +594,528 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         assert!(!called.load(Ordering::Acquire), "the upstream was called");
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[derive(Clone, Debug)]
+    struct SeenAnthropicRequest {
+        uri: String,
+        authorization: Option<String>,
+        api_key: Option<String>,
+        version: Option<String>,
+        beta: Option<String>,
+        body: Vec<u8>,
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_is_incremental_and_preserves_the_wire_contract() {
+        let log_buffer = logging::capture::Buffer::default();
+        let (subscriber, _traces) = logging::test_subscriber(log_buffer.clone());
+        let log_guard = tracing::subscriber::set_default(subscriber);
+        let release = Arc::new(Notify::new());
+        let release_for_server = Arc::clone(&release);
+        let seen = Arc::new(Mutex::new(None));
+        let seen_by_server = Arc::clone(&seen);
+        let first = b": keepalive\n\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":7}}}\n\n".to_vec();
+        let second = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec();
+        let first_by_server = first.clone();
+        let second_by_server = second.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(
+                move |OriginalUri(uri): OriginalUri,
+                      headers: axum::http::HeaderMap,
+                      body: axum::body::Bytes| {
+                    let release = Arc::clone(&release_for_server);
+                    let seen = Arc::clone(&seen_by_server);
+                    let first = first_by_server.clone();
+                    let second = second_by_server.clone();
+                    async move {
+                        *seen.lock().unwrap() = Some(SeenAnthropicRequest {
+                            uri: uri.to_string(),
+                            authorization: headers
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .map(ToOwned::to_owned),
+                            api_key: headers
+                                .get("x-api-key")
+                                .and_then(|v| v.to_str().ok())
+                                .map(ToOwned::to_owned),
+                            version: headers
+                                .get("anthropic-version")
+                                .and_then(|v| v.to_str().ok())
+                                .map(ToOwned::to_owned),
+                            beta: headers
+                                .get("anthropic-beta")
+                                .and_then(|v| v.to_str().ok())
+                                .map(ToOwned::to_owned),
+                            body: body.to_vec(),
+                        });
+                        let stream = async_stream::stream! {
+                            yield Ok::<_, std::io::Error>(first);
+                            release.notified().await;
+                            yield Ok::<_, std::io::Error>(second);
+                            std::future::pending::<()>().await;
+                        };
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .header("request-id", "provider-request-1")
+                            .body(Body::from_stream(stream))
+                            .unwrap()
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let request_body = br#"{"model":"claude-test","stream":true,"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]}"#;
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            router(state.clone()).oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages?beta=true&x=a%2Fb&x=2")
+                    .header("x-api-key", "client-key")
+                    .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta", "feature-a,feature-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body.as_slice()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the gateway buffered before returning headers")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["request-id"], "provider-request-1");
+
+        let mut response_body = response.into_body().into_data_stream();
+        let first_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
+            .await
+            .expect("the first event was buffered behind the provider barrier")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_received.as_ref(), first.as_slice());
+        assert!(
+            !log_buffer
+                .lines()
+                .iter()
+                .any(|line| line["event"]["name"] == "http.access"),
+            "the request was logged complete while its body was still active"
+        );
+        release.notify_one();
+        let second_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
+            .await
+            .expect("the terminal event was not relayed")
+            .unwrap()
+            .unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(1), response_body.next())
+            .await
+            .expect("the gateway waited for transport EOF after message_stop");
+        assert!(ended.is_none());
+        let relayed = [first_received.as_ref(), second_received.as_ref()].concat();
+        assert_eq!(relayed, [first, second].concat());
+        assert_eq!(
+            log_buffer
+                .lines()
+                .iter()
+                .filter(|line| line["event"]["name"] == "http.access")
+                .count(),
+            1,
+            "stream completion did not produce exactly one access line"
+        );
+
+        let observed = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(observed.uri, "/v1/messages?beta=true&x=a%2Fb&x=2");
+        assert_eq!(observed.authorization, None);
+        assert_eq!(observed.api_key.as_deref(), Some("provider-key"));
+        assert_eq!(observed.version.as_deref(), Some("2023-06-01"));
+        assert_eq!(observed.beta.as_deref(), Some("feature-a,feature-b"));
+        assert_eq!(observed.body, request_body);
+
+        state.ledger.wait_for_idle().await;
+        drop(log_guard);
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn eof_without_message_stop_is_a_stream_error() {
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                (
+                    [("content-type", "text/event-stream")],
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_partial\"}}\n\n",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let logs = logging::capture::Buffer::default();
+        let (subscriber, _provider) = logging::test_subscriber(logs.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("x-api-key", "client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(to_bytes(response.into_body(), 4096).await.is_err());
+        assert!(logs.lines().iter().any(|line| {
+            line["event"]["name"] == "http.access" && line["error"]["type"] == "stream_body_error"
+        }));
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    struct DisconnectSignal(Arc<Notify>);
+
+    impl Drop for DisconnectSignal {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_client_body_closes_the_provider_stream() {
+        let disconnected = Arc::new(Notify::new());
+        let disconnected_by_server = Arc::clone(&disconnected);
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let signal = Arc::clone(&disconnected_by_server);
+                async move {
+                    let stream = async_stream::stream! {
+                        let _signal = DisconnectSignal(signal);
+                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+                            b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_cancel\",\"usage\":{\"input_tokens\":1}}}\n\n",
+                        ));
+                        std::future::pending::<()>().await;
+                    };
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_address = gateway_listener.local_addr().unwrap();
+        let gateway_task =
+            tokio::spawn(
+                async move { axum::serve(gateway_listener, router(state)).await.unwrap() },
+            );
+        let response = reqwest::Client::new()
+            .post(format!("http://{gateway_address}/v1/messages"))
+            .header("x-api-key", "client-key")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-test","stream":true}"#)
+            .send()
+            .await
+            .unwrap();
+        let mut response_body = response.bytes_stream();
+        assert!(response_body.next().await.unwrap().is_ok());
+        drop(response_body);
+        tokio::time::timeout(Duration::from_secs(1), disconnected.notified())
+            .await
+            .expect("the provider connection remained open after client cancellation");
+
+        upstream_task.abort();
+        gateway_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn anthropic_stream_persists_ids_timings_and_separate_usage(pool: PgPool) {
+        let upstream = Router::new()
+            .route(
+                "/v1/messages",
+                post(|| async {
+                    (
+                        [("content-type", "text/event-stream"), ("request-id", "provider-req-db")],
+                        concat!(
+                            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_db\",\"usage\":{\"input_tokens\":13,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":2}}}\n\n",
+                            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n",
+                            "data: {\"type\":\"message_stop\"}\n\n"
+                        ),
+                    )
+                }),
+            )
+            .route(
+                "/v1/messages/count_tokens",
+                post(|| async { Json(json!({"input_tokens": 99})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.database_url = "managed-by-sqlx-test".to_owned();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let buffer = logging::capture::Buffer::default();
+        let (subscriber, _provider) = logging::test_subscriber(buffer);
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("x-api-key", "client-key")
+                    .header("x-request-id", "gateway-wire-id")
+                    .header("x-claude-code-session-id", "session-1")
+                    .header("x-claude-code-agent-id", "agent-1")
+                    .header("x-claude-code-parent-agent-id", "parent-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("message_stop"));
+        state.ledger.wait_for_idle().await;
+
+        let row = sqlx::query(
+            r#"
+            SELECT gr.id, gr.session_id, gr.trace_id, gr.client_agent_id,
+                   gr.parent_agent_id, gr.request_received_at, gr.queue_entered_at,
+                   gr.queue_left_at, gr.client_first_byte_at, gr.completed_at,
+                   gr.total_latency IS NOT NULL AS total_latency_present,
+                   gr.gateway_overhead IS NOT NULL AS gateway_overhead_present,
+                   pa.id AS attempt_id, pa.provider_request_id,
+                   pa.provider_response_id, pa.provider_request_at,
+                   pa.provider_first_byte_at,
+                   pa.provider_ttft IS NOT NULL AS provider_ttft_present
+            FROM gateway_requests gr
+            JOIN provider_attempts pa ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
+            WHERE gr.request_id = 'gateway-wire-id'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!row.get::<Uuid, _>("id").is_nil());
+        assert!(!row.get::<Uuid, _>("attempt_id").is_nil());
+        assert_eq!(row.get::<String, _>("session_id"), "session-1");
+        assert_eq!(row.get::<String, _>("client_agent_id"), "agent-1");
+        assert_eq!(row.get::<String, _>("parent_agent_id"), "parent-1");
+        assert_eq!(
+            row.get::<String, _>("provider_request_id"),
+            "provider-req-db"
+        );
+        assert_eq!(row.get::<String, _>("provider_response_id"), "msg_db");
+        assert_eq!(row.get::<String, _>("trace_id").len(), 32);
+        for field in [
+            "request_received_at",
+            "client_first_byte_at",
+            "completed_at",
+            "provider_request_at",
+            "provider_first_byte_at",
+        ] {
+            assert!(
+                row.try_get::<chrono::DateTime<Utc>, _>(field).is_ok(),
+                "missing {field}"
+            );
+        }
+        assert!(row.get::<bool, _>("total_latency_present"));
+        assert!(row.get::<bool, _>("gateway_overhead_present"));
+        assert!(row.get::<bool, _>("provider_ttft_present"));
+        assert!(
+            row.try_get::<chrono::DateTime<Utc>, _>("queue_entered_at")
+                .is_err()
+        );
+        assert!(
+            row.try_get::<chrono::DateTime<Utc>, _>("queue_left_at")
+                .is_err()
+        );
+
+        let usage = sqlx::query(
+            "SELECT source, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens FROM usage_records ORDER BY source",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].get::<String, _>("source"), "estimated");
+        assert_eq!(usage[1].get::<String, _>("source"), "provider_reported");
+        assert_eq!(usage[1].get::<i64, _>("input_tokens"), 13);
+        assert_eq!(usage[1].get::<i64, _>("output_tokens"), 4);
+        assert_eq!(usage[1].get::<i64, _>("cached_input_tokens"), 5);
+        assert_eq!(usage[1].get::<i64, _>("cache_write_input_tokens"), 2);
+
+        let count_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header("authorization", "Bearer client-key")
+                    .header("x-request-id", "count-token-id")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count_response.status(), StatusCode::OK);
+        let _ = to_bytes(count_response.into_body(), 1024).await.unwrap();
+        state.ledger.wait_for_idle().await;
+        let count_usage = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM usage_records ur JOIN gateway_requests gr ON gr.id = ur.gateway_request_id WHERE gr.request_id = 'count-token-id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count_usage, 0);
+
+        drop(guard);
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_discovery_prewarm_auth_and_error_contracts_hold() {
+        let encoded_error = axum::body::Bytes::from_static(b"\x1f\x8braw-gzip-sentinel");
+        let encoded_by_server = encoded_error.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let encoded = encoded_by_server.clone();
+                async move {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [
+                            ("content-type", "application/json"),
+                            ("content-encoding", "gzip"),
+                            ("retry-after", "7"),
+                        ],
+                        encoded,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned(), "anthropic-fast".to_owned()];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+
+        let models = tokio::time::timeout(
+            Duration::from_secs(3),
+            router(state.clone()).oneshot(
+                Request::builder()
+                    .uri("/v1/models?limit=1000")
+                    .header("x-api-key", "client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("model discovery exceeded three seconds")
+        .unwrap();
+        assert_eq!(models.status(), StatusCode::OK);
+        assert!(models.headers().get("location").is_none());
+        let models: serde_json::Value =
+            serde_json::from_slice(&to_bytes(models.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(models["data"][0]["id"], "claude-test");
+
+        let hello = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/api/hello")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hello.status(), StatusCode::NO_CONTENT);
+
+        let conflict = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", "Bearer client-key")
+                    .header("x-api-key", "different-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::UNAUTHORIZED);
+
+        let rejected = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("x-api-key", "client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(rejected.headers()["retry-after"], "7");
+        assert_eq!(rejected.headers()["content-encoding"], "gzip");
+        assert_eq!(
+            to_bytes(rejected.into_body(), 4096).await.unwrap().as_ref(),
+            encoded_error.as_ref()
+        );
+
+        state.ledger.wait_for_idle().await;
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
     }

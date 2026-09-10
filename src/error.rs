@@ -14,6 +14,10 @@ pub enum GatewayError {
     Unauthorized,
     #[error("model is not allowed by policy")]
     ModelForbidden,
+    #[error("request body is not valid JSON")]
+    InvalidRequest(#[source] serde_json::Error),
+    #[error("provider configuration is invalid")]
+    InvalidConfiguration,
     #[error("streaming is not available until the SSE accounting path is enabled")]
     StreamingNotImplemented,
     #[error("authentication service is unavailable")]
@@ -45,6 +49,8 @@ impl GatewayError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::InvalidConfiguration => "invalid_configuration",
             Self::StreamingNotImplemented => "streaming_not_implemented",
             Self::AuthenticationUnavailable(_) => "authentication_unavailable",
             Self::Upstream(_) => "upstream_unavailable",
@@ -58,7 +64,11 @@ impl GatewayError {
     /// the request that caused it is the caller's own.
     fn cause(&self) -> Option<String> {
         match self {
-            Self::Unauthorized | Self::ModelForbidden | Self::StreamingNotImplemented => None,
+            Self::Unauthorized
+            | Self::ModelForbidden
+            | Self::StreamingNotImplemented
+            | Self::InvalidConfiguration => None,
+            Self::InvalidRequest(error) => Some(error.to_string()),
             Self::AuthenticationUnavailable(error) => Some(error.to_string()),
             Self::Upstream(error) => Some(error.to_string()),
             Self::ResponseBuild(error) => Some(error.to_string()),
@@ -76,6 +86,8 @@ impl IntoResponse for GatewayError {
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
+            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
             Self::StreamingNotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::AuthenticationUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
