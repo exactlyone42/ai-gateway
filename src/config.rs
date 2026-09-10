@@ -7,12 +7,18 @@ use crate::ledger::MIN_ENTRY_MAX_BYTES;
 #[derive(Clone)]
 pub struct Config {
     pub listen_address: SocketAddr,
-    pub litellm_base_url: String,
-    pub litellm_master_key: String,
+    /// Direct OpenAI-compatible endpoint used by Responses and Chat Completions.
+    pub openai_base_url: String,
+    pub openai_api_key: String,
+    pub openai_provider: String,
+    pub openai_request_max_bytes: usize,
     /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
     pub anthropic_base_url: String,
     pub anthropic_api_key: String,
+    pub anthropic_provider: String,
     pub anthropic_request_max_bytes: usize,
+    /// Maximum bytes in one decoded SSE event and in the held terminal tail.
+    pub stream_event_max_bytes: usize,
     pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
@@ -35,9 +41,6 @@ pub struct Config {
     pub credential_environment: String,
     pub credential_cache_capacity: usize,
     pub credential_cache_ttl_seconds: u64,
-    /// Logical provider name written to each attempt. W10 replaces this
-    /// single-upstream setting with the model registry.
-    pub upstream_provider: String,
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
@@ -69,12 +72,16 @@ pub enum ConfigError {
     InvalidCredentialCacheCapacity(String),
     #[error("invalid CREDENTIAL_CACHE_TTL_SECONDS: {0}")]
     InvalidCredentialCacheTtl(String),
-    #[error("UPSTREAM_PROVIDER must not be empty")]
-    InvalidUpstreamProvider,
+    #[error("OPENAI_PROVIDER and ANTHROPIC_PROVIDER must not be empty")]
+    InvalidProvider,
     #[error("invalid ledger spool capacity: {0}")]
     InvalidLedgerSpoolCapacity(String),
     #[error("invalid ANTHROPIC_REQUEST_MAX_BYTES: {0}")]
     InvalidAnthropicRequestLimit(String),
+    #[error("invalid OPENAI_REQUEST_MAX_BYTES: {0}")]
+    InvalidOpenAiRequestLimit(String),
+    #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
+    InvalidStreamEventLimit(String),
 }
 
 impl Config {
@@ -82,15 +89,29 @@ impl Config {
         let listen_address = env::var("LISTEN_ADDRESS")
             .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
             .parse()?;
-        let litellm_base_url = required("LITELLM_BASE_URL")?
+        let openai_base_url = env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
-        let litellm_master_key = required("LITELLM_MASTER_KEY")?;
+        let openai_api_key = required("OPENAI_API_KEY")?;
+        let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
+        let openai_request_max_bytes = env::var("OPENAI_REQUEST_MAX_BYTES")
+            .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidOpenAiRequestLimit(error.to_string())
+            })?;
+        if openai_request_max_bytes == 0 {
+            return Err(ConfigError::InvalidOpenAiRequestLimit(
+                "must be greater than zero".to_owned(),
+            ));
+        }
         let anthropic_base_url = env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
         let anthropic_api_key = required("ANTHROPIC_API_KEY")?;
+        let anthropic_provider = provider_name("ANTHROPIC_PROVIDER", "anthropic")?;
         let anthropic_request_max_bytes = env::var("ANTHROPIC_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
             .parse()
@@ -99,6 +120,17 @@ impl Config {
             })?;
         if anthropic_request_max_bytes == 0 {
             return Err(ConfigError::InvalidAnthropicRequestLimit(
+                "must be greater than zero".to_owned(),
+            ));
+        }
+        let stream_event_max_bytes = env::var("STREAM_EVENT_MAX_BYTES")
+            .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidStreamEventLimit(error.to_string())
+            })?;
+        if stream_event_max_bytes == 0 {
+            return Err(ConfigError::InvalidStreamEventLimit(
                 "must be greater than zero".to_owned(),
             ));
         }
@@ -168,13 +200,6 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
-        let upstream_provider = env::var("UPSTREAM_PROVIDER")
-            .unwrap_or_else(|_| "configured-upstream".to_owned())
-            .trim()
-            .to_owned();
-        if upstream_provider.is_empty() {
-            return Err(ConfigError::InvalidUpstreamProvider);
-        }
         let ledger_spool_dir = PathBuf::from(
             env::var("LEDGER_SPOOL_DIR").unwrap_or_else(|_| "var/ledger-spool".to_owned()),
         );
@@ -200,11 +225,15 @@ impl Config {
 
         Ok(Self {
             listen_address,
-            litellm_base_url,
-            litellm_master_key,
+            openai_base_url,
+            openai_api_key,
+            openai_provider,
+            openai_request_max_bytes,
             anthropic_base_url,
             anthropic_api_key,
+            anthropic_provider,
             anthropic_request_max_bytes,
+            stream_event_max_bytes,
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,
@@ -216,11 +245,22 @@ impl Config {
             credential_environment,
             credential_cache_capacity,
             credential_cache_ttl_seconds,
-            upstream_provider,
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
         })
+    }
+}
+
+fn provider_name(variable: &'static str, default: &str) -> Result<String, ConfigError> {
+    let value = env::var(variable)
+        .unwrap_or_else(|_| default.to_owned())
+        .trim()
+        .to_owned();
+    if value.is_empty() {
+        Err(ConfigError::InvalidProvider)
+    } else {
+        Ok(value)
     }
 }
 

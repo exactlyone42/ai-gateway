@@ -406,18 +406,17 @@ impl Reservation {
     }
 
     pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
-        self.envelope.complete(completion);
-        self.ledger.inner.spool.encode(&self.envelope)?;
-        // Transfer ownership before the cancellation point. If this future is
-        // dropped while the blocking write runs, Drop must not race it by
-        // publishing the older interrupted envelope.
+        // Keep ownership while the final envelope becomes the durable
+        // checkpoint. Cancellation during that write still publishes a
+        // cancellation record; after it returns, recovery can always promote
+        // the final checkpoint even if publishing `.ready` fails.
+        self.checkpoint(completion).await?;
         let id = self.id.take().ok_or(LedgerError::InvalidCapacity)?;
         let spool = Arc::clone(&self.ledger.inner.spool);
-        let envelope = self.envelope.clone();
         let ledger = self.ledger.clone();
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let result = spool.finish(id, &envelope);
+            let result = spool.publish(id);
             if result.is_ok() {
                 ledger.schedule_flush(&runtime);
             }
@@ -560,11 +559,20 @@ impl TokenUsage {
                 usage,
                 &["cache_read_input_tokens", "cached_input_tokens"],
             )
-            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"])),
+            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"]))
+            .max(value_at(usage, &["input_tokens_details", "cached_tokens"])),
             cache_write_input_tokens: first_u64(
                 usage,
                 &["cache_creation_input_tokens", "cache_write_input_tokens"],
-            ),
+            )
+            .max(value_at(
+                usage,
+                &["input_tokens_details", "cache_write_tokens"],
+            ))
+            .max(value_at(
+                usage,
+                &["prompt_tokens_details", "cache_write_tokens"],
+            )),
             reasoning_tokens: first_u64(usage, &["reasoning_tokens"]).max(value_at(
                 usage,
                 &["output_tokens_details", "reasoning_tokens"],
@@ -580,11 +588,20 @@ impl TokenUsage {
                 usage,
                 &["cache_read_input_tokens", "cached_input_tokens"],
             )
-            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"])),
+            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"]))
+            .max(value_at(usage, &["input_tokens_details", "cached_tokens"])),
             cache_write_input_tokens: first_u64(
                 usage,
                 &["cache_creation_input_tokens", "cache_write_input_tokens"],
-            ),
+            )
+            .max(value_at(
+                usage,
+                &["input_tokens_details", "cache_write_tokens"],
+            ))
+            .max(value_at(
+                usage,
+                &["prompt_tokens_details", "cache_write_tokens"],
+            )),
             reasoning_tokens: first_u64(usage, &["reasoning_tokens"]).max(value_at(
                 usage,
                 &["output_tokens_details", "reasoning_tokens"],
@@ -903,6 +920,10 @@ impl Spool {
     fn finish(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
         self.wait_for_checkpoint(id)?;
         self.checkpoint(id, envelope)?;
+        self.publish(id)
+    }
+
+    fn publish(&self, id: Uuid) -> Result<(), LedgerError> {
         let reserved = self.path(id, "reserved");
         let working = self.path(id, "working");
         fs::rename(&working, self.path(id, "ready")).map_err(LedgerError::Io)?;
@@ -1261,6 +1282,50 @@ mod tests {
             Some("msg_checkpoint")
         );
         assert_eq!(recovered[0].1.usage_records.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_checkpoint_survives_a_publish_failure() {
+        let directory = test_directory("publish-failure");
+        let dead_pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 1).unwrap();
+        let ledger = Ledger::open(
+            dead_pool,
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let reservation = ledger
+            .reserve(request_start("publish-failure"))
+            .await
+            .unwrap();
+        let id = reservation.id.unwrap();
+        let ready_obstacle = ledger.inner.spool.path(id, "ready");
+        fs::create_dir(&ready_obstacle).unwrap();
+
+        let result = reservation
+            .finish(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: Some("company-default".to_owned()),
+                selected_provider: Some("test-provider".to_owned()),
+                attempts: Vec::new(),
+                completed_at: Utc::now(),
+            })
+            .await;
+        assert!(matches!(result, Err(LedgerError::Io(_))));
+        fs::remove_dir(&ready_obstacle).unwrap();
+        drop(ledger);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "completed");
         fs::remove_dir_all(directory).unwrap();
     }
 

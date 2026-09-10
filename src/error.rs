@@ -16,10 +16,14 @@ pub enum GatewayError {
     ModelForbidden,
     #[error("request body is not valid JSON")]
     InvalidRequest(#[source] serde_json::Error),
+    #[error("request option is not supported by this gateway")]
+    UnsupportedRequest,
+    #[error("request body exceeds the configured endpoint limit")]
+    PayloadTooLarge,
+    #[error("request body could not be read")]
+    RequestBodyUnavailable(String),
     #[error("provider configuration is invalid")]
     InvalidConfiguration,
-    #[error("streaming is not available until the SSE accounting path is enabled")]
-    StreamingNotImplemented,
     #[error("authentication service is unavailable")]
     AuthenticationUnavailable(#[source] IdentityError),
     #[error("upstream request failed")]
@@ -50,8 +54,10 @@ impl GatewayError {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
             Self::InvalidRequest(_) => "invalid_request",
+            Self::UnsupportedRequest => "unsupported_request",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::RequestBodyUnavailable(_) => "request_body_unavailable",
             Self::InvalidConfiguration => "invalid_configuration",
-            Self::StreamingNotImplemented => "streaming_not_implemented",
             Self::AuthenticationUnavailable(_) => "authentication_unavailable",
             Self::Upstream(_) => "upstream_unavailable",
             Self::ResponseBuild(_) => "response_build_failed",
@@ -66,9 +72,11 @@ impl GatewayError {
         match self {
             Self::Unauthorized
             | Self::ModelForbidden
-            | Self::StreamingNotImplemented
+            | Self::UnsupportedRequest
+            | Self::PayloadTooLarge
             | Self::InvalidConfiguration => None,
             Self::InvalidRequest(error) => Some(error.to_string()),
+            Self::RequestBodyUnavailable(error) => Some(error.clone()),
             Self::AuthenticationUnavailable(error) => Some(error.to_string()),
             Self::Upstream(error) => Some(error.to_string()),
             Self::ResponseBuild(error) => Some(error.to_string()),
@@ -87,8 +95,10 @@ impl IntoResponse for GatewayError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RequestBodyUnavailable(_) => StatusCode::BAD_REQUEST,
             Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::StreamingNotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::AuthenticationUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -96,10 +106,26 @@ impl IntoResponse for GatewayError {
         };
         let mut response = (
             status,
-            Json(json!({"error": {"message": self.to_string()}})),
+            Json(json!({"error": {"code": failure.kind, "message": self.to_string()}})),
         )
             .into_response();
         response.extensions_mut().insert(failure);
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, response::IntoResponse as _};
+
+    use super::GatewayError;
+
+    #[tokio::test]
+    async fn gateway_errors_expose_the_stable_code_in_the_response() {
+        let response = GatewayError::Unauthorized.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "unauthorized");
     }
 }

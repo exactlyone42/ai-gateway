@@ -19,7 +19,8 @@ selftest=0
 # Distinctive so a hit cannot be a coincidence, and marked so a reader of the
 # log knows immediately that the check failed rather than a real key leaked.
 client_key="apg_sentinel_client_key_do_not_log"
-upstream_key="sk_sentinel_upstream_key_do_not_log"
+openai_key="sk_sentinel_openai_key_do_not_log"
+anthropic_key="sk_sentinel_anthropic_key_do_not_log"
 body_token="sentinel_body_token_do_not_log"
 person="sentinel.person@example.invalid"
 prompt="sentinel_prompt_content_do_not_log"
@@ -47,10 +48,10 @@ fi
 
 DATABASE_URL="$DATABASE_URL" \
 LISTEN_ADDRESS="127.0.0.1:$port" \
-LITELLM_BASE_URL="http://127.0.0.1:1/" \
-LITELLM_MASTER_KEY="$upstream_key" \
+OPENAI_BASE_URL="http://127.0.0.1:1/" \
+OPENAI_API_KEY="$openai_key" \
 ANTHROPIC_BASE_URL="http://127.0.0.1:1/" \
-ANTHROPIC_API_KEY="$upstream_key" \
+ANTHROPIC_API_KEY="$anthropic_key" \
 ENABLE_DEVELOPMENT_BOOTSTRAP="true" \
 BOOTSTRAP_CLIENT_KEY="$client_key" \
 CREDENTIAL_HASH_KEY="$credential_hash_key" \
@@ -77,12 +78,15 @@ fi
 base="http://127.0.0.1:$port"
 body="{\"model\":\"company-default\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt $person token=$body_token\"}]}"
 
-# One request carries every runtime sentinel through authentication, parsing,
-# policy and the failed upstream boundary. Repeating probes adds no coverage
-# and can trigger a remote endpoint's rate limit.
+# These are two distinct local handler paths, each called once. Both upstreams
+# point at the local closed port above; this check never probes a remote service.
 curl -s -o /dev/null -X POST "$base/v1/messages" \
   -H "x-api-key: $client_key" -H 'anthropic-version: 2023-06-01' \
   -H 'content-type: application/json' -d "$body"
+curl -s -o /dev/null -X POST "$base/v1/responses" \
+  -H "authorization: Bearer $client_key" \
+  -H 'content-type: application/json' \
+  -d "{\"model\":\"company-default\",\"input\":\"$prompt $person token=$body_token\"}"
 
 kill -INT "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
@@ -92,7 +96,7 @@ if [ "$selftest" = 1 ]; then
 fi
 
 failed=0
-for secret in "$client_key" "$upstream_key" "$body_token" "$person" "$prompt" "$credential_hash_key" "$retiring_hash_key"; do
+for secret in "$client_key" "$openai_key" "$anthropic_key" "$body_token" "$person" "$prompt" "$credential_hash_key" "$retiring_hash_key"; do
   if grep -nF "$secret" "$log" >/dev/null; then
     echo "secret in the log output: $secret"
     grep -nF "$secret" "$log" | sed 's/^/    /'
