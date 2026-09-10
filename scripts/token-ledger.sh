@@ -62,6 +62,7 @@ report="$(jq -s --arg since "$since_utc" --arg until "$until_utc" '
   [ .[]
     | select(.type == "assistant")
     | select(.timestamp >= $since and .timestamp <= $until)
+    | select((.message.model // "") != "<synthetic>")
     | { rid:    (.requestId // .uuid),
         agent:  (.agentName // "main"),
         model:  (.message.model // "-"),
@@ -92,7 +93,7 @@ billed=$(jq -r '.total | (.input + .cache_write + .cache_read + .output)' <<<"$r
 # Positive control. "No usage in this window" and "the reader stopped working"
 # print the same zeros, so a zero is reported as a failure, never as a result.
 # Exit 3 means "not measured", which is not the same as "measured zero".
-if [ "$(jq -r '.total.calls' <<<"$report")" = 0 ]; then
+if [ "$(jq -r '.total.calls' <<<"$report")" = 0 ] || [ "$billed" = 0 ]; then
   cat >&2 <<MSG
 no usage records in this window -- refusing to report 0 as a measurement.
   window:  $since_utc .. $until_utc

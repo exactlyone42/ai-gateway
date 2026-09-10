@@ -12,6 +12,7 @@ use tracing_opentelemetry::{OpenTelemetrySpanExt as _, SetParentError};
 use crate::{
     auth,
     error::{ErrorType, GatewayError},
+    identity::PrincipalContext,
     logging,
     state::AppState,
 };
@@ -20,11 +21,14 @@ use crate::{
 /// valid client key.
 pub async fn require_client_key(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
-    auth::authorize(&state, request.headers())?;
-    Ok(next.run(request).await)
+    let principal = auth::authorize(&state, request.headers()).await?;
+    request.extensions_mut().insert(principal.clone());
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(principal);
+    Ok(response)
 }
 
 /// Request id header, set by the layer above and read back here.
@@ -107,6 +111,11 @@ async fn record(state: Arc<AppState>, request: Request, next: Next) -> Response 
     let cause = failure
         .and_then(|failure| failure.cause)
         .unwrap_or_default();
+    let principal = response
+        .extensions()
+        .get::<PrincipalContext>()
+        .map(PrincipalContext::log_id)
+        .unwrap_or_default();
 
     // One number for both the histogram and the log line.
     let duration = scope.complete(status.as_u16(), &error_type);
@@ -123,6 +132,7 @@ async fn record(state: Arc<AppState>, request: Request, next: Next) -> Response 
                 request_id = %request_id,
                 trace_id = %trace_id,
                 span_id = %span_id,
+                principal = %principal,
                 http.request.method = %method,
                 http.route = %route,
                 url.path = %path,

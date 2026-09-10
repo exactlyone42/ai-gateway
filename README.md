@@ -38,17 +38,18 @@ The repository contains the first compilable Rust data-plane slice:
 
 - `GET /healthz`
 - `POST /v1/chat/completions` (non-streaming, forwards to a configured upstream)
-- bearer-key authentication with constant-time comparison
+- tenant-scoped virtual credentials with constant-time HMAC verification
 - model allowlist from configuration
 - request IDs and structured JSON logs
 
-The bootstrap key is for local development only.
+An explicitly configured bootstrap key remains a dev-only compatibility path. Issued virtual
+credentials resolve through PostgreSQL to a user, device, client and agent.
 
 The work from here is split into 18 independently reviewable segments. Read
 `docs/work-breakdown.md` for the boundaries and dependency order, and
 `loops/README.md` for what is in progress right now. The runbook sections below
 (migration, first admin, create identities, issue keys, configure providers)
-land with segments W02, W03 and W09; they are deliberately absent until the
+land with segments W02, W08 and W09; they are deliberately absent until the
 commands actually exist.
 
 ## Run locally

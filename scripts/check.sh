@@ -19,7 +19,17 @@ fmt()        { step "cargo fmt";               cargo fmt --all; }
 fmt_check()  { step "cargo fmt --check";       cargo fmt --all --check; }
 clippy_fast(){ step "cargo clippy (lib)";      cargo clippy --workspace --all-features -- -D warnings; }
 clippy_full(){ step "cargo clippy (all)";      cargo clippy --workspace --all-targets --all-features -- -D warnings; }
-test_all()   { step "cargo test";              cargo test --workspace --all-features; }
+test_all() {
+  step "cargo test"
+  if [ -z "${DATABASE_URL:-}" ]; then
+    # Database-backed behavior must run in CI, not become an ignored test. The
+    # compose health check owns waiting; this is one bounded service action and
+    # never a retry loop against the database port.
+    docker compose -f deploy/docker-compose.yml up -d --wait postgres >/dev/null
+    export DATABASE_URL="postgres://gateway:gateway-dev@127.0.0.1:${POSTGRES_PORT:-15432}/gateway"
+  fi
+  cargo test --workspace --all-features
+}
 
 # Machine-checkable loop-file rules. A loop file that drifts from the format is
 # a loop file nobody can trust, so this is a gate and not a guideline.
