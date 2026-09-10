@@ -904,6 +904,7 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
         seed_active_openai_model(&pool, tenant_id).await;
@@ -1210,6 +1211,7 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, bounded_pool).unwrap());
         seed_active_openai_model(&pool, tenant_id).await;
@@ -1297,6 +1299,7 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            scheduler: Default::default(),
         };
         let pool = crate::db::pool(&config.database_url, config.database_max_connections).unwrap();
         let state = Arc::new(AppState::new(config, pool).unwrap());

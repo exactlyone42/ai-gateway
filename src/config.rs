@@ -3,12 +3,14 @@ use std::{
     env,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
+use crate::scheduler::SchedulerConfig;
 
 #[derive(Clone)]
 pub struct Config {
@@ -59,6 +61,7 @@ pub struct Config {
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Error)]
@@ -119,6 +122,8 @@ pub enum ConfigError {
     InvalidAdminOrigin,
     #[error("invalid ADMIN_TRUSTED_PROXY_IPS: {0}")]
     InvalidAdminTrustedProxy(String),
+    #[error("invalid scheduler setting: {0}")]
+    InvalidScheduler(String),
 }
 
 impl Config {
@@ -346,6 +351,7 @@ impl Config {
                     .to_owned(),
             ));
         }
+        let scheduler = scheduler_config()?;
 
         Ok(Self {
             listen_address,
@@ -381,6 +387,7 @@ impl Config {
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
+            scheduler,
         })
     }
 
@@ -524,6 +531,86 @@ fn ledger_capacity(name: &'static str, default: u64) -> Result<u64, ConfigError>
         )));
     }
     Ok(value)
+}
+
+fn scheduler_config() -> Result<SchedulerConfig, ConfigError> {
+    let defaults = SchedulerConfig::default();
+    let config = SchedulerConfig {
+        active_interactive_reserved: scheduler_usize(
+            "SCHEDULER_ACTIVE_INTERACTIVE_RESERVED",
+            defaults.active_interactive_reserved,
+        )?,
+        active_shared: scheduler_usize("SCHEDULER_ACTIVE_SHARED", defaults.active_shared)?,
+        active_background_reserved: scheduler_usize(
+            "SCHEDULER_ACTIVE_BACKGROUND_RESERVED",
+            defaults.active_background_reserved,
+        )?,
+        queue_interactive_reserved: scheduler_usize(
+            "SCHEDULER_QUEUE_INTERACTIVE_RESERVED",
+            defaults.queue_interactive_reserved,
+        )?,
+        queue_shared: scheduler_usize("SCHEDULER_QUEUE_SHARED", defaults.queue_shared)?,
+        queue_background_reserved: scheduler_usize(
+            "SCHEDULER_QUEUE_BACKGROUND_RESERVED",
+            defaults.queue_background_reserved,
+        )?,
+        queue_per_tenant: scheduler_usize("SCHEDULER_QUEUE_PER_TENANT", defaults.queue_per_tenant)?,
+        queue_per_credential: scheduler_usize(
+            "SCHEDULER_QUEUE_PER_CREDENTIAL",
+            defaults.queue_per_credential,
+        )?,
+        per_provider: scheduler_usize("SCHEDULER_PER_PROVIDER", defaults.per_provider)?,
+        per_model: scheduler_usize("SCHEDULER_PER_MODEL", defaults.per_model)?,
+        per_user: scheduler_usize("SCHEDULER_PER_USER", defaults.per_user)?,
+        per_device: scheduler_usize("SCHEDULER_PER_DEVICE", defaults.per_device)?,
+        per_client: scheduler_usize("SCHEDULER_PER_CLIENT", defaults.per_client)?,
+        per_agent: scheduler_usize("SCHEDULER_PER_AGENT", defaults.per_agent)?,
+        per_credential: scheduler_usize("SCHEDULER_PER_CREDENTIAL", defaults.per_credential)?,
+        per_workload: scheduler_usize("SCHEDULER_PER_WORKLOAD", defaults.per_workload)?,
+        hard_queue_timeout: Duration::from_millis(scheduler_u64(
+            "SCHEDULER_HARD_QUEUE_TIMEOUT_MS",
+            defaults.hard_queue_timeout.as_millis() as u64,
+        )?),
+        aging_interval: Duration::from_millis(scheduler_u64(
+            "SCHEDULER_AGING_INTERVAL_MS",
+            defaults.aging_interval.as_millis() as u64,
+        )?),
+        aging_enabled: scheduler_bool("SCHEDULER_AGING_ENABLED", defaults.aging_enabled)?,
+        reservations_enabled: scheduler_bool(
+            "SCHEDULER_RESERVATIONS_ENABLED",
+            defaults.reservations_enabled,
+        )?,
+    };
+    config
+        .validate()
+        .map_err(|error| ConfigError::InvalidScheduler(error.to_string()))?;
+    Ok(config)
+}
+
+fn scheduler_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
+    let value = scheduler_u64(name, default as u64)?;
+    usize::try_from(value)
+        .map_err(|_| ConfigError::InvalidScheduler(format!("{name} is too large")))
+}
+
+fn scheduler_u64(name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    let value = env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|error| ConfigError::InvalidScheduler(format!("{name}: {error}")))?;
+    if value == 0 {
+        return Err(ConfigError::InvalidScheduler(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
+
+fn scheduler_bool(name: &'static str, default: bool) -> Result<bool, ConfigError> {
+    env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<bool>()
+        .map_err(|error| ConfigError::InvalidScheduler(format!("{name}: {error}")))
 }
 
 #[cfg(test)]

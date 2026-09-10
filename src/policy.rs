@@ -20,7 +20,7 @@ use crate::{
 const MAX_QUEUE_TIME_MS: u64 = 86_400_000;
 const MAX_POLICY_DOCUMENT_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadClass {
     Critical,
@@ -489,7 +489,7 @@ fn evaluate_layers(
     let quality = max_quality.map_or(requested_quality, |limit| requested_quality.min(limit));
     let budget_class =
         max_budget_class.map_or(requested_budget, |limit| requested_budget.min(limit));
-    let max_queue_time_ms = hints.max_queue_time_ms.or(values.max_queue_time_ms);
+    let max_queue_time_ms = minimum(hints.max_queue_time_ms, values.max_queue_time_ms);
     let queue_deadline = max_queue_time_ms
         .and_then(|value| i64::try_from(value).ok())
         .and_then(|value| received_at.checked_add_signed(Duration::milliseconds(value)));
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn later_queue_default_and_request_hint_follow_declared_precedence() {
+    fn request_queue_hint_cannot_relax_the_effective_policy_limit() {
         let received = Utc::now();
         let result = evaluate_layers(
             vec![
@@ -834,10 +834,10 @@ mod tests {
             received,
         )
         .unwrap();
-        assert_eq!(result.max_queue_time_ms, Some(7000));
+        assert_eq!(result.max_queue_time_ms, Some(5000));
         assert_eq!(
             result.deadline_at,
-            received.checked_add_signed(Duration::milliseconds(7000))
+            received.checked_add_signed(Duration::milliseconds(5000))
         );
     }
 

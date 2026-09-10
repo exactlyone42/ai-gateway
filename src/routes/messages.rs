@@ -149,7 +149,7 @@ async fn proxy(
         selection,
         estimated_usage: estimated,
         snapshot: quota_snapshot,
-        lease: quota_lease,
+        concurrency,
     } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
@@ -181,12 +181,11 @@ async fn proxy(
                     .map(request_quota::estimated_tokens),
                 selection: selection_snapshot.clone(),
                 policy: Some(policy.ledger_snapshot()),
-                principal,
+                principal: principal.clone(),
                 created_at: received_at,
             },
             Some(gateway_request_id),
             quota_snapshot,
-            quota_lease,
         )
         .await?;
     reservation.annotate_protocol(
@@ -195,6 +194,19 @@ async fn proxy(
         header_text(&headers, "x-claude-code-parent-agent-id"),
     );
     let mut reservation = request_policy::enforce_deadline(reservation, policy).await?;
+    reservation = crate::services::admission::acquire(
+        &state,
+        reservation,
+        crate::services::admission::AdmissionContext {
+            principal: &principal,
+            policy,
+            selection: &selection,
+            quota: concurrency,
+            body: &metadata,
+            received_at,
+        },
+    )
+    .await?;
     let provider_request_at = Utc::now();
     let upstream = match anthropic::forward(
         &state,

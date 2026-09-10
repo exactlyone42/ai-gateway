@@ -69,7 +69,7 @@ pub async fn admit(
                     ..TokenUsage::default()
                 },
                 snapshot: None,
-                lease: None,
+                concurrency: Vec::new(),
             },
         });
     }

@@ -19,13 +19,14 @@ Usage selects one canonical row per provider attempt: `provider_reported` first,
 | Input tokens | `input_tokens` | canonical usage | 0 |
 | Output tokens | `output_tokens` | canonical usage | 0 |
 | Total tokens | `total_tokens` | canonical input + output | 0 |
-| Cached input | `cached_input_tokens` | canonical usage | 0 |
+| Cache read | `cached_input_tokens` | canonical usage | 0 |
+| Cache write | `cache_write_input_tokens` | canonical usage | 0 |
 | P95 latency | `p95_latency_ms` | completed request latency | unavailable when absent |
 | P95 TTFT | `p95_ttft_ms` | provider attempt TTFT | unavailable when absent |
 | Cost | `cost_microusd` | canonical usage cost | unavailable with reason until pricing is active |
 
-Queue state is adjacent operational status, not an invented eleventh metric. It remains
-unavailable until W13 supplies scheduler telemetry.
+Queue state is adjacent operational status, not an invented eleventh metric. W13 supplies
+tenant-scoped runtime active/queued state plus durable P50/P95, rejected and expired values.
 
 ## Sixteen operator questions
 
@@ -44,7 +45,7 @@ unavailable until W13 supplies scheduler telemetry.
 | 11 | Which model and provider handled a request? | Requests detail and Catalog |
 | 12 | What provider attempts are persisted? | Request detail, ordered by attempt number |
 | 13 | Can retry/fallback history be inspected? | Explicit unavailable state until W17 |
-| 14 | What policy, quota and scheduler state is active? | Active policy and quota revisions; current quota windows and UTC resets; scheduler remains unavailable until W13 |
+| 14 | What policy, quota and scheduler state is active? | Active policy and quota revisions; current quota windows and UTC resets; tenant-scoped scheduler runtime |
 | 15 | Are gateway, database and telemetry configured? | System Health component status |
 | 16 | Who changed control-plane state? | Tenant-scoped, redacted Audit rows |
 

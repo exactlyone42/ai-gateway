@@ -43,11 +43,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "agent pool gateway started");
+    let shutdown_state = Arc::clone(&state);
     axum::serve(
         listener,
         routes::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        if let Err(error) = shutdown_state.scheduler.close() {
+            tracing::error!(
+                error.type = "scheduler_close_failed",
+                exception.message = %error,
+                "queued requests could not be released during shutdown"
+            );
+        }
+    })
     .await?;
 
     // Spans buffered by the batch exporter are lost unless the provider is

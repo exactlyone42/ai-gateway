@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Datelike as _, Duration, TimeZone as _, Timelike as _, Utc};
 use serde::{Deserialize, Serialize};
@@ -114,20 +111,21 @@ enum Currency {
 #[derive(Clone)]
 pub struct QuotaEngine {
     pool: PgPool,
-    concurrent: Arc<Mutex<HashMap<Uuid, u64>>>,
     singleton_guard: Arc<tokio::sync::Mutex<Option<PoolConnection<Postgres>>>>,
 }
 
-pub struct QuotaLease {
-    concurrent: Arc<Mutex<HashMap<Uuid, u64>>>,
-    quota_ids: Vec<Uuid>,
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct QuotaConcurrencyConstraint {
+    pub quota_id: Uuid,
+    pub limit: u64,
+    pub mode: QuotaMode,
 }
 
 pub struct QuotaAdmission {
     pub selection: ModelSelection,
     pub estimated_usage: TokenUsage,
     pub snapshot: Option<RequestQuotaSnapshot>,
-    pub lease: Option<QuotaLease>,
+    pub concurrency: Vec<QuotaConcurrencyConstraint>,
 }
 
 #[derive(Clone, Copy)]
@@ -158,8 +156,6 @@ pub enum QuotaError {
     InvalidDocument,
     #[error("cost quota requires complete USD token pricing and an output cap")]
     CostUnavailable,
-    #[error("quota counter is unavailable")]
-    ConcurrencyUnavailable,
     #[error("another gateway instance already owns the single-instance quota lock")]
     MultipleInstances,
     #[error("quota database is unavailable")]
@@ -208,7 +204,7 @@ struct CandidateEvaluation {
     allocations: Vec<Allocation>,
     hard: Vec<Value>,
     soft: Vec<Value>,
-    concurrency_ids: Vec<Uuid>,
+    concurrency: Vec<QuotaConcurrencyConstraint>,
     estimated_usage: TokenUsage,
     estimated_cost_microusd: u64,
     requires_cost: bool,
@@ -224,7 +220,6 @@ impl QuotaEngine {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            concurrent: Arc::new(Mutex::new(HashMap::new())),
             singleton_guard: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -314,7 +309,7 @@ impl QuotaEngine {
                     ..TokenUsage::default()
                 },
                 snapshot: None,
-                lease: None,
+                concurrency: Vec::new(),
             })));
         }
 
@@ -343,14 +338,9 @@ impl QuotaEngine {
 
         let mut skipped_soft = Vec::new();
         let decision = {
-            let mut concurrent = self
-                .concurrent
-                .lock()
-                .map_err(|_| QuotaError::ConcurrencyUnavailable)?;
             let mut decision = CandidateDecision::Missing;
             for (index, candidate) in candidates.iter().enumerate() {
-                let evaluation =
-                    evaluate_candidate(&quotas, &windows, &concurrent, candidate, estimate, at)?;
+                let evaluation = evaluate_candidate(&quotas, &windows, candidate, estimate, at)?;
                 if !evaluation.hard.is_empty() {
                     decision = CandidateDecision::Rejected(
                         rejection_snapshot(
@@ -379,9 +369,6 @@ impl QuotaEngine {
                     );
                     break;
                 }
-                for quota_id in &evaluation.concurrency_ids {
-                    *concurrent.entry(*quota_id).or_default() += 1;
-                }
                 decision = CandidateDecision::Selected(index, evaluation);
                 break;
             }
@@ -399,10 +386,6 @@ impl QuotaEngine {
             }
         };
         let selection = candidates.remove(index);
-        let lease = (!evaluation.concurrency_ids.is_empty()).then(|| QuotaLease {
-            concurrent: Arc::clone(&self.concurrent),
-            quota_ids: evaluation.concurrency_ids.clone(),
-        });
         let reservation_id = Uuid::new_v4();
         let decision = json!({
             "schema_version": 1,
@@ -412,6 +395,7 @@ impl QuotaEngine {
             "selected_quality": selection.selector.quality(),
             "soft_limits_causing_downgrade": skipped_soft,
             "soft_limits_at_floor": evaluation.soft,
+            "concurrency": evaluation.concurrency,
             "applied": evaluation.allocations.iter().map(|allocation| json!({
                 "quota_id": allocation.quota_id,
                 "quota_key": allocation.quota_key,
@@ -465,10 +449,7 @@ impl QuotaEngine {
         .bind(at + Duration::hours(MAX_RESERVATION_AGE_HOURS))
         .execute(&mut *transaction)
         .await?;
-        if let Err(error) = transaction.commit().await {
-            drop(lease);
-            return Err(QuotaError::Database(error));
-        }
+        transaction.commit().await?;
         Ok(QuotaOutcome::Allowed(Box::new(QuotaAdmission {
             selection,
             estimated_usage: evaluation.estimated_usage,
@@ -477,32 +458,14 @@ impl QuotaEngine {
                 decision,
                 requires_cost: evaluation.requires_cost,
             }),
-            lease,
+            concurrency: evaluation.concurrency,
         })))
-    }
-}
-
-impl Drop for QuotaLease {
-    fn drop(&mut self) {
-        let Ok(mut concurrent) = self.concurrent.lock() else {
-            tracing::error!(error.type = "quota_concurrency_release_failed", "quota concurrency state is poisoned");
-            return;
-        };
-        for quota_id in &self.quota_ids {
-            if let Some(count) = concurrent.get_mut(quota_id) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    concurrent.remove(quota_id);
-                }
-            }
-        }
     }
 }
 
 fn evaluate_candidate(
     quotas: &[ResolvedQuota],
     windows: &HashMap<(Uuid, String, DateTime<Utc>), WindowRow>,
-    concurrent: &HashMap<Uuid, u64>,
     candidate: &ModelSelection,
     estimate: QuotaEstimate,
     at: DateTime<Utc>,
@@ -568,7 +531,7 @@ fn evaluate_candidate(
     let mut allocations = Vec::new();
     let mut hard = Vec::new();
     let mut soft = Vec::new();
-    let mut concurrency_ids = Vec::new();
+    let mut concurrency = Vec::new();
     for quota in applicable {
         for (kind, limit, _amount) in persistent_limits(
             &quota.document.limits,
@@ -616,25 +579,18 @@ fn evaluate_candidate(
             });
         }
         if let Some(limit) = quota.document.limits.concurrent_requests {
-            let used = concurrent.get(&quota.row.id).copied().unwrap_or(0);
-            if used.saturating_add(1) > limit {
-                violation(
-                    &mut hard,
-                    &mut soft,
-                    quota,
-                    "concurrent_requests",
-                    limit,
-                    to_i64(used)?,
-                );
-            }
-            concurrency_ids.push(quota.row.id);
+            concurrency.push(QuotaConcurrencyConstraint {
+                quota_id: quota.row.id,
+                limit,
+                mode: quota.document.mode,
+            });
         }
     }
     Ok(CandidateEvaluation {
         allocations,
         hard,
         soft,
-        concurrency_ids,
+        concurrency,
         estimated_usage,
         estimated_cost_microusd,
         requires_cost: has_cost_limit,
@@ -1268,7 +1224,9 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn concurrency_is_released_when_the_request_lease_drops(pool: PgPool) {
+    async fn concurrency_is_returned_as_a_scheduler_constraint_without_early_occupancy(
+        pool: PgPool,
+    ) {
         let tenant_id = Uuid::new_v4();
         insert_global_quota(
             &pool,
@@ -1300,7 +1258,9 @@ mod tests {
         let QuotaOutcome::Allowed(first) = first else {
             panic!("first concurrent request was rejected");
         };
-        let blocked = engine
+        assert_eq!(first.concurrency.len(), 1);
+        assert_eq!(first.concurrency[0].limit, 1);
+        let second = engine
             .admit(
                 Uuid::new_v4(),
                 &principal(tenant_id),
@@ -1318,30 +1278,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(
-            blocked,
-            QuotaOutcome::Rejected(_, QuotaRejection::HardLimit)
-        ));
-        drop(first);
-        let after_drop = engine
-            .admit(
-                Uuid::new_v4(),
-                &principal(tenant_id),
-                vec![selection(tenant_id, "direct-model", model, provider)],
-                QuotaEstimate {
-                    input_upper_bound: 10,
-                    requested_output_tokens: Some(10),
-                    output_multiplier: 1,
-                    billable: true,
-                    unbounded_input: false,
-                    requires_extended_pricing: false,
-                    unsupported_cost_features: false,
-                },
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(after_drop, QuotaOutcome::Allowed(_)));
+        let QuotaOutcome::Allowed(second) = second else {
+            panic!("quota admission occupied concurrency before scheduling");
+        };
+        assert_eq!(second.concurrency, first.concurrency);
     }
 
     #[sqlx::test]

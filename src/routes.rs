@@ -176,6 +176,7 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            scheduler: Default::default(),
         }
     }
 

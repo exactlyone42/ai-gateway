@@ -42,7 +42,7 @@ export function OverviewPage() {
   const metrics = [
     ['Requests', 'requests'], ['Success rate', 'success_rate'], ['Unsuccessful', 'unsuccessful_requests'],
     ['Input tokens', 'input_tokens'], ['Output tokens', 'output_tokens'], ['Total tokens', 'total_tokens'],
-    ['Cached input', 'cached_input_tokens'], ['P95 latency', 'p95_latency_ms'], ['P95 TTFT', 'p95_ttft_ms'],
+    ['Cache read', 'cached_input_tokens'], ['Cache write', 'cache_write_input_tokens'], ['P95 latency', 'p95_latency_ms'], ['P95 TTFT', 'p95_ttft_ms'],
     ['Cost', 'cost_microusd'],
   ]
   return <Page title="Overview" actions={<RangePicker value={range} onChange={setRange} />}>
@@ -52,6 +52,9 @@ export function OverviewPage() {
         {key === 'cost_microusd' && data[key] == null && <small>{data.cost_unavailable_reason}</small>}
       </article>)}</section>
       {!data.queue?.available && <Unavailable reason={data.queue?.unavailable_reason} />}
+      {data.queue?.available && <section className="section"><h2>Scheduler</h2><div className="metric-grid">
+        {[['Active', data.queue.runtime?.active_tenant], ['Queued', data.queue.runtime?.queued], ['Queue P50', data.queue.p50_ms], ['Queue P95', data.queue.p95_ms], ['Rejected', data.queue.rejected], ['Expired', data.queue.expired]].map(([label, value]) => <article className="metric" key={String(label)}><span>{label}</span><strong>{compactNumber(value)}</strong></article>)}
+      </div></section>}
     </>}</QueryBody>
   </Page>
 }
@@ -284,7 +287,7 @@ export function GovernancePage() {
     {error && <div className="state error">{error}</div>}
     <QueryBody query={query}>{(data) => <>
     <div className="health-summary governance-health"><div className="runtime-summary"><div><span>Policy runtime</span><Status value={data.policy_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.policy_runtime?.active_count ?? 0} active</small></div><div className="runtime-summary"><div><span>Quota runtime</span><Status value={data.quota_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.quota_runtime?.active_count ?? 0} active · {data.quota_runtime?.window_count ?? 0} windows · {data.quota_runtime?.timezone ?? 'UTC'}</small></div></div>
-    <div className="availability-grid">{!data.scheduler?.available && <Unavailable reason={data.scheduler?.unavailable_reason} />}</div>
+    <div className="availability-grid">{data.scheduler?.available ? <div className="runtime-summary"><div><span>Scheduler runtime</span><Status value="active" /></div><small>{data.scheduler.active_tenant ?? 0} active · {data.scheduler.queued ?? 0} queued · {data.scheduler.active_capacity ?? 0} configured capacity</small></div> : <Unavailable reason={data.scheduler?.unavailable_reason} />}</div>
     <section className="section catalog-table"><h2>Policies</h2><DataTable rows={data.policies ?? []} columns={[{ key: 'policy_key', label: 'Policy' }, { key: 'revision', label: 'Revision' }, { key: 'scope', label: 'Scope', render: policyTarget }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }, ...((canWrite || canActivate) ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
       {canWrite && row.lifecycle_state === 'draft' && <button className="icon-button" title="Edit policy" disabled={busy} onClick={() => setEditing({ kind: 'policy', row })}><Pencil /></button>}
       {canWrite && ['draft', 'disabled'].includes(row.lifecycle_state) && <button className="icon-button danger" title="Archive policy" disabled={busy} onClick={() => void mutate(`/policies/${row.id}?version=${row.version}`, { method: 'DELETE' })}><Trash2 /></button>}
