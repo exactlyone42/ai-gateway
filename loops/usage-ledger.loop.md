@@ -73,9 +73,9 @@
   PREPARE SQL 與 migration forward/rollback 策略完成；schema diff 審查八點全修。
 - 2026-09-10 22:40：完成固定槽位磁碟 outbox、單一 envelope、單次批次 DB function、
   DB 首次失敗即停寫、重啟一次補寫、滿載在上游前拒絕，以及 request/attempt/usage 實際接線。
-- 2026-09-10 23:02：依完整 diff 審查重做雙檔 spool 與取消狀態機；補 identity deletion guard、
+- 2026-09-10 22:47：依完整 diff 審查重做雙檔 spool 與取消狀態機；補 identity deletion guard、
   `stream:true` 501 邊界、兩側 crash recovery、第二筆停寫與完整 response body 驗證。
-- 2026-09-10 23:14：修完聚焦複審一高二中；新增 request ID、pending batch、最小槽位三條測試，
+- 2026-09-10 22:52：修完聚焦複審一高二中；新增 request ID、pending batch、最小槽位三條測試，
   重跑完整 gate 全綠。
 
 ## 已確定不可行
