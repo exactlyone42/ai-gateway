@@ -125,6 +125,9 @@ pub async fn relay<O: StreamObserver>(
     observer: O,
     event_max_bytes: usize,
 ) -> Result<Body, crate::ledger::LedgerError> {
+    // The stream owns provider capacity until its final frame is yielded or the
+    // client drops the body. Ledger completion can happen before that yield.
+    let scheduler_lease = reservation.take_scheduler_lease();
     let checkpoint_at = Utc::now();
     reservation
         .checkpoint(cancelled_completion(
@@ -136,6 +139,7 @@ pub async fn relay<O: StreamObserver>(
         .await?;
 
     let stream = async_stream::stream! {
+        let _scheduler_lease = scheduler_lease;
         let mut upstream = response.bytes_stream();
         let mut decoder = EventDecoder::new(event_max_bytes);
         let mut observer = observer;

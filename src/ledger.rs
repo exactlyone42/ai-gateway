@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use crate::{
     identity::PrincipalContext,
-    quota::{QuotaLease, cost_for_usage, total_tokens},
+    quota::{cost_for_usage, total_tokens},
+    scheduler::SchedulerLease,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -155,7 +156,7 @@ pub struct Reservation {
     ledger: Ledger,
     id: Option<Uuid>,
     envelope: RequestEnvelope,
-    _quota_lease: Option<QuotaLease>,
+    _scheduler_lease: Option<SchedulerLease>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -336,7 +337,7 @@ impl Ledger {
     }
 
     pub async fn reserve(&self, start: RequestStart) -> Result<Reservation, LedgerError> {
-        self.reserve_with_quota(start, None, None, None).await
+        self.reserve_with_quota(start, None, None).await
     }
 
     pub async fn reserve_with_quota(
@@ -344,7 +345,6 @@ impl Ledger {
         start: RequestStart,
         gateway_request_id: Option<Uuid>,
         quota: Option<RequestQuotaSnapshot>,
-        quota_lease: Option<QuotaLease>,
     ) -> Result<Reservation, LedgerError> {
         let envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
         let id = envelope.request.id;
@@ -357,7 +357,7 @@ impl Ledger {
             ledger: self.clone(),
             id: Some(id),
             envelope,
-            _quota_lease: quota_lease,
+            _scheduler_lease: None,
         })
     }
 
@@ -380,7 +380,7 @@ impl Ledger {
         parent_agent_id: Option<String>,
         quota: Option<RequestQuotaSnapshot>,
     ) -> Result<(), LedgerError> {
-        let mut reservation = self.reserve_with_quota(start, None, quota, None).await?;
+        let mut reservation = self.reserve_with_quota(start, None, quota).await?;
         reservation.annotate_protocol(operation, client_agent_id, parent_agent_id);
         reservation
             .finish(RequestCompletion {
@@ -495,6 +495,14 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn attach_scheduler_lease(&mut self, lease: SchedulerLease) {
+        self._scheduler_lease = Some(lease);
+    }
+
+    pub fn take_scheduler_lease(&mut self) -> Option<SchedulerLease> {
+        self._scheduler_lease.take()
+    }
+
     pub fn annotate_selection(&mut self, selection: &ModelSelectionSnapshot) {
         self.envelope.request.selector_kind = Some(selection.selector_kind.clone());
         self.envelope.request.selector_value = Some(selection.selector_value.clone());
@@ -530,11 +538,44 @@ impl Reservation {
         self.envelope.request.client_first_byte_at.get_or_insert(at);
     }
 
-    /// Durably replaces the interruption fallback without publishing it for
-    /// database ingestion. If the response body is dropped, `Drop` publishes
-    /// this latest complete checkpoint instead of the initial empty record.
-    pub async fn checkpoint(&mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
-        self.envelope.complete(completion);
+    pub fn set_deadline_at(&mut self, at: DateTime<Utc>) {
+        self.envelope.request.deadline_at = Some(at);
+    }
+
+    pub fn annotate_quota_scheduler_outcome(&mut self, outcome: &str) {
+        if let Some(Value::Object(decision)) = self.envelope.request.quota_decision.as_mut() {
+            decision.insert(
+                "scheduler_outcome".to_owned(),
+                Value::String(outcome.to_owned()),
+            );
+        }
+    }
+
+    pub async fn checkpoint_queue_entered(&mut self, at: DateTime<Utc>) -> Result<(), LedgerError> {
+        if self.envelope.request.queue_entered_at.is_some()
+            || self.envelope.request.queue_left_at.is_some()
+        {
+            return Err(LedgerError::InvalidCapacity);
+        }
+        self.envelope.request.queue_entered_at = Some(at);
+        self.checkpoint_current().await
+    }
+
+    pub async fn checkpoint_queue_left(&mut self, at: DateTime<Utc>) -> Result<(), LedgerError> {
+        let entered = self
+            .envelope
+            .request
+            .queue_entered_at
+            .ok_or(LedgerError::InvalidCapacity)?;
+        if self.envelope.request.queue_left_at.is_some() || at < entered {
+            return Err(LedgerError::InvalidCapacity);
+        }
+        self.envelope.request.queue_left_at = Some(at);
+        self.envelope.request.queue_duration_ms = Some((at - entered).num_milliseconds());
+        self.checkpoint_current().await
+    }
+
+    async fn checkpoint_current(&self) -> Result<(), LedgerError> {
         let id = self.id.ok_or(LedgerError::InvalidCapacity)?;
         let spool = Arc::clone(&self.ledger.inner.spool);
         spool.begin_checkpoint(id)?;
@@ -549,6 +590,14 @@ impl Reservation {
         .await
         .map_err(LedgerError::Worker)??;
         Ok(())
+    }
+
+    /// Durably replaces the interruption fallback without publishing it for
+    /// database ingestion. If the response body is dropped, `Drop` publishes
+    /// this latest complete checkpoint instead of the initial empty record.
+    pub async fn checkpoint(&mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
+        self.envelope.complete(completion);
+        self.checkpoint_current().await
     }
 
     pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
@@ -863,6 +912,10 @@ impl RequestEnvelope {
             .iter()
             .filter(|attempt| !attempt.actual_usage.is_empty())
             .collect::<Vec<_>>();
+        if completion.attempts.is_empty() && self.request.quota_reservation_id.is_some() {
+            self.request.quota_actual_tokens = Some(0);
+            self.request.quota_actual_cost_microusd = Some(0);
+        }
         if self.request.operation == "count_tokens" && self.request.quota_reservation_id.is_some() {
             self.request.quota_actual_tokens = Some(0);
             self.request.quota_actual_cost_microusd = Some(0);
@@ -967,6 +1020,10 @@ impl RequestEnvelope {
             .request
             .request_received_at
             .map(|received| (cancelled_at - received).num_milliseconds());
+        if self.attempts.is_empty() && self.request.quota_reservation_id.is_some() {
+            self.request.quota_actual_tokens = Some(0);
+            self.request.quota_actual_cost_microusd = Some(0);
+        }
         for attempt in &mut self.attempts {
             if attempt.status == "cancelled" {
                 attempt.completed_at = cancelled_at;
@@ -1039,6 +1096,7 @@ impl Spool {
             let working = directory.join(format!("{stem}.working"));
             let next = directory.join(format!("{stem}.next"));
             if extensions.contains("ready") {
+                finalize_recovered_envelope(&ready, entry_max_bytes)?;
                 remove_if_present(&reserved)?;
                 remove_if_present(&working)?;
                 remove_if_present(&next)?;
@@ -1051,6 +1109,7 @@ impl Spool {
                     remove_if_present(&working)?;
                     fs::rename(&reserved, &ready).map_err(LedgerError::Io)?;
                 }
+                finalize_recovered_envelope(&ready, entry_max_bytes)?;
                 remove_if_present(&next)?;
                 ids.insert(stem);
             } else {
@@ -1304,6 +1363,38 @@ fn self_contained_envelope(path: &Path) -> Result<bool, LedgerError> {
         .is_ok_and(|envelope| envelope.schema_version == SCHEMA_VERSION))
 }
 
+fn finalize_recovered_envelope(path: &Path, entry_max_bytes: u64) -> Result<(), LedgerError> {
+    let bytes = fs::read(path).map_err(LedgerError::Io)?;
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |index| index + 1);
+    let mut envelope: RequestEnvelope =
+        serde_json::from_slice(&bytes[..end]).map_err(LedgerError::Json)?;
+    if envelope.schema_version != SCHEMA_VERSION {
+        return Err(LedgerError::InvalidCapacity);
+    }
+    if envelope.request.completed_at.is_none() {
+        envelope.cancel(Utc::now());
+    }
+    let mut recovered = serde_json::to_vec(&envelope).map_err(LedgerError::Json)?;
+    let max = usize::try_from(entry_max_bytes).map_err(|_| LedgerError::InvalidCapacity)?;
+    if recovered.len() > max {
+        return Err(LedgerError::RecordTooLarge);
+    }
+    recovered.resize(max, 0);
+    let temporary = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(LedgerError::Io)?;
+    file.write_all(&recovered).map_err(LedgerError::Io)?;
+    file.sync_all().map_err(LedgerError::Io)?;
+    drop(file);
+    fs::rename(temporary, path).map_err(LedgerError::Io)
+}
+
 fn default_operation() -> String {
     "chat_completions".to_owned()
 }
@@ -1414,7 +1505,8 @@ mod tests {
         .unwrap();
         let recovered = reopened.ready().unwrap();
         assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].1.request.status, "interrupted");
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        assert!(recovered[0].1.request.completed_at.is_some());
         assert!(!reopened.path(first.request.id, "working").exists());
         fs::remove_dir_all(interrupted_directory).unwrap();
 
@@ -1679,6 +1771,67 @@ mod tests {
 
         let recovered = spool.ready().unwrap();
         assert_eq!(recovered[0].1.request.status, "cancelled");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_cancels_a_pre_provider_reservation_and_reconciles_quota_to_zero() {
+        let directory = test_directory("quota-recovery");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("quota-recovery"));
+        envelope.request.quota_reservation_id = Some(Uuid::new_v4());
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        assert!(recovered[0].1.request.completed_at.is_some());
+        assert_eq!(recovered[0].1.request.quota_actual_tokens, Some(0));
+        assert_eq!(recovered[0].1.request.quota_actual_cost_microusd, Some(0));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_refinalizes_an_incomplete_ready_envelope_after_a_second_crash() {
+        let directory = test_directory("quota-ready-recovery");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("quota-ready-recovery"));
+        envelope.request.quota_reservation_id = Some(Uuid::new_v4());
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        fs::rename(spool.path(id, "reserved"), spool.path(id, "ready")).unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        assert!(recovered[0].1.request.completed_at.is_some());
+        assert_eq!(recovered[0].1.request.quota_actual_tokens, Some(0));
+        assert_eq!(recovered[0].1.request.quota_actual_cost_microusd, Some(0));
         fs::remove_dir_all(directory).unwrap();
     }
 

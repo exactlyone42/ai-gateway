@@ -12,6 +12,7 @@ use crate::{
     model_registry::{GatewayOperation, ModelRegistry, ProviderProfile, ProviderProfiles},
     policy::PolicyEngine,
     quota::QuotaEngine,
+    scheduler::Scheduler,
 };
 use thiserror::Error;
 
@@ -30,6 +31,7 @@ pub struct AppState {
     pub(crate) models: ModelRegistry,
     pub(crate) policies: PolicyEngine,
     pub(crate) quotas: QuotaEngine,
+    pub(crate) scheduler: Scheduler,
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
@@ -88,6 +90,7 @@ impl AppState {
             Duration::from_secs(config.policy_cache_ttl_seconds),
         );
         let quotas = QuotaEngine::new(pool.clone());
+        let scheduler = Scheduler::new(config.scheduler.clone())?;
         let admin = AdminService::new(
             admin_pool,
             credentials.clone(),
@@ -101,7 +104,8 @@ impl AppState {
             },
         )
         .with_provider_profiles(profiles.clone())
-        .with_policy_engine(policies.clone());
+        .with_policy_engine(policies.clone())
+        .with_scheduler(scheduler.clone());
         let ledger = Ledger::open(
             pool.clone(),
             config.ledger_spool_dir.clone(),
@@ -119,6 +123,7 @@ impl AppState {
             models,
             policies,
             quotas,
+            scheduler,
             credentials,
             admin,
             ledger,
@@ -134,4 +139,6 @@ pub enum StateError {
     Http(#[from] reqwest::Error),
     #[error("could not initialize the model registry")]
     Registry(#[from] crate::model_registry::RegistryError),
+    #[error("could not initialize the scheduler")]
+    Scheduler(#[from] crate::scheduler::SchedulerError),
 }

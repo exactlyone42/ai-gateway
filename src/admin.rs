@@ -19,6 +19,7 @@ use crate::error::ErrorType;
 use crate::identity::CredentialService;
 use crate::model_registry::ProviderProfiles;
 use crate::policy::PolicyEngine;
+use crate::scheduler::Scheduler;
 
 mod accounts;
 mod reports;
@@ -42,6 +43,7 @@ pub struct AdminService {
     credentials: CredentialService,
     provider_profiles: Option<ProviderProfiles>,
     policies: Option<PolicyEngine>,
+    scheduler: Option<Scheduler>,
 }
 
 pub struct AdminServiceConfig {
@@ -353,6 +355,7 @@ impl AdminService {
             credentials,
             provider_profiles: None,
             policies: None,
+            scheduler: None,
         }
     }
 
@@ -363,6 +366,11 @@ impl AdminService {
 
     pub fn with_policy_engine(mut self, policies: PolicyEngine) -> Self {
         self.policies = Some(policies);
+        self
+    }
+
+    pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
+        self.scheduler = Some(scheduler);
         self
     }
 

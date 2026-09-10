@@ -63,12 +63,19 @@ impl AdminService {
                        count(*) FILTER (WHERE status <> 'completed')::bigint AS unsuccessful,
                        percentile_cont(0.95) WITHIN GROUP (
                            ORDER BY extract(epoch FROM total_latency) * 1000
-                       ) FILTER (WHERE total_latency IS NOT NULL) AS p95_latency_ms
+                       ) FILTER (WHERE total_latency IS NOT NULL) AS p95_latency_ms,
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
+                         FILTER (WHERE queue_duration IS NOT NULL) AS queue_p50_ms,
+                       percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
+                         FILTER (WHERE queue_duration IS NOT NULL) AS queue_p95_ms,
+                       count(*) FILTER (WHERE status = 'rejected' AND queue_entered_at IS NOT NULL)::bigint AS queue_rejected,
+                       count(*) FILTER (WHERE status = 'rejected' AND queue_left_at >= deadline_at)::bigint AS queue_expired
                 FROM filtered_requests
             ), usage_stats AS (
                 SELECT COALESCE(sum(input_tokens), 0)::bigint AS input_tokens,
                        COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
                        COALESCE(sum(cached_input_tokens), 0)::bigint AS cached_input_tokens,
+                       COALESCE(sum(cache_write_input_tokens), 0)::bigint AS cache_write_input_tokens,
                        sum(cost_microusd)::bigint AS cost_microusd,
                        count(*) FILTER (WHERE source = 'estimated')::bigint AS unreconciled
                 FROM canonical_usage
@@ -91,6 +98,7 @@ impl AdminService {
                 'output_tokens', us.output_tokens,
                 'total_tokens', us.input_tokens + us.output_tokens,
                 'cached_input_tokens', us.cached_input_tokens,
+                'cache_write_input_tokens', us.cache_write_input_tokens,
                 'p95_latency_ms', rs.p95_latency_ms,
                 'p95_ttft_ms', ats.p95_ttft_ms,
                 'cost_microusd', us.cost_microusd,
@@ -98,8 +106,11 @@ impl AdminService {
                 'cost_unavailable_reason', CASE WHEN us.cost_microusd IS NULL
                     THEN 'cost attribution is not populated until model pricing is active' END,
                 'queue', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'scheduler telemetry is not implemented until W13'
+                    'available', true,
+                    'p50_ms', rs.queue_p50_ms,
+                    'p95_ms', rs.queue_p95_ms,
+                    'rejected', rs.queue_rejected,
+                    'expired', rs.queue_expired
                 )
             )
             FROM request_stats rs CROSS JOIN usage_stats us CROSS JOIN attempt_stats ats
@@ -110,6 +121,17 @@ impl AdminService {
         .bind(query.to)
         .fetch_one(&self.pool)
         .await?;
+        let mut report: Value = report;
+        if let Some(scheduler) = &self.scheduler {
+            report["queue"]["runtime"] = scheduler
+                .snapshot(context.tenant_id)
+                .map_err(|_| AdminError::Unavailable)?;
+        } else {
+            report["queue"] = json!({
+                "available": false,
+                "unavailable_reason": "scheduler is not attached"
+            });
+        }
         Ok(report)
     }
 
@@ -546,16 +568,20 @@ impl AdminService {
                             LIMIT 100
                         ) current_windows), '[]'::jsonb)
                 ),
-                'scheduler', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'scheduler state is implemented in W13'
-                )
+                'scheduler', '{}'::jsonb
             )
             "#,
         )
         .bind(context.tenant_id)
         .fetch_one(&self.pool)
         .await?;
+        let mut report: Value = report;
+        report["scheduler"] = match &self.scheduler {
+            Some(scheduler) => scheduler
+                .snapshot(context.tenant_id)
+                .map_err(|_| AdminError::Unavailable)?,
+            None => json!({"available": false, "unavailable_reason": "scheduler is not attached"}),
+        };
         Ok(report)
     }
 
@@ -567,6 +593,12 @@ impl AdminService {
         let database_time: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(&self.pool)
             .await?;
+        let scheduler = match &self.scheduler {
+            Some(scheduler) => scheduler
+                .snapshot(context.tenant_id)
+                .map_err(|_| AdminError::Unavailable)?,
+            None => json!({"available": false, "unavailable_reason": "scheduler is not attached"}),
+        };
         Ok(json!({
             "status": "ok",
             "tenant_id": context.tenant_id,
@@ -578,10 +610,7 @@ impl AdminService {
                     "status": if telemetry_configured { "configured" } else { "not_configured" },
                     "delivery_verified": false
                 },
-                "scheduler": {
-                    "status": "unavailable",
-                    "reason": "scheduler state is implemented in W13"
-                }
+                "scheduler": {"status": "ok", "runtime": scheduler}
             }
         }))
     }

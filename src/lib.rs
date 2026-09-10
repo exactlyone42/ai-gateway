@@ -12,6 +12,7 @@ mod model_registry;
 mod policy;
 mod quota;
 mod routes;
+mod scheduler;
 mod services;
 pub mod startup;
 mod state;

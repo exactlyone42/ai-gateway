@@ -148,7 +148,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         selection,
         estimated_usage: estimated,
         snapshot: quota_snapshot,
-        lease: quota_lease,
+        concurrency,
     } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
@@ -181,12 +181,11 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
                 selection: selection_snapshot.clone(),
                 policy: Some(policy.ledger_snapshot()),
-                principal: request.principal,
+                principal: request.principal.clone(),
                 created_at: request.received_at,
             },
             Some(gateway_request_id),
             quota_snapshot,
-            quota_lease,
         )
         .await?;
     reservation.annotate_protocol(request.operation.name(), None, None);
@@ -203,6 +202,19 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             .await?;
         return Err(GatewayError::PolicyDenied);
     }
+    reservation = crate::services::admission::acquire(
+        state,
+        reservation,
+        crate::services::admission::AdmissionContext {
+            principal: &request.principal,
+            policy,
+            selection: &selection,
+            quota: concurrency,
+            body: &metadata,
+            received_at: request.received_at,
+        },
+    )
+    .await?;
     let provider_request_at = Utc::now();
     let upstream = match forward(
         state,

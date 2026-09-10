@@ -1,5 +1,6 @@
 //! Business logic: what a request means, independent of HTTP shaping.
 
+pub mod admission;
 pub mod anthropic;
 pub mod openai;
 pub mod request_policy;
