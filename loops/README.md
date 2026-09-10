@@ -31,7 +31,7 @@
 | [admin-web](./admin-web.loop.md) | W09 | 已交付 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
 | [model-registry-router](./model-registry-router.loop.md) | W10 | 已交付 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
 | [policy-engine](./policy-engine.loop.md) | W11 | 已交付 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
-| [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 未開始 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
+| [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 進行中 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
 | [scheduler-admission](./scheduler-admission.loop.md) | W13 | 未開始 | P1 | 互動工作不被背景餓死，背景工作也不會永遠排不到 |
 | [canonical-layer](./canonical-layer.loop.md) | W14 | 未開始 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
 | [cross-provider](./cross-provider.loop.md) | W15 | 未開始 | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
