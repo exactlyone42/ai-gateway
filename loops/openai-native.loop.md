@@ -32,7 +32,7 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
       閘道必須回明確錯誤並記 log，**不得**當成正常結束。
 
 ## 已知
-- 現況已有 `/v1/chat/completions`，但走 LiteLLM 且非串流（`src/services/chat.rs:36`）。
+- 現況已有 `/v1/chat/completions`，但走 LiteLLM 且非串流（`src/services/chat.rs:47`）。
 - 規格 §66：要區分「閘道支援這個模型」與「Client UI 顯示這個模型」。
   某些 Client 的 model picker 不顯示自訂模型，不代表閘道不支援。
 - **Codex 只走 Responses API**：`wire_api` 官方原文「`responses` is the only supported value,

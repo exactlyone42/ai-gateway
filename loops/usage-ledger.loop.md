@@ -39,7 +39,8 @@
       （查 spool → 恢復後查表）。
 
 ## 已知
-- 現況完全沒有資料庫，也沒有任何用量記錄。
+- W02 後 PostgreSQL、啟動時 migration 與 `/ready` 已可用；現況仍沒有用量 schema、
+  provider attempt 記錄、`usage_records` 寫入路徑或 outbox。
 - 規格 §46 明確：不要用 Prometheus 當帳務資料庫，PostgreSQL 是精確帳本。
 - 規格 §42：不同 Provider 的 token 定義不一致（cached input／reasoning tokens），
   不得假設可直接相加。

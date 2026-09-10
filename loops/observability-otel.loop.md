@@ -1,7 +1,7 @@
 # LOOP: observability-otel
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 [#22](https://github.com/DnaBoss/agent-pool-gateway/issues/22)｜PR [#23](https://github.com/DnaBoss/agent-pool-gateway/pull/23) draft｜分支 `feature/observability-otel`｜段落 `W07`
+> 卡 [#22](https://github.com/DnaBoss/agent-pool-gateway/issues/22)｜PR [#23](https://github.com/DnaBoss/agent-pool-gateway/pull/23)／[#24](https://github.com/DnaBoss/agent-pool-gateway/pull/24) 已合｜分支 `feature/observability-otel`｜段落 `W07`
 > 查重（2026-09-09）：`gh issue list` 15 張開放卡無此段落（#19 對到 W02＋W18，見
 > `docs/work-breakdown.md:272`）、`git ls-remote` 無同名遠端分支 → 這段沒有人在做，開新卡。
 
@@ -10,9 +10,9 @@
 | 狀態 | 已交付（合入 `dev`）；五條判準已移交，一條等 cash 提供規格清單 |
 | 優先度 | P1 |
 | 前置 | `workspace-foundation` |
-| 開始 | 2026-09-09 |
-| 結束 | 2026-09-09 18:15+08:00（日誌／追蹤／指標／遮蔽四件交付完畢） |
-| Token | 171 次呼叫／billed 60,635,413（cache_read 59,991,134＝98.9%），`./scripts/token-ledger.sh --since 2026-09-09T09:00` |
+| 開始 | `2026-09-09T17:00+08:00` |
+| 結束 | `2026-09-09T18:15+08:00` |
+| Token | 172 次呼叫／billed 61,155,244（cache_read 60,509,538），`./scripts/token-ledger.sh --slug observability-otel --md` |
 
 ## 目的
 任何一次請求都查得到「卡在哪一步、花多久、誰發的」，而且換可觀測性後端不用改閘道程式。
@@ -49,11 +49,11 @@
       **真正的串流還不存在**（現況是整包轉發），要等 W05 才驗得到「進行中的串流不中斷」。
 
 ## 已知
-- 日誌格式已自己實作（`src/logging.rs`），等級仍由 `RUST_LOG` 決定。沒有 OTel exporter、
-  沒有 metric、沒有 span 結構。
+- 開工前日誌格式已自己實作（`src/logging.rs`），等級仍由 `RUST_LOG` 決定；沒有 OTel exporter、
+  metric、span 結構。現況已接 OTLP trace／metric、請求 span、兩個 HTTP metric 與結構化 access log。
 - 現成的 `tracing_subscriber` json formatter 的 `level` 永遠是字串
   （`tracing-subscriber-0.3.23/src/fmt/format/json.rs:250`），沒有選項可改成數字。
-- 現況 `Cargo.toml` 沒有 `opentelemetry` 相關依賴。
+- 開工前 `Cargo.toml` 沒有 `opentelemetry` 相關依賴；現況已有 OTel 相關依賴，且 exporter 可缺席。
 - 規格 §2.3：閘道對可觀測性後端只依賴 OTLP，開發環境可先給 SigNoz compose 因為部署簡單。
 
 - reviewer（`claude -p --model opus`）第一輪的三點：① 計畫只推進一小塊 ② 不加 exporter 更小
@@ -90,7 +90,7 @@
 - `2026-09-09` 寫 `docs/observability.md`（欄位表 ＋ 三個設計決定 ＋ 消費端過濾條件 ＋ 檔案地圖），
   `docs/engineering-standards.md` §2 的欄位清單改成 semconv 命名。
 
-- `2026-09-09` 開卡 #22（PAR）、推 `feature/observability-otel`、開 draft PR #23。
+- `2026-09-09` 開卡 #22（PAR）、推 `feature/observability-otel`、開 PR #23（已合）。
 - `2026-09-09` OTLP 追蹤接上：exporter 由 `OTEL_EXPORTER_OTLP_ENDPOINT` 決定，沒設就完全不裝；
   span 樹四個節點（`gateway.request` → `auth.resolve`／`policy.evaluate`／`provider.attempt`），
   全部 `skip_all` 免得金鑰與 prompt 進 span；收工 flush，flush 失敗記一筆 error。
@@ -166,8 +166,9 @@
   **push 到 `dev` 不會跑 CI**。所以「合 dev 後看 CI 綠」這個動作在這個 repo 不存在，
   要 CI 的判定就得走 PR。
 
-- `2026-09-09` 收工：`dev` = `d44e912`，PR #23（內容）與 #24（關卡修正）都已合。
-  CI 在 `b61dc19d`／`04c5800a` 兩個 SHA 綠；`dev` 上 `./scripts/check.sh all` 用結束碼確認為 0。
+- `2026-09-09` 收工：W07 內容 merge `3f24b0b`、關卡修正 merge `d44e912`、狀態同步 `449a2fa`。
+  PR #23（內容）與 #24（關卡修正）都已合；CI 在 `b61dc19d`／`04c5800a` 兩個 SHA 綠，
+  `dev` 上 `./scripts/check.sh all` 用結束碼確認為 0。
 
 ## 已確定不可行
 - **靜態 grep 當遮蔽檢查**：要抓的不是「程式碼裡有沒有寫 token」，而是執行期的值透過沒人想到的

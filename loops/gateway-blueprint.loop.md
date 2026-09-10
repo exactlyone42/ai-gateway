@@ -5,12 +5,12 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付（PR #21 已合；#20 留作範圍決策） |
 | 優先度 | P0 |
 | 前置 | 無 |
 | 開始 | `2026-09-08T21:45+08:00` |
-| 結束 | — |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| 結束 | `2026-09-09T18:04+08:00` |
+| Token | 440 次呼叫／billed 98,818,869（cache_read 95,589,557），`./scripts/token-ledger.sh --since 2026-09-08T21:45+08:00 --until 2026-09-09T18:04+08:00 --md` |
 
 ## 目的
 把「一份 92 節的規格」變成「18 個可獨立審查的段落 ＋ 每段落一份活的現況檔 ＋ 一套機器可檢查的規範」，
@@ -35,8 +35,9 @@
   `src/routes.rs`（路由表）＋ 一個端點一支檔、`src/middleware.rs`（金鑰閘門）、
   `src/services/chat.rs`（模型政策 ＋ 轉發 LiteLLM）、`src/state.rs`、`src/auth.rs`、
   `src/config.rs`、`src/error.rs`。
-- 既有實作與新規格的**四個落差**：非串流（`src/services/chat.rs:36` 先 `response.bytes().await` 收完才回）、
-  上游是 LiteLLM、沒有資料庫、沒有身分模型。
+- 開工時既有實作與新規格的**四個落差**：非串流（現況 `src/services/chat.rs:47`
+  仍先 `response.bytes().await` 收完才回）、上游是 LiteLLM、沒有資料庫、沒有身分模型。
+  截至 W02/W07 後，資料庫與可觀測性已補；非串流、LiteLLM 上游、身分模型仍待後續段落。
 - 既有 CI 三關：`cargo fmt --check`、`cargo clippy --all-targets --all-features -D warnings`、
   `cargo test --all`（`.github/workflows/ci.yml:20`）。
 - 看板是 DnaBoss Project #2，狀態欄位叫 `Workflow`（不是 `Status`），由
@@ -50,7 +51,7 @@
 ## 已做
 - `2026-09-08` 讀完既有 4 支 Rust 檔、5 份文件、2 個 workflow、board-sync 腳本，確認落差。
 - `2026-09-08` 建 `origin/dev` 當整合分支（原本沒有），開卡 #20、分支 `feature/gateway-blueprint`、
-  草稿 PR [#21](https://github.com/DnaBoss/agent-pool-gateway/pull/21)。
+  PR [#21](https://github.com/DnaBoss/agent-pool-gateway/pull/21)（已合）。
 - `2026-09-08` 寫 `CLAUDE.md`（只放參數 ＋ 文件索引 ＋ 四條硬約束）與 `loops/_TEMPLATE.loop.md`。
 - `2026-09-08` 寫 `scripts/token-ledger.sh`：按時間窗、去重、分 Agent 統計 token。實測可用（見證據）。
 - `2026-09-08` 寫 `scripts/check.sh`：`gate`（快）／`all`（PR 前）／`loops`（loop 檔紀律）。
@@ -114,11 +115,10 @@
 | token 記帳 | 從對話紀錄實測 | 事後估算 | 估算不可稽核；實測有 `requestId` 可去重、可重跑 |
 
 ## 下一步
-1. 收 `compat-research` 對 VS Code／Cursor／Codex Desktop 的查證，補進
-   `docs/client-compatibility.md`（目前是 `未查證`）。
-2. 收 `quality-extract` 的三專案規範萃取，比對 `docs/engineering-standards.md` 有沒有漏。
+1. W00 本身已收工；不要重開同一段。PR #21 已合 `dev`，W02 也已交付。
+2. 收 `compat-research` 對 Cursor／Codex Desktop 的查證，補進
+   `docs/client-compatibility.md`（目前證據等級低或 pending）。
 3. **請 cash 決定範圍**：第一方 Claude apps gateway 已覆蓋 SSO／群組模型白名單／支出上限／
    OTLP，是否把本專案收斂到它沒有的四項（多 Provider、排程、可查詢帳本、Admin UI）。
    見 `docs/feasibility.md` 第四節。這個決定會改變 W08／W09 的範圍。
-4. PR #21 轉 ready → 合 `dev`。
-5. 開工 W02 `workspace-foundation`（無前置，關鍵路徑起點）。
+4. 下一個關鍵路徑開 W03 `identity-credential` 或 W04 `usage-ledger`。

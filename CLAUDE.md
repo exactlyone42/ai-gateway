@@ -35,7 +35,7 @@
 | `docs/identity.md` | 要動身分／憑證／Principal 解析 | W03 |
 | `docs/request-policy.md` | 要動政策合併、workload 分類、配額 | W11／W12 |
 | `docs/scheduler.md` | 要動排隊、優先權、保留容量、併發上限 | W13 |
-| `docs/observability.md` | 要加 metric／trace／log，或查「為什麼看不到」 | —（log 已寫，metric／trace 待 W07） |
+| `docs/observability.md` | 要加 metric／trace／log，或查「為什麼看不到」 | —（W07 已交付；後續缺口看 `loops/observability-otel.loop.md` 移交） |
 | `docs/admin.md` | 要動後台頁面或 Admin API | W08／W09 |
 
 ## 本 repo 的硬約束

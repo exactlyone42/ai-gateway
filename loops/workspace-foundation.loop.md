@@ -10,7 +10,7 @@
 | 前置 | 無 |
 | 開始 | `2026-09-10T00:45+08:00` |
 | 結束 | `2026-09-10T01:07+08:00` |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| Token | 40 次呼叫／billed 18,004,022（cache_read 17,919,599），`./scripts/token-ledger.sh --slug workspace-foundation --md` |
 
 ## 目的
 一個指令跑起 PostgreSQL ＋ 閘道 ＋ 可觀測性後端，讓 W03／W04 有資料庫可用。
@@ -28,15 +28,17 @@
       這條證明兩個端點的語意真的分開，不是同一個東西換名字。
 
 ## 已知
-- 現況是單 crate，`Cargo.toml` 直接列 12 個依賴，`edition = "2024"`。
-- `src/startup.rs:26` 已有 JSON 結構化日誌、`src/routes.rs:23` 已有 `x-request-id` 傳遞層，
+- 開工前是單 crate，`Cargo.toml` 直接列 12 個依賴，`edition = "2024"`。
+- 開工前 `src/startup.rs:12` 已有 JSON 結構化日誌、`src/routes.rs:46` 已有 `x-request-id` 傳遞層，
   這兩個可直接沿用。
-- 現有 `/healthz` 是唯一健康端點，只回 `{"status":"ok"}`，沒有依賴檢查。
-- 目前沒有 `sqlx`、沒有 migration、沒有 compose 檔。
+- 開工前 `/healthz` 是唯一健康端點，只回 `{"status":"ok"}`，沒有依賴檢查；現況已有
+  `/health`／`/ready`，`/healthz` 保留為 alias。
+- 開工前沒有 `sqlx`、migration、compose 檔；現況已有 `src/db.rs`、`migrations/`、
+  `deploy/docker-compose.yml` 與啟動時 migration。
 - 規格 §86 要求「不要要求開發者手動開十個 Terminal」。
 
 ## 已做
-- `2026-09-10` 開卡 #25、開分支、草稿 PR [#26](https://github.com/DnaBoss/agent-pool-gateway/pull/26)。
+- `2026-09-10` 開卡 #25、開分支、PR [#26](https://github.com/DnaBoss/agent-pool-gateway/pull/26)（已合）。
 - `2026-09-10` `sqlx` 進依賴；`src/db.rs` 建連線池（lazy）、跑 migration、回答就緒探測。
 - `2026-09-10` `DATABASE_URL` 與 `DATABASE_MAX_CONNECTIONS` 進集中設定層；連線池進 `AppState`。
 - `2026-09-10` migration 掛進啟動流程，在 listener 綁定**之前**跑。
@@ -89,6 +91,6 @@
 | 遮蔽關卡要不要資料庫 | 要。拿不到就 exit 3 | 讓它在沒有資料庫時跳過 | 它啟動的是真的 binary，而 binary 現在需要資料庫。「沒驗到」不等於「通過」 |
 
 ## 下一步
-1. PR #26 轉 ready，等 CI 綠燈後合 `dev`。
+1. W02 無剩餘實作；PR #26 已合 `dev`，卡 #25 已關。
 2. 交棒 W03（身分憑證）與 W04（用量帳本）——它們卡的就是這一段，現在解開了。
 3. `check.sh all` 現在需要 Docker（遮蔽關卡要啟動真的 binary）。快速的 `check.sh gate` 不需要。

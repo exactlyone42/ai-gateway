@@ -19,7 +19,7 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
-| [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 進行中 | P0 | 把 92 節規格拆成 18 個可獨立審查的段落，並先確認可行性。卡 #20 |
+| [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 18 個可獨立審查的段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 進行中 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
 | [identity-credential](./identity-credential.loop.md) | W03 | 未開始 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
@@ -43,6 +43,6 @@
 ## 現在該做哪一個
 
 看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`，其餘掛在旁邊可並行。
+`W02 → W03/W04 → W05 → W06 → W14`，其餘掛在旁邊可並行。W02 已交付，下一刀是 W03 或 W04。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
