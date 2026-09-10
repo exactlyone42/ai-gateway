@@ -51,10 +51,12 @@ pub(crate) fn gateway_options(options: PgConnectOptions) -> PgConnectOptions {
 /// second manual step, and a gateway serving requests against a half-migrated
 /// schema is worse than a gateway that did not start.
 pub async fn migrate(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
-    sqlx::migrate!("./migrations")
-        .run(pool)
-        .await
-        .map_err(DatabaseError::Migrate)
+    let mut migrations = sqlx::migrate!("./migrations");
+    // A rolled-back binary sees migrations applied by the newer release. The
+    // schema changes are expand-only, so unknown newer versions are safe to
+    // leave in place and must not prevent the old binary from starting.
+    migrations.set_ignore_missing(true);
+    migrations.run(pool).await.map_err(DatabaseError::Migrate)
 }
 
 /// Answers whether the database can serve a query right now.
