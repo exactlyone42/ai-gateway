@@ -5,10 +5,10 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P0 |
 | 前置 | `workspace-foundation` |
-| 開始 | — |
+| 開始 | 2026-09-10 15:52 CST |
 | 結束 | — |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
@@ -36,9 +36,14 @@
 - Admin 憑證與 Client API Key 是**兩套語意**，不共用（規格 §14）。這裡只做 Client 側。
 
 - W07 移交（2026-09-09）：日誌缺 `principal` 欄位（誰發的請求）。這一段做出身分解析後，在 `src/middleware.rs` 的存取紀錄補上該欄位。
+- 本輪依 `cashloop` 接手；reviewer 預設先用 `claude -p --model opus`，若 Claude Code 帳號不可用，
+  改用獨立的唯讀 Codex reviewer，意見由執行者依專案規範裁定。
+- 第一個實作段落與完整 diff 各做一次反方審查；每段回寫已做、證據、下一步。
+- 合併前必須 `./scripts/check.sh all` 全綠，並以真的壞情境證明關鍵測試會紅；完成後可自動合 `dev`。
+- 只做 W03 的 schema、Client 憑證生命週期、Principal 解析與 bounded cache；Admin RBAC／audit log 留在 W08。
 
 ## 已做
-- （待填）
+- 2026-09-10 15:52 CST：接手 W03；確認卡 #16 已拆成 W03 生命週期與 W08 RBAC，指定分支在本機與遠端皆不存在，從最新 `dev` 建立 `feature/identity-credential`。
 
 ## 已確定不可行
 - （待填）
