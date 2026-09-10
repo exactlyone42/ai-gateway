@@ -24,7 +24,7 @@
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
 | [identity-credential](./identity-credential.loop.md) | W03 | 已交付 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
 | [usage-ledger](./usage-ledger.loop.md) | W04 | 已交付 | P0 | 每一筆請求與用量都落在 PostgreSQL，DB 短暫不可用也不會無聲遺失 |
-| [anthropic-native](./anthropic-native.loop.md) | W05 | 進行中 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
+| [anthropic-native](./anthropic-native.loop.md) | W05 | 已交付 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
 | [openai-native](./openai-native.loop.md) | W06 | 未開始 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
 | [observability-otel](./observability-otel.loop.md) | W07 | 已交付（部分移交） | P1 | 任何一次請求都查得到卡在哪一步、花多久、誰發的 |
 | [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 未開始 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |

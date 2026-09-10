@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P0 |
 | 前置 | `identity-credential`, `usage-ledger` |
 | 開始 | `2026-09-10T23:00+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T00:14+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -131,6 +131,4 @@ Claude Code 指向閘道就能正常工作：串流即時、取消會傳到上�
 | 首 byte 定義 | `client_first_byte_at` = gateway 將第一段 body 交給 Hyper | 宣稱遠端 Client 已收到 | 伺服器無法觀察遠端 socket 真正收件時間 |
 
 ## 下一步
-1. 提交、推送、開 PR；CI 判定後合 `dev`。
-2. 回 W04 跑 SSE 中途停止 PostgreSQL 的真故障注入並補帳。
-3. 回 W07 跑 SSE 中途停止 OTel collector 的真故障注入。
+接續 W06 `openai-native`，抽出並複用本段的串流／取消／落帳骨架。
