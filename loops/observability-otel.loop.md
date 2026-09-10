@@ -44,9 +44,9 @@
       測試：`routes::tests::a_rejected_key_is_logged_as_a_warning`／`an_unreachable_upstream_is_logged_with_its_cause`。
 - [x] **陰性對照 1**：故意在日誌欄位塞一個假 token 字串 → 遮蔽檢查必須變紅。**做了兩層**：
       掃描器自我對照（`--selftest`）＋ 真的把 `authorization` 標頭記進日誌。兩層都紅（見「證據」）。
-- [~] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
-      已用「端點接得上但永不回應」代替（比 stop 更嚴格，stop 是連線被拒的 fast fail）；
-      **真正的串流還不存在**（現況是整包轉發），要等 W05 才驗得到「進行中的串流不中斷」。
+- [x] **陰性對照 2**：`docker stop` OTel collector → 進行中的串流不得中斷。
+      W05 完成後以容器化 OTLP receiver 實測：第一個 SSE event 後停 collector，Client 仍收到
+      `message_stop`，gateway 行程仍存活。
 
 ## 已知
 - 開工前日誌格式已自己實作（`src/logging.rs`），等級仍由 `RUST_LOG` 決定；沒有 OTel exporter、
@@ -94,6 +94,9 @@
 - `2026-09-09` OTLP 追蹤接上：exporter 由 `OTEL_EXPORTER_OTLP_ENDPOINT` 決定，沒設就完全不裝；
   span 樹四個節點（`gateway.request` → `auth.resolve`／`policy.evaluate`／`provider.attempt`），
   全部 `skip_all` 免得金鑰與 prompt 進 span；收工 flush，flush 失敗記一筆 error。
+- `2026-09-11` W05 提供長命 SSE 後補真 collector stop：`message_start` 到 Client 後
+  `docker stop apg-w07-otel-20260911`，同一請求仍收到 `message_stop`，gateway 行程存活。
+  同時修正無 exporter 的語意：保留本機 tracer 產生 trace ID，只關閉匯出。
 - `2026-09-09` 存取記錄多帶 `trace_id`／`span_id`（W3C 格式），沒有 span context 時不輸出、不填零。
 - `2026-09-09` 修掉一個實測抓到的 panic：async HTTP client 跑在 SDK 自己的執行緒上會炸，
   改 blocking client；另外裝 panic hook 把 panic 寫成一行 JSON，避免汙染日誌串流。

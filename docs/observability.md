@@ -23,7 +23,7 @@
 | `http.server.request.duration` | semconv metric 同名，**單位是秒**（`src/metric.rs:1642`） |
 | `url.path`、`error.type`、`event.name` | semconv（`attribute.rs:5410,1870,1883`）。`event.name` 的**值** `http.access` 是我們自己取的，不是註冊表項目 |
 | `body`、`timestamp`、`target`、`request_id` | 我們自己的欄位；`body` 對應 OTLP 的 `Body` |
-| `trace_id`／`span_id` | 來自 span context（W3C 格式：32／16 個十六進位字元）。沒裝追蹤層時**不輸出**，不填零 |
+| `trace_id`／`span_id` | 來自 span context（W3C 格式：32／16 個十六進位字元）。即使未設定 exporter 也由本機 tracer 產生；無有效 context 時不填零 |
 
 ## 三個設計決定
 

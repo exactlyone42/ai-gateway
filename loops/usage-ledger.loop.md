@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P0 |
 | 前置 | `workspace-foundation` |
 | 開始 | `2026-09-10T21:49+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T00:07+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -35,7 +35,7 @@
 - [x] **有上限**的持久化 outbox：DB 不可用時寫本機 spool，恢復後補寫；spool 滿了要有明確策略
       （拒新請求或降級記錄），**不得無上限記憶體佇列**。
 - [x] 預設**不存** prompt／response 內容，只存 metadata。
-- [ ] **陰性對照**：串流進行中 `docker stop` Postgres → 既有串流不得中斷，且用量最終補得回來
+- [x] **陰性對照**：串流進行中 `docker stop` Postgres → 既有串流不得中斷，且用量最終補得回來
       （查 spool → 恢復後查表）。
 
 ## 已知
@@ -77,6 +77,9 @@
   `stream:true` 501 邊界、兩側 crash recovery、第二筆停寫與完整 response body 驗證。
 - 2026-09-10 22:52：修完聚焦複審一高二中；新增 request ID、pending batch、最小槽位三條測試，
   重跑完整 gate 全綠。
+- 2026-09-11 00:07：W05 提供長命 SSE 後，用獨立 PostgreSQL 容器完成真 `docker stop` 對照；
+  第一段後停 DB，Client 仍收到 terminal。spool 當下 1 筆；DB 與 gateway 各重啟一次後，
+  批次查得 request 1／attempt 1／usage 2／status completed，W04 收工。
 
 ## 已確定不可行
 - 在 W05 前把 `stream:true` 的 SSE body 當 JSON 解析：終端 usage event 會變成零且不落
@@ -100,6 +103,9 @@
 - 雙檔 spool 各實際配置 32 KiB；startup 在 working 半寫時保留 interrupted，在 ready 已 rename
   但 reserved 未刪時保留 completed。移除 `stream:true` 501 邊界後，目標測試精準由 1 passed
   變 1 failed（實際 200≠501），復原後 1 passed。
+- 真 SSE DB outage：第一批 `message_start` 到 Client 後停獨立 PostgreSQL，仍收到
+  `message_stop`；`spool_ready_before_restart=1`，恢復後單一 SQL 回傳
+  `{"requests":1,"attempts":1,"usage":2,"status":"completed"}`。
 
 ## 來源
 - 規格 §42–§46（token 帳務與 schema）、§60（隱私）、§63（故障隔離）。
@@ -112,5 +118,4 @@
 | DB 恢復 | 首次失敗停止 DB 寫入；修復後重啟一次批次補寫 | 自動 retry loop | 避免反覆連線觸發 rate-limit／封鎖；spool 在 named volume 不隨容器重建消失 |
 
 ## 下一步
-1. 提交、推送、開 PR；CI 綠後合 `dev`，但卡 #14 保持開放。
-2. 接續 W05；真 SSE 完成後回到本 loop 跑 `docker stop` 長命串流陰性對照並封閉 W04。
+無。後續報表查詢屬 W09。
