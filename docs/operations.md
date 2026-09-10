@@ -27,6 +27,11 @@ later corrective migration must be forward-only, preserve existing rows, and
 backfill in one set-based SQL statement. Before any destructive replacement,
 take and verify a PostgreSQL backup and document the restore command.
 
+Deploy the migration-forward-compatible binary before any later release adds a
+migration. It tolerates unknown newer migration versions while still validating
+every migration embedded in that binary. This is what lets an older binary
+restart after a rollback without deleting schema or migration history.
+
 ## Usage ledger spool
 
 Every accepted inference reserves two fixed-size files in `LEDGER_SPOOL_DIR`
