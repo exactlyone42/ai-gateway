@@ -46,6 +46,7 @@ The repository contains the native Anthropic and OpenAI data-plane slice:
 - tenant-scoped `GET /v1/models` and deterministic routing from the active PostgreSQL registry
 - tenant-scoped virtual credentials with constant-time HMAC verification
 - seven-layer request policy resolution with immutable decision snapshots
+- tenant-scoped hard/soft quota enforcement with persistent UTC windows and usage reconciliation
 - cancellation propagation, durable usage accounting, request IDs, traces,
   metrics, and structured JSON logs
 

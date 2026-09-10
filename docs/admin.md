@@ -48,7 +48,7 @@ admin 並行降級時仍至少留下一位 active admin。
 | update | `PATCH /admin/v1/{resource}/{id}` | body 必帶目前 `version` |
 | delete semantics | `DELETE /admin/v1/{resource}/{id}?version=N` | identity 停用、credential 撤銷、draft 封存 |
 | rotate key | `POST /admin/v1/credentials/{id}/rotate` | body 帶 `version`、1..900 秒 overlap |
-| lifecycle | `POST /admin/v1/{providers|models|model-aliases|policies}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
+| lifecycle | `POST /admin/v1/{providers|models|model-aliases|policies|quotas}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
 
 所有 mutable resource 使用 version CAS；stale version 回 409。User／Device／Client／Agent 是四個
 獨立 Principal 維度，一把 credential 可同時指向多個維度，但至少一個；停用任一已關聯維度會在
@@ -57,6 +57,10 @@ admin 並行降級時仍至少留下一位 active admin。
 Credential 的完整 plaintext 只在 create／rotate 回應一次；list／get／audit 都移除 `secret_hash` 與
 `fingerprint`。Provider 只接受 `env://NAME` 格式的 `credential_ref`，不接受 inline secret。
 Credential-scoped policy 會綁定輪替家族；新 key 在 overlap 期間不會失去舊 key 的 hard constraints。
+Credential-scoped quota 使用相同輪替家族正規化。Governance report 回傳目前最多 100 個 active
+quota window 的 quota、limit kind、current、maximum 與 UTC reset time；Request detail 保留當次
+immutable quota decision。事故重建可在同一 tenant lock 下執行
+`SELECT recompute_quota_windows('<tenant-uuid>')`，其來源是不可變 reservation 與 reconciliation event。
 
 ## 稽核與錯誤
 
@@ -72,7 +76,8 @@ Admin request body 上限 1 MiB。CORS 只允許 `ADMIN_ALLOWED_ORIGIN` 的單�
 `ADMIN_TRUSTED_PROXY_IPS` 時才採用 `X-Forwarded-For` 第一個位址，audit 永遠同時保留 source 與 peer。
 
 `DATABASE_MAX_CONNECTIONS` 是總預算，`ADMIN_DATABASE_MAX_CONNECTIONS` 從中保留給 Admin pool，
-且至少留一條資料面連線。Admin pool 飽和不會吃掉資料面 pool；控制面失敗不會中斷已進行的推論。
+且至少留兩條資料面連線：一條持有 W12 單實例鎖，一條服務流量。Admin pool 飽和不會吃掉資料面
+pool；控制面失敗不會中斷已進行的推論。
 
 ## 驗收
 

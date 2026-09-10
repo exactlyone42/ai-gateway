@@ -155,6 +155,9 @@ export function RequestsPage() {
         <h3>Effective policy</h3>{data.request.policy_decision
           ? <pre className="decision-json">{JSON.stringify(data.request.policy_decision, null, 2)}</pre>
           : <Unavailable reason="No policy snapshot was recorded for this request." />}
+        <h3>Quota decision</h3>{data.request.quota_decision
+          ? <pre className="decision-json">{JSON.stringify(data.request.quota_decision, null, 2)}</pre>
+          : <Unavailable reason="No quota applied to this request." />}
         <h3>Provider attempts</h3><DataTable rows={data.attempts} columns={[{ key: 'attempt_number', label: '#' }, { key: 'provider', label: 'Provider' }, { key: 'model', label: 'Model' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />
         <Unavailable reason={data.retry_fallback_history?.unavailable_reason} /><Unavailable reason={data.trace_spans?.unavailable_reason} /></>}</QueryBody>
     </aside></div>}
@@ -260,8 +263,9 @@ export function GovernancePage() {
   const queryClient = useQueryClient()
   const query = useAdminQuery<JsonObject>(['governance'], '/governance')
   const identities = useAdminQuery<JsonObject>(['identity-map'], '/identity-map')
-  const [creating, setCreating] = useState(false)
-  const [editing, setEditing] = useState<JsonObject | null>(null)
+  const catalog = useAdminQuery<JsonObject>(['catalog'], '/catalog')
+  const [creating, setCreating] = useState<'policy' | 'quota' | null>(null)
+  const [editing, setEditing] = useState<{ kind: 'policy' | 'quota'; row: JsonObject } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const canWrite = auth.role !== 'viewer'
@@ -270,24 +274,29 @@ export function GovernancePage() {
     setBusy(true); setError(null)
     try {
       await adminRequest(path, auth.token!, auth.clear, init)
-      setCreating(false); setEditing(null)
+      setCreating(null); setEditing(null)
       await queryClient.invalidateQueries({ queryKey: ['governance'] })
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
     finally { setBusy(false) }
   }
-  const lifecycle = (row: JsonObject) => mutate(`/policies/${row.id}/lifecycle`, { method: 'POST', body: JSON.stringify({ version: row.version, state: row.lifecycle_state === 'active' ? 'disabled' : 'active' }) })
-  return <Page title="Policies & Scheduler" actions={canWrite ? <button onClick={() => setCreating(true)}><Plus size={16} />Policy</button> : undefined}>
+  const lifecycle = (kind: 'policy' | 'quota', row: JsonObject) => mutate(`/${kind}s/${row.id}/lifecycle`, { method: 'POST', body: JSON.stringify({ version: row.version, state: row.lifecycle_state === 'active' ? 'disabled' : 'active' }) })
+  return <Page title="Governance" actions={canWrite ? <div className="toolbar"><button onClick={() => setCreating('policy')}><Plus size={16} />Policy</button><button onClick={() => setCreating('quota')}><Plus size={16} />Quota</button></div> : undefined}>
     {error && <div className="state error">{error}</div>}
     <QueryBody query={query}>{(data) => <>
-    <div className="health-summary"><div><span>Policy runtime</span><Status value={data.policy_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.policy_runtime?.active_count ?? 0} active</small></div>
-    <div className="availability-grid">{!data.quota_runtime?.available && <Unavailable reason={data.quota_runtime?.unavailable_reason} />}{!data.scheduler?.available && <Unavailable reason={data.scheduler?.unavailable_reason} />}</div>
+    <div className="health-summary governance-health"><div className="runtime-summary"><div><span>Policy runtime</span><Status value={data.policy_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.policy_runtime?.active_count ?? 0} active</small></div><div className="runtime-summary"><div><span>Quota runtime</span><Status value={data.quota_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.quota_runtime?.active_count ?? 0} active · {data.quota_runtime?.window_count ?? 0} windows · {data.quota_runtime?.timezone ?? 'UTC'}</small></div></div>
+    <div className="availability-grid">{!data.scheduler?.available && <Unavailable reason={data.scheduler?.unavailable_reason} />}</div>
     <section className="section catalog-table"><h2>Policies</h2><DataTable rows={data.policies ?? []} columns={[{ key: 'policy_key', label: 'Policy' }, { key: 'revision', label: 'Revision' }, { key: 'scope', label: 'Scope', render: policyTarget }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }, ...((canWrite || canActivate) ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
-      {canWrite && row.lifecycle_state === 'draft' && <button className="icon-button" title="Edit policy" disabled={busy} onClick={() => setEditing(row)}><Pencil /></button>}
+      {canWrite && row.lifecycle_state === 'draft' && <button className="icon-button" title="Edit policy" disabled={busy} onClick={() => setEditing({ kind: 'policy', row })}><Pencil /></button>}
       {canWrite && ['draft', 'disabled'].includes(row.lifecycle_state) && <button className="icon-button danger" title="Archive policy" disabled={busy} onClick={() => void mutate(`/policies/${row.id}?version=${row.version}`, { method: 'DELETE' })}><Trash2 /></button>}
-      {canActivate && row.lifecycle_state !== 'archived' && <button className={`icon-button ${row.lifecycle_state === 'active' ? 'danger' : ''}`} title={row.lifecycle_state === 'active' ? 'Disable policy' : 'Activate policy'} disabled={busy} onClick={() => void lifecycle(row)}>{row.lifecycle_state === 'active' ? <PowerOff /> : <CirclePower />}</button>}
+      {canActivate && row.lifecycle_state !== 'archived' && <button className={`icon-button ${row.lifecycle_state === 'active' ? 'danger' : ''}`} title={row.lifecycle_state === 'active' ? 'Disable policy' : 'Activate policy'} disabled={busy} onClick={() => void lifecycle('policy', row)}>{row.lifecycle_state === 'active' ? <PowerOff /> : <CirclePower />}</button>}
     </div> }] : [])]} /></section>
-    <section className="section"><h2>Quota drafts</h2><DataTable rows={data.quotas ?? []} columns={[{ key: 'quota_key', label: 'Quota' }, { key: 'revision', label: 'Revision' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }]} /></section>
-    {(creating || editing) && <PolicyDialog initial={editing} identities={identities.data} busy={busy} onClose={() => { setCreating(false); setEditing(null) }} onSubmit={(path, body, method) => void mutate(path, { method, body: JSON.stringify(body) })} />}
+    <section className="section catalog-table"><h2>Quotas</h2><DataTable rows={data.quotas ?? []} columns={[{ key: 'quota_key', label: 'Quota' }, { key: 'revision', label: 'Revision' }, { key: 'scope', label: 'Scope', render: quotaTarget }, { key: 'mode', label: 'Mode', render: (row) => row.configuration?.mode ?? 'Unavailable' }, { key: 'limits', label: 'Limits', render: (row) => <div className="quota-limit-list">{quotaLimits.filter(([key]) => row.configuration?.limits?.[key] != null).map(([key, label]) => <span key={key}>{label}: {compactNumber(row.configuration.limits[key])}</span>)}</div> }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, { key: 'updated_at', label: 'Updated', render: (row) => formatDate(row.updated_at) }, ...((canWrite || canActivate) ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
+      {canWrite && row.lifecycle_state === 'draft' && <button className="icon-button" title="Edit quota" disabled={busy} onClick={() => setEditing({ kind: 'quota', row })}><Pencil /></button>}
+      {canWrite && ['draft', 'disabled'].includes(row.lifecycle_state) && <button className="icon-button danger" title="Archive quota" disabled={busy} onClick={() => void mutate(`/quotas/${row.id}?version=${row.version}`, { method: 'DELETE' })}><Trash2 /></button>}
+      {canActivate && row.lifecycle_state !== 'archived' && <button className={`icon-button ${row.lifecycle_state === 'active' ? 'danger' : ''}`} title={row.lifecycle_state === 'active' ? 'Disable quota' : 'Activate quota'} disabled={busy} onClick={() => void lifecycle('quota', row)}>{row.lifecycle_state === 'active' ? <PowerOff /> : <CirclePower />}</button>}
+    </div> }] : [])]} />{(data.quota_runtime?.windows ?? []).length > 0 && <><h3>Active windows</h3><DataTable rows={data.quota_runtime.windows} columns={[{ key: 'quota_key', label: 'Quota' }, { key: 'limit_kind', label: 'Limit' }, { key: 'current', label: 'Current' }, { key: 'limit', label: 'Maximum' }, { key: 'reset_at', label: 'Resets', render: (row) => formatDate(row.reset_at) }]} /></>}</section>
+    {(creating === 'policy' || editing?.kind === 'policy') && <PolicyDialog initial={editing?.kind === 'policy' ? editing.row : null} identities={identities.data} busy={busy} onClose={() => { setCreating(null); setEditing(null) }} onSubmit={(path, body, method) => void mutate(path, { method, body: JSON.stringify(body) })} />}
+    {(creating === 'quota' || editing?.kind === 'quota') && <QuotaDialog initial={editing?.kind === 'quota' ? editing.row : null} identities={identities.data} catalog={catalog.data} busy={busy} onClose={() => { setCreating(null); setEditing(null) }} onSubmit={(path, body, method) => void mutate(path, { method, body: JSON.stringify(body) })} />}
   </>}</QueryBody></Page>
 }
 
@@ -297,6 +306,16 @@ function policyScope(row: JsonObject) {
 
 function policyTarget(row: JsonObject) {
   const scope = policyScope(row)
+  if (scope === 'global') return scope
+  return `${scope} · ${String(row[`${scope}_id`]).slice(0, 8)}`
+}
+
+function quotaScope(row: JsonObject) {
+  return ['user', 'device', 'client', 'agent', 'credential', 'model', 'provider'].find((scope) => row[`${scope}_id`]) ?? 'global'
+}
+
+function quotaTarget(row: JsonObject) {
+  const scope = quotaScope(row)
   if (scope === 'global') return scope
   return `${scope} · ${String(row[`${scope}_id`]).slice(0, 8)}`
 }
@@ -330,6 +349,58 @@ function PolicyDialog({ initial, identities, busy, onClose, onSubmit }: { initia
     {validationError && <div className="state error">{validationError}</div>}
     {!initial && <><label>Policy key<input name="policy_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'device', 'client', 'agent', 'credential'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
     <label>Configuration<textarea name="configuration" required spellCheck={false} defaultValue={JSON.stringify(initial?.configuration ?? { defaults: { workload_class: 'interactive', urgency: 'normal', quality: 'standard', budget_class: 'normal' } }, null, 2)} /></label>
+    <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>
+  </form></div>
+}
+
+const quotaLimits = [
+  ['requests_per_minute', 'Requests per minute'],
+  ['estimated_tokens_per_minute', 'Estimated tokens per minute'],
+  ['tokens_per_hour', 'Tokens per hour'],
+  ['tokens_per_day', 'Tokens per day'],
+  ['concurrent_requests', 'Concurrent requests'],
+  ['cost_per_day_microusd', 'Daily cost (micro-USD)'],
+  ['cost_per_month_microusd', 'Monthly cost (micro-USD)'],
+] as const
+
+function QuotaDialog({ initial, identities, catalog, busy, onClose, onSubmit }: { initial: JsonObject | null; identities?: JsonObject; catalog?: JsonObject; busy: boolean; onClose: () => void; onSubmit: (path: string, body: JsonObject, method: string) => void }) {
+  const [scope, setScope] = useState(initial ? quotaScope(initial) : 'global')
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const entities = scope === 'global' ? [] : scope === 'credential'
+    ? (identities?.paths ?? []).map((path: JsonObject) => path.credential)
+    : scope === 'model' ? (catalog?.models ?? [])
+    : scope === 'provider' ? (catalog?.providers ?? [])
+    : principalEntities(identities, scope)
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setValidationError(null)
+    const data = new FormData(event.currentTarget)
+    const limits: JsonObject = {}
+    for (const [key] of quotaLimits) {
+      const raw = String(data.get(key) ?? '')
+      if (!raw) continue
+      const value = Number(raw)
+      if (!Number.isSafeInteger(value) || value < 0) { setValidationError('Limits must be non-negative whole numbers.'); return }
+      limits[key] = value
+    }
+    if (!Object.keys(limits).length) { setValidationError('Set at least one limit.'); return }
+    const configuration = { mode: data.get('mode'), limits }
+    if (initial) { onSubmit(`/quotas/${initial.id}`, { version: initial.version, configuration }, 'PATCH'); return }
+    const scopedId = scope === 'global' ? null : String(data.get('scope_id') || '')
+    if (scope !== 'global' && !scopedId) { setValidationError('Select a scope target.'); return }
+    onSubmit('/quotas', {
+      quota_key: data.get('quota_key'), revision: Number(data.get('revision')),
+      user_id: scope === 'user' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
+      client_id: scope === 'client' ? scopedId : null, agent_id: scope === 'agent' ? scopedId : null,
+      credential_id: scope === 'credential' ? scopedId : null, model_id: scope === 'model' ? scopedId : null,
+      provider_id: scope === 'provider' ? scopedId : null, configuration,
+    }, 'POST')
+  }
+  const configured = initial?.configuration?.limits ?? {}
+  return <div className="dialog-backdrop"><form className="dialog policy-dialog" onSubmit={submit}><header><h2>{initial ? 'Edit quota' : 'Create quota'}</h2><button type="button" className="icon-button" title="Close" onClick={onClose}><X /></button></header>
+    {validationError && <div className="state error">{validationError}</div>}
+    {!initial && <><label>Quota key<input name="quota_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'device', 'client', 'agent', 'credential', 'model', 'provider'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name ?? entity.public_model_id ?? entity.provider_key} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
+    <label>Mode<select name="mode" defaultValue={initial?.configuration?.mode ?? 'hard'}><option value="hard">Hard</option><option value="soft">Soft</option></select></label>
+    <fieldset><legend>Limits</legend>{quotaLimits.map(([key, label]) => <label key={key}>{label}<input name={key} type="number" min="0" step="1" defaultValue={configured[key] ?? (key === 'requests_per_minute' && !initial ? 100 : '')} /></label>)}</fieldset>
     <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>
   </form></div>
 }

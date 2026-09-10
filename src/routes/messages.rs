@@ -23,7 +23,8 @@ use crate::{
     policy::value_text,
     routes::{BodyBytes, body_bytes},
     services::{
-        anthropic, request_policy, request_policy::RejectionContext, sse::MetadataParser, streaming,
+        anthropic, request_policy, request_policy::RejectionContext, request_quota,
+        sse::MetadataParser, streaming,
     },
     state::AppState,
 };
@@ -134,23 +135,22 @@ async fn proxy(
     let requested_model = prepared.requested_model.clone();
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(gateway_operation, &metadata);
-    let selection = state
-        .models
-        .select(
-            principal.tenant_id,
-            principal.is_development_bootstrap(),
-            gateway_operation,
-            prepared.selector.clone(),
-            required,
-        )
-        .await?;
-    request_policy::enforce_selected_model(
+    let prepared_quota = request_quota::admit(
         &state,
         &prepared,
-        &selection.public_model_id,
-        selection.ledger_snapshot(),
+        gateway_operation,
+        &metadata,
+        body.len(),
+        required,
     )
     .await?;
+    let gateway_request_id = prepared_quota.gateway_request_id;
+    let crate::quota::QuotaAdmission {
+        selection,
+        estimated_usage: estimated,
+        snapshot: quota_snapshot,
+        lease: quota_lease,
+    } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
@@ -158,34 +158,36 @@ async fn proxy(
     let selection_snapshot = selection.ledger_snapshot();
     let body = Bytes::from(rewrite_model(&body, &mut metadata, &provider_model)?);
     let is_stream = matches!(operation, Operation::Messages) && required.streaming;
-    let estimated = matches!(operation, Operation::Messages).then(|| TokenUsage {
-        input_tokens: estimate_input_tokens(body.len()),
-        ..TokenUsage::default()
-    });
+    let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
     let mut reservation = state
         .ledger
-        .reserve(RequestStart {
-            request_id: ledger_request_id(&headers),
-            session_id: header_text(&headers, "x-claude-code-session-id")
-                .or_else(|| header_text(&headers, "x-session-id")),
-            trace_id,
-            requested_model: Some(requested_model),
-            workload_class: Some(value_text(&policy.workload_class)),
-            urgency: Some(value_text(&policy.urgency)),
-            quality: Some(value_text(&policy.quality)),
-            budget_class: Some(value_text(&policy.budget_class)),
-            estimated_tokens: estimated
-                .as_ref()
-                .map(|usage| i64::try_from(usage.input_tokens).unwrap_or(i64::MAX)),
-            selection: selection_snapshot.clone(),
-            policy: Some(policy.ledger_snapshot()),
-            principal,
-            created_at: received_at,
-        })
+        .reserve_with_quota(
+            RequestStart {
+                request_id: ledger_request_id(&headers),
+                session_id: header_text(&headers, "x-claude-code-session-id")
+                    .or_else(|| header_text(&headers, "x-session-id")),
+                trace_id,
+                requested_model: Some(requested_model),
+                workload_class: Some(value_text(&policy.workload_class)),
+                urgency: Some(value_text(&policy.urgency)),
+                quality: Some(value_text(&policy.quality)),
+                budget_class: Some(value_text(&policy.budget_class)),
+                estimated_tokens: ledger_estimated
+                    .as_ref()
+                    .map(request_quota::estimated_tokens),
+                selection: selection_snapshot.clone(),
+                policy: Some(policy.ledger_snapshot()),
+                principal,
+                created_at: received_at,
+            },
+            Some(gateway_request_id),
+            quota_snapshot,
+            quota_lease,
+        )
         .await?;
     reservation.annotate_protocol(
         operation.name(),
@@ -241,7 +243,7 @@ async fn proxy(
         provider_model,
         provider_request_id,
         provider_request_at,
-        estimated.unwrap_or_default(),
+        ledger_estimated.unwrap_or_default(),
     )
     .with_selection(selection_snapshot);
 

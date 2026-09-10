@@ -116,6 +116,55 @@ default to `1024` entries and `60` seconds; both must be positive.
 - `migrations/20260911051500_policy_engine.sql`: policy lifecycle and ledger schema.
 - `web/src/pages.tsx`: policy operations and request decision display.
 
+## Quota and rate limits
+
+Active quota revisions are tenant scoped and may target the global tenant,
+User, Device, Client, Agent, Credential rotation family, Model, or Provider.
+Every matching scope is applied. A quota document is typed and contains at
+least one of these limits:
+
+```json
+{
+  "mode": "hard",
+  "limits": {
+    "requests_per_minute": 100,
+    "estimated_tokens_per_minute": 500000,
+    "tokens_per_hour": 10000000,
+    "tokens_per_day": 100000000,
+    "concurrent_requests": 20,
+    "cost_per_day_microusd": 50000000,
+    "cost_per_month_microusd": 1000000000
+  }
+}
+```
+
+Hard violations return `429 quota_exceeded`. Soft violations try lower quality
+aliases in `premium`, `advanced`, `standard`, `economy` order; when no lower
+compatible tier remains they return `429 quota_deferred`. The immutable
+decision and exact violated quota are stored in
+`gateway_requests.quota_decision`.
+
+Reservations happen before any provider call. Text input uses UTF-8 byte count
+as a conservative token upper bound. Output uses the request cap or the model
+maximum, multiplied by OpenAI Chat `n`. Image input cannot be bounded by request
+bytes and therefore fails closed whenever a token or cost quota applies.
+Cost quotas require `token_v1` USD price metadata. Requests using cache controls
+also require cache-read and cache-write rates; provider-billed tools or service
+tiers fail closed until their price dimensions are represented. Anthropic
+`count_tokens` consumes request-rate quota only, not inference token or cost
+quota.
+
+Persistent windows and reservations live in PostgreSQL. Provider-reported
+usage appends a reconciliation event and adjusts estimated token/cost totals
+exactly once under the same tenant lock as admission. Day and month boundaries
+are fixed to UTC. `recompute_quota_windows(tenant_uuid)` rebuilds counters from
+immutable reservations and reconciliation state under that lock.
+
+Concurrency is a request-lifetime RAII lease. W12 deliberately supports one
+gateway process; startup holds a PostgreSQL session advisory lock and a second
+process fails before binding the listener. W19 must move this ownership into a
+distributed durable design before enabling replicas.
+
 ## Rollout
 
 Apply the migration before activating a policy. Create and inspect a draft,

@@ -203,6 +203,11 @@ async fn policy_and_ledger_bounds_do_not_revalidate_legacy_rows_during_deploy(po
         "gateway_requests_urgency_check",
         "gateway_requests_quality_check",
         "gateway_requests_budget_class_check",
+        "quotas_non_nil_tenant_check",
+        "quotas_key_size_check",
+        "quotas_configuration_size_check",
+        "gateway_requests_quota_reservation_fk",
+        "gateway_requests_quota_decision_check",
     ];
     let unvalidated: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_constraint WHERE conname = ANY($1) AND NOT convalidated",

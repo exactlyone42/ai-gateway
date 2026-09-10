@@ -13,17 +13,20 @@ use sha2::Sha256;
 use crate::{
     error::GatewayError,
     identity::PrincipalContext,
-    ledger::{
-        ModelSelectionSnapshot, ProviderAttempt, RequestCompletion, RequestStart, TokenUsage,
-    },
+    ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
     model_registry::{
         CapabilityRequirements, GatewayOperation, ModelSelector, ProviderProfile, parse_request,
         rewrite_model,
     },
-    policy::{EffectivePolicy, value_text},
-    services::streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data, relay},
+    policy::value_text,
+    quota::QuotaAdmission,
+    services::{
+        request_policy::{self, RejectionContext},
+        request_quota,
+        streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data, relay},
+    },
     state::AppState,
 };
 
@@ -101,68 +104,52 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         return Err(GatewayError::UnsupportedRequest);
     }
     let operation = request.operation.gateway();
-    let mut selector = ModelSelector::parse(
+    let selector = ModelSelector::parse(
         metadata
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or_default(),
     )?;
-    let requested_model = selector.requested_value();
-    let policy = state
-        .policies
-        .evaluate(
-            &request.principal,
-            &request.headers,
-            &selector,
-            request.received_at,
-        )
-        .await?;
-    if policy.denied {
-        record_policy_rejection(state, &request, requested_model, &policy, None, None).await?;
-        return Err(match policy.denial_kind() {
-            Some(crate::policy::PolicyDenial::ModelAllowlistEmpty) => GatewayError::ModelForbidden,
-            _ => GatewayError::PolicyDenied,
-        });
-    }
-    if selector.quality().is_none() && !policy.allows_model(&requested_model) {
-        record_policy_rejection(
-            state,
-            &request,
-            requested_model,
-            &policy,
-            None,
-            Some("model_not_allowed"),
-        )
-        .await?;
-        return Err(GatewayError::ModelForbidden);
-    }
-    if selector.quality().is_some() {
-        selector = ModelSelector::parse(&policy.quality_selector())?;
-    }
+    let prepared = request_policy::prepare(
+        state,
+        &request.headers,
+        selector,
+        RejectionContext {
+            principal: request.principal.clone(),
+            received_at: request.received_at,
+            request_id: ledger_request_id(&request.headers),
+            session_id: header_text(&request.headers, "x-codex-session-id")
+                .or_else(|| header_text(&request.headers, "x-session-id")),
+            operation: request.operation.name(),
+            client_agent_id: None,
+            parent_agent_id: None,
+            estimated_tokens: Some(
+                i64::try_from(estimate_input_tokens(request.body.len())).unwrap_or(i64::MAX),
+            ),
+        },
+    )
+    .await?;
+    let requested_model = prepared.requested_model.clone();
+    let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(operation, &metadata);
-    let selection = state
-        .models
-        .select(
-            request.principal.tenant_id,
-            request.principal.is_development_bootstrap(),
-            operation,
-            selector,
-            required,
-        )
-        .await?;
-    if !policy.allows_model(&selection.public_model_id) {
-        let snapshot = selection.ledger_snapshot();
-        record_policy_rejection(
-            state,
-            &request,
-            requested_model,
-            &policy,
-            snapshot,
-            Some("model_not_allowed"),
-        )
-        .await?;
-        return Err(GatewayError::ModelForbidden);
-    }
+    let observer = request.operation.observer(&metadata)?;
+    let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
+    let prepared_quota = request_quota::admit(
+        state,
+        &prepared,
+        operation,
+        &metadata,
+        request.body.len(),
+        required,
+    )
+    .await?;
+    let gateway_request_id = prepared_quota.gateway_request_id;
+    let QuotaAdmission {
+        selection,
+        estimated_usage: estimated,
+        snapshot: quota_snapshot,
+        lease: quota_lease,
+    } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
@@ -174,34 +161,33 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         &provider_model,
     )?);
     let is_stream = required.streaming;
-    let observer = request.operation.observer(&metadata)?;
-    let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
-    let estimated = TokenUsage {
-        input_tokens: estimate_input_tokens(body.len()),
-        ..TokenUsage::default()
-    };
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
     let mut reservation = state
         .ledger
-        .reserve(RequestStart {
-            request_id: ledger_request_id(&request.headers),
-            session_id: header_text(&request.headers, "x-codex-session-id")
-                .or_else(|| header_text(&request.headers, "x-session-id")),
-            trace_id,
-            requested_model: Some(requested_model),
-            workload_class: Some(value_text(&policy.workload_class)),
-            urgency: Some(value_text(&policy.urgency)),
-            quality: Some(value_text(&policy.quality)),
-            budget_class: Some(value_text(&policy.budget_class)),
-            estimated_tokens: Some(i64::try_from(estimated.input_tokens).unwrap_or(i64::MAX)),
-            selection: selection_snapshot.clone(),
-            policy: Some(policy.ledger_snapshot()),
-            principal: request.principal,
-            created_at: request.received_at,
-        })
+        .reserve_with_quota(
+            RequestStart {
+                request_id: ledger_request_id(&request.headers),
+                session_id: header_text(&request.headers, "x-codex-session-id")
+                    .or_else(|| header_text(&request.headers, "x-session-id")),
+                trace_id,
+                requested_model: Some(requested_model),
+                workload_class: Some(value_text(&policy.workload_class)),
+                urgency: Some(value_text(&policy.urgency)),
+                quality: Some(value_text(&policy.quality)),
+                budget_class: Some(value_text(&policy.budget_class)),
+                estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
+                selection: selection_snapshot.clone(),
+                policy: Some(policy.ledger_snapshot()),
+                principal: request.principal,
+                created_at: request.received_at,
+            },
+            Some(gateway_request_id),
+            quota_snapshot,
+            quota_lease,
+        )
         .await?;
     reservation.annotate_protocol(request.operation.name(), None, None);
     if policy.is_expired(Utc::now()) {
@@ -306,50 +292,6 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         operation: request.operation,
     })
     .await
-}
-
-async fn record_policy_rejection(
-    state: &AppState,
-    request: &RequestContext,
-    requested_model: String,
-    policy: &EffectivePolicy,
-    selection: Option<ModelSelectionSnapshot>,
-    rejection_reason: Option<&str>,
-) -> Result<(), GatewayError> {
-    let trace_id = match logging::current_trace_ids().0 {
-        value if value.is_empty() => None,
-        value => Some(value),
-    };
-    state
-        .ledger
-        .reject(
-            RequestStart {
-                request_id: ledger_request_id(&request.headers),
-                session_id: header_text(&request.headers, "x-codex-session-id")
-                    .or_else(|| header_text(&request.headers, "x-session-id")),
-                trace_id,
-                requested_model: Some(requested_model),
-                workload_class: Some(value_text(&policy.workload_class)),
-                urgency: Some(value_text(&policy.urgency)),
-                quality: Some(value_text(&policy.quality)),
-                budget_class: Some(value_text(&policy.budget_class)),
-                estimated_tokens: Some(
-                    i64::try_from(estimate_input_tokens(request.body.len())).unwrap_or(i64::MAX),
-                ),
-                selection,
-                policy: Some(rejection_reason.map_or_else(
-                    || policy.ledger_snapshot(),
-                    |reason| policy.rejection_snapshot(reason),
-                )),
-                principal: request.principal.clone(),
-                created_at: request.received_at,
-            },
-            request.operation.name(),
-            None,
-            None,
-        )
-        .await?;
-    Ok(())
 }
 
 #[tracing::instrument(

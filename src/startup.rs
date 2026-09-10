@@ -32,6 +32,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("database schema is up to date");
 
     let state = Arc::new(AppState::new(config, pool)?);
+    state.quotas.acquire_single_instance_guard().await?;
     let recovered = state.ledger.flush_startup().await?;
     if recovered > 0 {
         info!(

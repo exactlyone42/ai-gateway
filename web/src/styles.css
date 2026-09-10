@@ -102,6 +102,11 @@ tr.clickable:hover td { background: #f1f7f3; }
 
 .health-summary { display: flex; align-items: center; justify-content: space-between; padding: 18px; border: 1px solid var(--line); background: white; }
 .health-summary > div { display: flex; align-items: center; gap: 12px; }
+.governance-health { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; }
+.governance-health > .runtime-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding-right: 18px; }
+.governance-health > .runtime-summary + .runtime-summary { border-left: 1px solid var(--line); padding-right: 0; padding-left: 18px; }
+.runtime-summary > div { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.runtime-summary small { align-self: center; text-align: right; }
 .health-list { margin-top: 14px; border: 1px solid var(--line); background: white; }
 .health-list > div { display: grid; grid-template-columns: 220px 140px 1fr; align-items: center; min-height: 54px; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--line); }
 .health-list > div:last-child { border-bottom: 0; }
@@ -161,6 +166,9 @@ tr.clickable:hover td { background: #f1f7f3; }
   .entity-columns { grid-template-columns: 1fr 1fr; }
   .health-list > div { grid-template-columns: minmax(110px, 1fr) auto; }
   .health-list small { grid-column: 1 / -1; }
+  .governance-health { grid-template-columns: 1fr; }
+  .governance-health > .runtime-summary { padding-right: 0; padding-bottom: 12px; }
+  .governance-health > .runtime-summary + .runtime-summary { border-top: 1px solid var(--line); border-left: 0; padding-top: 12px; padding-left: 0; padding-bottom: 0; }
   .dialog-backdrop { padding: 10px; }
   .dialog { padding: 18px; }
   .catalog-table .table-scroll { overflow: visible; border: 0; background: transparent; }
@@ -175,4 +183,11 @@ tr.clickable:hover td { background: #f1f7f3; }
 @media (max-width: 390px) {
   .metric-grid, .entity-columns { grid-template-columns: 1fr; }
   .metric { min-height: 96px; }
+}
+/* Compact quota rows remain readable when tables become mobile record cards. */
+.quota-limit-list {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  line-height: 1.25;
 }

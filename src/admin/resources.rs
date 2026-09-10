@@ -6,7 +6,11 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use crate::{model_registry::GatewayOperation, policy::validate_document};
+use crate::{
+    model_registry::GatewayOperation,
+    policy::validate_document as validate_policy_document,
+    quota::{ADMISSION_LOCK_NAMESPACE, validate_document as validate_quota_document},
+};
 
 use super::{
     AdminContext, AdminError, AdminService, AuditEntry, append_audit, map_conflict, validate_name,
@@ -627,7 +631,7 @@ impl AdminService {
                     return Err(AdminError::InvalidRequest);
                 }
                 let configuration = Value::Object(input.configuration);
-                validate_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
+                validate_policy_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
                 let value: Value = sqlx::query_scalar(
                     r#"
                     INSERT INTO policies (
@@ -660,12 +664,41 @@ impl AdminService {
             }
             ResourceKind::Quotas => {
                 let input: QuotaCreate = decode(payload)?;
+                if input.quota_key.trim() != input.quota_key
+                    || input.quota_key.is_empty()
+                    || input.quota_key.len() > 200
+                    || input.revision <= 0
+                    || [
+                        input.user_id,
+                        input.device_id,
+                        input.client_id,
+                        input.agent_id,
+                        input.credential_id,
+                        input.model_id,
+                        input.provider_id,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .count()
+                        > 1
+                {
+                    return Err(AdminError::InvalidRequest);
+                }
+                let configuration = Value::Object(input.configuration);
+                validate_quota_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
                 let value: Value = sqlx::query_scalar(
                     r#"
                     INSERT INTO quotas (
                         id, tenant_id, quota_key, revision, user_id, device_id, client_id,
                         agent_id, credential_id, model_id, provider_id, configuration
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8,
+                        COALESCE((
+                            SELECT COALESCE(rotation_root_id, id)
+                            FROM credentials WHERE tenant_id = $2 AND id = $9
+                        ), $9),
+                        $10, $11, $12
+                    )
                     RETURNING to_jsonb(quotas)
                     "#,
                 )
@@ -680,7 +713,7 @@ impl AdminService {
                 .bind(input.credential_id)
                 .bind(input.model_id)
                 .bind(input.provider_id)
-                .bind(Value::Object(input.configuration))
+                .bind(configuration)
                 .fetch_one(&mut *transaction)
                 .await?;
                 (value, None)
@@ -914,7 +947,11 @@ impl AdminService {
                 let input: ConfigurationPatch = decode(payload)?;
                 let configuration = Value::Object(input.configuration);
                 if kind == ResourceKind::Policies {
-                    validate_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
+                    validate_policy_document(&configuration)
+                        .map_err(|_| AdminError::InvalidRequest)?;
+                } else {
+                    validate_quota_document(&configuration)
+                        .map_err(|_| AdminError::InvalidRequest)?;
                 }
                 let statement = match kind {
                     ResourceKind::Policies => {
@@ -1051,13 +1088,19 @@ impl AdminService {
                 | ResourceKind::Models
                 | ResourceKind::ModelAliases
                 | ResourceKind::Policies
+                | ResourceKind::Quotas
         ) {
             return Err(AdminError::InvalidRequest);
         }
 
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2))")
             .bind(context.tenant_id)
+            .bind(if kind == ResourceKind::Quotas {
+                ADMISSION_LOCK_NAMESPACE
+            } else {
+                0
+            })
             .execute(&mut *transaction)
             .await?;
         let before = self
@@ -1069,6 +1112,8 @@ impl AdminService {
             load_alias_replacement(&mut transaction, context.tenant_id, id).await?
         } else if kind == ResourceKind::Policies {
             load_policy_replacement(&mut transaction, context.tenant_id, id).await?
+        } else if kind == ResourceKind::Quotas {
+            load_quota_replacement(&mut transaction, context.tenant_id, id).await?
         } else {
             Vec::new()
         };
@@ -1094,7 +1139,8 @@ impl AdminService {
             }
         }
         if kind == ResourceKind::Policies && input.state == "active" {
-            validate_document(&before["configuration"]).map_err(|_| AdminError::InvalidRequest)?;
+            validate_policy_document(&before["configuration"])
+                .map_err(|_| AdminError::InvalidRequest)?;
             sqlx::query(
                 r#"
                 UPDATE policies current SET lifecycle_state = 'disabled',
@@ -1108,6 +1154,32 @@ impl AdminService {
                   AND current.client_id IS NOT DISTINCT FROM target.client_id
                   AND current.agent_id IS NOT DISTINCT FROM target.agent_id
                   AND current.credential_id IS NOT DISTINCT FROM target.credential_id
+                "#,
+            )
+            .bind(context.tenant_id)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        if kind == ResourceKind::Quotas && input.state == "active" {
+            validate_quota_document(&before["configuration"])
+                .map_err(|_| AdminError::InvalidRequest)?;
+            sqlx::query(
+                r#"
+                UPDATE quotas current SET lifecycle_state = 'disabled',
+                    version = current.version + 1, updated_at = now()
+                FROM quotas target
+                WHERE target.tenant_id = $1 AND target.id = $2
+                  AND current.tenant_id = target.tenant_id
+                  AND current.id <> target.id AND current.lifecycle_state = 'active'
+                  AND current.quota_key = target.quota_key
+                  AND current.user_id IS NOT DISTINCT FROM target.user_id
+                  AND current.device_id IS NOT DISTINCT FROM target.device_id
+                  AND current.client_id IS NOT DISTINCT FROM target.client_id
+                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id
+                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id
+                  AND current.model_id IS NOT DISTINCT FROM target.model_id
+                  AND current.provider_id IS NOT DISTINCT FROM target.provider_id
                 "#,
             )
             .bind(context.tenant_id)
@@ -1217,6 +1289,12 @@ impl AdminService {
             }
             (ResourceKind::Policies, "disabled") => {
                 "UPDATE policies SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(policies)"
+            }
+            (ResourceKind::Quotas, "active") => {
+                "UPDATE quotas SET lifecycle_state = 'active', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(quotas)"
+            }
+            (ResourceKind::Quotas, "disabled") => {
+                "UPDATE quotas SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(quotas)"
             }
             _ => return Err(AdminError::InvalidRequest),
         };
@@ -1440,7 +1518,7 @@ impl AdminService {
                 "UPDATE policies SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(policies)"
             }
             ResourceKind::Quotas => {
-                "UPDATE quotas SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(quotas)"
+                "UPDATE quotas SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(quotas)"
             }
             _ => return Err(AdminError::InvalidRequest),
         };
@@ -1637,6 +1715,39 @@ async fn load_policy_replacement(
     Ok(rows.as_array().cloned().unwrap_or_default())
 }
 
+async fn load_quota_replacement(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Vec<Value>, AdminError> {
+    let rows: Value = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'target_type', 'quota', 'id', current.id, 'before', to_jsonb(current)
+        )), '[]'::jsonb)
+        FROM quotas target
+        JOIN quotas current
+          ON current.tenant_id = target.tenant_id
+         AND current.id <> target.id
+         AND current.quota_key = target.quota_key
+         AND current.user_id IS NOT DISTINCT FROM target.user_id
+         AND current.device_id IS NOT DISTINCT FROM target.device_id
+         AND current.client_id IS NOT DISTINCT FROM target.client_id
+         AND current.agent_id IS NOT DISTINCT FROM target.agent_id
+         AND current.credential_id IS NOT DISTINCT FROM target.credential_id
+         AND current.model_id IS NOT DISTINCT FROM target.model_id
+         AND current.provider_id IS NOT DISTINCT FROM target.provider_id
+        WHERE target.tenant_id = $1 AND target.id = $2
+          AND current.lifecycle_state = 'active'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(rows.as_array().cloned().unwrap_or_default())
+}
+
 async fn append_registry_cascade_audits(
     transaction: &mut Transaction<'_, Postgres>,
     context: &AdminContext,
@@ -1670,6 +1781,8 @@ async fn append_registry_cascade_audits(
                CASE entries.value->>'target_type'
                    WHEN 'policy' THEN (SELECT to_jsonb(p) FROM policies p
                        WHERE p.tenant_id = $3 AND p.id = (entries.value->>'id')::uuid)
+                   WHEN 'quota' THEN (SELECT to_jsonb(q) FROM quotas q
+                       WHERE q.tenant_id = $3 AND q.id = (entries.value->>'id')::uuid)
                    WHEN 'model' THEN (SELECT to_jsonb(m) FROM models m
                        WHERE m.tenant_id = $3 AND m.id = (entries.value->>'id')::uuid)
                    WHEN 'model_alias' THEN (SELECT to_jsonb(a) FROM model_aliases a
@@ -1961,7 +2074,7 @@ mod tests {
                     "quota_key": "model-default",
                     "revision": 1,
                     "model_id": model_id,
-                    "configuration": {"requests": 100}
+                    "configuration": {"mode": "hard", "limits": {"requests_per_minute": 100}}
                 }),
                 source,
                 source,
@@ -2097,7 +2210,7 @@ mod tests {
             .update_resource(
                 &context,
                 ResourceTarget::new(ResourceKind::Quotas, quota_id),
-                json!({"version": 1, "configuration": {"requests": 200}}),
+                json!({"version": 1, "configuration": {"mode": "hard", "limits": {"requests_per_minute": 200}}}),
                 source,
                 source,
                 "update-quota",
@@ -2614,6 +2727,123 @@ mod tests {
         assert_eq!(state["active_count"], 1);
         assert_eq!(state["replacement_audits"], 1);
         assert_eq!(state["replacement_audit_exact"], true);
+    }
+
+    #[sqlx::test]
+    async fn quota_activation_validates_and_replaces_one_scope_with_audit(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'admin', 'admin')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let invalid = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({
+                    "quota_key": "global",
+                    "revision": 1,
+                    "configuration": {"requests": 10}
+                }),
+                source,
+                source,
+                "invalid-quota",
+            )
+            .await;
+        assert!(matches!(invalid, Err(AdminError::InvalidRequest)));
+        let first = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({
+                    "quota_key": "global",
+                    "revision": 1,
+                    "configuration": {"mode": "hard", "limits": {"requests_per_minute": 10}}
+                }),
+                source,
+                source,
+                "create-quota-one",
+            )
+            .await
+            .unwrap();
+        let second = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({
+                    "quota_key": "global",
+                    "revision": 2,
+                    "configuration": {"mode": "hard", "limits": {"requests_per_minute": 20}}
+                }),
+                source,
+                source,
+                "create-quota-two",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Quotas, id(&first)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-quota-one",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Quotas, id(&second)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-quota-two",
+            )
+            .await
+            .unwrap();
+        let evidence: Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'first', (SELECT lifecycle_state FROM quotas WHERE id = $1),
+                'second', (SELECT lifecycle_state FROM quotas WHERE id = $2),
+                'active_count', (SELECT count(*) FROM quotas
+                    WHERE tenant_id = $3 AND lifecycle_state = 'active'),
+                'replacement_audits', (SELECT count(*) FROM audit_logs
+                    WHERE tenant_id = $3 AND action = 'admin.quota.disabled')
+            )
+            "#,
+        )
+        .bind(id(&first))
+        .bind(id(&second))
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["first"], "disabled");
+        assert_eq!(evidence["second"], "active");
+        assert_eq!(evidence["active_count"], 1);
+        assert_eq!(evidence["replacement_audits"], 1);
     }
 
     #[sqlx::test]

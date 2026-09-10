@@ -509,8 +509,42 @@ impl AdminService {
                     )
                 ),
                 'quota_runtime', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'quota enforcement is implemented in W12'
+                    'available', true,
+                    'active_count', (SELECT count(*) FROM quotas q
+                        WHERE q.tenant_id = $1 AND q.lifecycle_state = 'active'),
+                    'window_count', (SELECT count(*) FROM quota_windows w
+                        WHERE w.tenant_id = $1 AND w.window_end > now()),
+                    'timezone', 'UTC',
+                    'windows', COALESCE((SELECT jsonb_agg(window_item ORDER BY reset_at, quota_key, limit_kind)
+                        FROM (
+                            SELECT q.quota_key, q.revision, w.limit_kind,
+                                   CASE w.limit_kind
+                                     WHEN 'requests_per_minute' THEN w.reserved_requests
+                                     WHEN 'cost_per_day_microusd' THEN w.reserved_cost_microusd
+                                     WHEN 'cost_per_month_microusd' THEN w.reserved_cost_microusd
+                                     ELSE w.reserved_tokens
+                                   END AS current,
+                                   (q.configuration->'limits'->>w.limit_kind)::bigint AS limit,
+                                   w.window_end AS reset_at,
+                                   jsonb_build_object(
+                                     'quota_key', q.quota_key,
+                                     'revision', q.revision,
+                                     'limit_kind', w.limit_kind,
+                                     'current', CASE w.limit_kind
+                                       WHEN 'requests_per_minute' THEN w.reserved_requests
+                                       WHEN 'cost_per_day_microusd' THEN w.reserved_cost_microusd
+                                       WHEN 'cost_per_month_microusd' THEN w.reserved_cost_microusd
+                                       ELSE w.reserved_tokens
+                                     END,
+                                     'limit', (q.configuration->'limits'->>w.limit_kind)::bigint,
+                                     'reset_at', w.window_end
+                                   ) AS window_item
+                            FROM quota_windows w
+                            JOIN quotas q ON (q.tenant_id, q.id) = (w.tenant_id, w.quota_id)
+                            WHERE w.tenant_id = $1 AND w.window_end > now()
+                            ORDER BY w.window_end, q.quota_key, w.limit_kind
+                            LIMIT 100
+                        ) current_windows), '[]'::jsonb)
                 ),
                 'scheduler', jsonb_build_object(
                     'available', false,
@@ -968,7 +1002,7 @@ mod tests {
 
         assert!(service.identity_map(&context).await.unwrap()["paths"].is_array());
         assert!(service.catalog_report(&context).await.is_ok());
-        assert!(service.governance_report(&context).await.is_ok());
+        service.governance_report(&context).await.unwrap();
         assert!(service.system_health_report(&context, false).await.is_ok());
     }
 }

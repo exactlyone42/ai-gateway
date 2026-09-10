@@ -423,6 +423,7 @@ pub struct ModelSelection {
     pub provider_id: Uuid,
     pub provider_version: i64,
     pub provider_key: String,
+    pub max_output_tokens: Option<i64>,
     pub cost_metadata: Value,
     pub profile: ProviderProfile,
 }
@@ -431,6 +432,7 @@ pub struct ModelSelection {
 struct SelectionRow {
     alias_id: Option<Uuid>,
     alias_version: Option<i64>,
+    quality_tier: Option<String>,
     model_id: Uuid,
     model_version: i64,
     public_model_id: String,
@@ -445,6 +447,7 @@ struct SelectionRow {
     supports_reasoning: bool,
     supports_images: bool,
     supports_structured_output: bool,
+    max_output_tokens: Option<i64>,
     cost_metadata: Value,
 }
 
@@ -557,6 +560,79 @@ impl ModelRegistry {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(RegistryError::ModelUnavailable)?;
+        let selection = self.selection_from_row(tenant_id, operation, selector, row, required)?;
+        tracing::info!(
+            event.name = "router.selected",
+            gen_ai.system = %selection.provider_key,
+            gen_ai.request.model = %selection.public_model_id,
+            "model route selected"
+        );
+        Ok(selection)
+    }
+
+    pub async fn candidates(
+        &self,
+        tenant_id: Uuid,
+        development_bootstrap: bool,
+        operation: GatewayOperation,
+        selector: ModelSelector,
+        required: CapabilityRequirements,
+    ) -> Result<Vec<ModelSelection>, RegistryError> {
+        if development_bootstrap || matches!(selector, ModelSelector::Model(_)) {
+            return self
+                .select(
+                    tenant_id,
+                    development_bootstrap,
+                    operation,
+                    selector,
+                    required,
+                )
+                .await
+                .map(|selection| vec![selection]);
+        }
+        if tenant_id.is_nil() {
+            return Err(RegistryError::ModelUnavailable);
+        }
+        let rows = sqlx::query_as::<_, SelectionRow>(QUALITY_CANDIDATES_SQL)
+            .bind(tenant_id)
+            .bind(operation.as_str())
+            .bind(selector.value())
+            .fetch_all(&self.pool)
+            .await?;
+        let mut selections = Vec::new();
+        let mut capability_error = None;
+        for row in rows {
+            let quality = row
+                .quality_tier
+                .as_deref()
+                .and_then(QualityTier::parse)
+                .ok_or(RegistryError::ModelUnavailable)?;
+            match self.selection_from_row(
+                tenant_id,
+                operation,
+                ModelSelector::Quality(quality),
+                row,
+                required,
+            ) {
+                Ok(selection) => selections.push(selection),
+                Err(error @ RegistryError::CapabilityMismatch(_)) => capability_error = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        if selections.is_empty() {
+            return Err(capability_error.unwrap_or(RegistryError::ModelUnavailable));
+        }
+        Ok(selections)
+    }
+
+    fn selection_from_row(
+        &self,
+        tenant_id: Uuid,
+        operation: GatewayOperation,
+        selector: ModelSelector,
+        row: SelectionRow,
+        required: CapabilityRequirements,
+    ) -> Result<ModelSelection, RegistryError> {
         ensure_capabilities(&row, required)?;
         let profile = self.profiles.resolve(
             tenant_id,
@@ -565,12 +641,6 @@ impl ModelRegistry {
             &row.base_url,
             operation,
         )?;
-        tracing::info!(
-            event.name = "router.selected",
-            gen_ai.system = %row.provider_key,
-            gen_ai.request.model = %row.public_model_id,
-            "model route selected"
-        );
         Ok(ModelSelection {
             selector,
             alias_id: row.alias_id,
@@ -582,6 +652,7 @@ impl ModelRegistry {
             provider_id: row.provider_id,
             provider_version: row.provider_version,
             provider_key: row.provider_key,
+            max_output_tokens: row.max_output_tokens,
             cost_metadata: row.cost_metadata,
             profile,
         })
@@ -626,6 +697,7 @@ impl ModelRegistry {
             provider_id: Uuid::nil(),
             provider_version: 1,
             provider_key: profile.provider_key.clone(),
+            max_output_tokens: None,
             cost_metadata: serde_json::json!({}),
             profile,
         })
@@ -633,6 +705,15 @@ impl ModelRegistry {
 }
 
 impl ModelSelection {
+    pub fn record_selected(&self) {
+        tracing::info!(
+            event.name = "router.selected",
+            gen_ai.system = %self.provider_key,
+            gen_ai.request.model = %self.public_model_id,
+            "model route selected"
+        );
+    }
+
     pub fn ledger_snapshot(&self) -> Option<ModelSelectionSnapshot> {
         (!self.model_id.is_nil() && !self.provider_id.is_nil()).then(|| ModelSelectionSnapshot {
             selector_kind: self.selector.kind().to_owned(),
@@ -696,19 +777,22 @@ pub enum RegistryError {
 const SELECTION_SQL: &str = r#"
     WITH candidate AS (
         SELECT NULL::uuid AS alias_id, NULL::bigint AS alias_version,
+               NULL::text AS quality_tier,
                m.id AS model_id, m.version AS model_version,
                m.public_model_id, m.provider_model_id, m.provider_id,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
-               m.supports_images, m.supports_structured_output, m.cost_metadata
+               m.supports_images, m.supports_structured_output,
+               m.max_output_tokens, m.cost_metadata
         FROM models m
         WHERE $3 = 'model' AND m.tenant_id = $1
           AND m.public_model_id = $4 AND m.lifecycle_state = 'active'
           AND $2 = ANY(m.supported_operations)
         UNION ALL
-        SELECT a.id, a.version, m.id, m.version,
+        SELECT a.id, a.version, a.quality_tier, m.id, m.version,
                m.public_model_id, m.provider_model_id, m.provider_id,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
-               m.supports_images, m.supports_structured_output, m.cost_metadata
+               m.supports_images, m.supports_structured_output,
+               m.max_output_tokens, m.cost_metadata
         FROM model_aliases a
         JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
         WHERE $3 = 'quality' AND a.tenant_id = $1 AND a.operation = $2
@@ -723,6 +807,35 @@ const SELECTION_SQL: &str = r#"
     WHERE p.lifecycle_state = 'active' AND $2 = ANY(p.supported_operations)
     ORDER BY c.public_model_id, c.model_id
     LIMIT 1
+"#;
+
+const QUALITY_CANDIDATES_SQL: &str = r#"
+    SELECT a.id AS alias_id, a.version AS alias_version, a.quality_tier,
+           m.id AS model_id, m.version AS model_version,
+           m.public_model_id, m.provider_model_id, m.provider_id,
+           m.supports_streaming, m.supports_tools, m.supports_reasoning,
+           m.supports_images, m.supports_structured_output,
+           m.max_output_tokens, m.cost_metadata,
+           p.version AS provider_version, p.provider_key,
+           p.base_url, p.credential_ref
+    FROM model_aliases a
+    JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+    JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+    WHERE a.tenant_id = $1 AND a.operation = $2
+      AND a.lifecycle_state = 'active' AND m.lifecycle_state = 'active'
+      AND p.lifecycle_state = 'active'
+      AND $2 = ANY(m.supported_operations) AND $2 = ANY(p.supported_operations)
+      AND CASE a.quality_tier
+            WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
+            WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
+          END <= CASE $3
+            WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
+            WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
+          END
+    ORDER BY CASE a.quality_tier
+            WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
+            WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
+          END DESC, m.public_model_id, m.id
 "#;
 
 #[cfg(test)]
@@ -1047,5 +1160,145 @@ mod tests {
         assert_eq!(persisted.selected_provider_version, Some(1));
         assert_eq!(persisted.provider_model_id, "provider-model");
         std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn quality_candidates_skip_an_incompatible_high_tier(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let provider_id = Uuid::new_v4();
+        let premium_id = Uuid::new_v4();
+        let standard_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type, base_url,
+                    credential_ref, supported_operations, lifecycle_state
+                ) VALUES ($1, $2, 'fallback-provider', 'Fallback', 'openai',
+                          'https://fallback.example', 'env://FALLBACK_KEY',
+                          ARRAY['openai_responses'], 'active')
+            ), inserted_models AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, supports_images, lifecycle_state
+                ) VALUES
+                    ($3, $2, $1, 'premium-no-image', 'premium', 'Premium',
+                     ARRAY['openai_responses'], false, 'active'),
+                    ($4, $2, $1, 'standard-image', 'standard', 'Standard',
+                     ARRAY['openai_responses'], true, 'active')
+            )
+            INSERT INTO model_aliases (
+                id, tenant_id, operation, quality_tier, model_id, lifecycle_state
+            ) VALUES
+                ($5, $2, 'openai_responses', 'premium', $3, 'active'),
+                ($6, $2, 'openai_responses', 'standard', $4, 'active')
+            "#,
+        )
+        .bind(provider_id)
+        .bind(tenant_id)
+        .bind(premium_id)
+        .bind(standard_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let profiles = ProviderProfiles::new([ProviderProfile::bearer(
+            "env://FALLBACK_KEY",
+            "fallback-provider",
+            "https://fallback.example",
+            vec![GatewayOperation::OpenAiResponses],
+            vec![tenant_id],
+            Arc::<str>::from("server-secret"),
+        )])
+        .unwrap();
+        let candidates = ModelRegistry::new(pool, profiles, Vec::new())
+            .candidates(
+                tenant_id,
+                false,
+                GatewayOperation::OpenAiResponses,
+                ModelSelector::parse("quality:premium").unwrap(),
+                CapabilityRequirements {
+                    images: true,
+                    ..CapabilityRequirements::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].model_id, standard_id);
+    }
+
+    #[sqlx::test]
+    async fn quality_candidates_are_returned_in_downgrade_order(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let provider_id = Uuid::new_v4();
+        let model_ids = (0..4).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+        let alias_ids = (0..4).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+        let qualities = vec!["economy", "standard", "advanced", "premium"];
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type, base_url,
+                    credential_ref, supported_operations, lifecycle_state
+                ) VALUES ($1, $2, 'provider-one', 'Provider One', 'openai',
+                          'https://provider.example', 'env://PROVIDER_ONE_KEY',
+                          ARRAY['openai_responses'], 'active')
+                RETURNING id
+            ), input AS (
+                SELECT * FROM unnest($3::uuid[], $4::uuid[], $5::text[])
+                    AS row(alias_id, model_id, quality)
+            ), inserted_models AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, lifecycle_state
+                ) SELECT input.model_id, $2, inserted_provider.id,
+                         input.quality || '-model', input.quality || '-provider-model',
+                         input.quality, ARRAY['openai_responses'], 'active'
+                    FROM input CROSS JOIN inserted_provider
+                RETURNING id
+            )
+            INSERT INTO model_aliases (
+                id, tenant_id, operation, quality_tier, model_id, lifecycle_state
+            ) SELECT input.alias_id, $2, 'openai_responses', input.quality,
+                     input.model_id, 'active'
+                FROM input JOIN inserted_models ON inserted_models.id = input.model_id
+            "#,
+        )
+        .bind(provider_id)
+        .bind(tenant_id)
+        .bind(&alias_ids)
+        .bind(&model_ids)
+        .bind(&qualities)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let profiles = ProviderProfiles::new([ProviderProfile::bearer(
+            "env://PROVIDER_ONE_KEY",
+            "provider-one",
+            "https://provider.example",
+            vec![GatewayOperation::OpenAiResponses],
+            vec![tenant_id],
+            Arc::<str>::from("server-secret"),
+        )])
+        .unwrap();
+        let candidates = ModelRegistry::new(pool, profiles, Vec::new())
+            .candidates(
+                tenant_id,
+                false,
+                GatewayOperation::OpenAiResponses,
+                ModelSelector::parse("quality:premium").unwrap(),
+                CapabilityRequirements::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .filter_map(|candidate| candidate.selector.quality())
+                .collect::<Vec<_>>(),
+            vec!["premium", "advanced", "standard", "economy"]
+        );
     }
 }
