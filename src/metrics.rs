@@ -74,6 +74,7 @@ pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkMeterProvider> {
 /// Deliberately not a global: an instrument binds to whichever provider is
 /// installed when it is built, so "built after `init()`" has to be visible in
 /// the code rather than depend on which function happens to run first.
+#[derive(Clone)]
 pub struct Instruments {
     duration: Histogram<f64>,
     active_requests: UpDownCounter<i64>,
@@ -104,10 +105,10 @@ impl Instruments {
 
     /// Starts measuring one request. The returned scope counts as in flight
     /// until it is dropped.
-    pub fn scope(&self, method: &str, route: &str) -> RequestScope<'_> {
+    pub fn scope(&self, method: &str, route: &str) -> RequestScope {
         self.active_requests.add(1, &[]);
         RequestScope {
-            instruments: self,
+            instruments: self.clone(),
             method: method.to_owned(),
             route: route.to_owned(),
             started: Instant::now(),
@@ -154,15 +155,15 @@ impl Instruments {
 /// written after the await -- the decrement, the histogram sample, the access
 /// log line -- would simply never run. The gauge would climb forever and the
 /// request would leave no trace at all.
-pub struct RequestScope<'a> {
-    instruments: &'a Instruments,
+pub struct RequestScope {
+    instruments: Instruments,
     method: String,
     route: String,
     started: Instant,
     completed: bool,
 }
 
-impl RequestScope<'_> {
+impl RequestScope {
     /// Records the request and returns its duration in seconds, so the log
     /// line and the histogram cannot disagree about the number.
     pub fn complete(&mut self, status: u16, error_type: &str) -> f64 {
@@ -174,7 +175,7 @@ impl RequestScope<'_> {
     }
 }
 
-impl Drop for RequestScope<'_> {
+impl Drop for RequestScope {
     fn drop(&mut self) {
         self.instruments.active_requests.add(-1, &[]);
         if self.completed {

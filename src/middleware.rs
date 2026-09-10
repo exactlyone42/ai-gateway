@@ -1,10 +1,17 @@
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use axum::{
+    body::{Body, Bytes},
     extract::{MatchedPath, Request, State},
     middleware::Next,
     response::Response,
 };
+use chrono::{DateTime, Utc};
+use futures_util::Stream;
 
 use tracing::Instrument as _;
 use tracing_opentelemetry::{OpenTelemetrySpanExt as _, SetParentError};
@@ -14,6 +21,8 @@ use crate::{
     error::{ErrorType, GatewayError},
     identity::PrincipalContext,
     logging,
+    metrics::RequestScope,
+    routes::StreamingResponse,
     state::AppState,
 };
 
@@ -33,6 +42,9 @@ pub async fn require_client_key(
 
 /// Request id header, set by the layer above and read back here.
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReceivedAt(pub DateTime<Utc>);
 
 /// Writes one log record per request -- the only place that does.
 ///
@@ -73,7 +85,10 @@ pub async fn access_log(
     record(state, request, next).instrument(span).await
 }
 
-async fn record(state: Arc<AppState>, request: Request, next: Next) -> Response {
+async fn record(state: Arc<AppState>, mut request: Request, next: Next) -> Response {
+    request
+        .extensions_mut()
+        .insert(RequestReceivedAt(Utc::now()));
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let request_id = request
@@ -117,41 +132,119 @@ async fn record(state: Arc<AppState>, request: Request, next: Next) -> Response 
         .map(PrincipalContext::log_id)
         .unwrap_or_default();
 
-    // One number for both the histogram and the log line.
-    let duration = scope.complete(status.as_u16(), &error_type);
-
     let (trace_id, span_id) = logging::current_trace_ids();
+    let context = AccessContext {
+        request_id,
+        trace_id,
+        span_id,
+        principal,
+        method,
+        route,
+        path,
+        status,
+        span: tracing::Span::current(),
+    };
 
-    // The level has to be known at compile time (`tracing`'s callsite is a
-    // `static`), so the field list is shared through a local macro instead of
-    // being written three times.
-    macro_rules! emit {
-        ($level:ident) => {
-            tracing::$level!(
-                event.name = "http.access",
-                request_id = %request_id,
-                trace_id = %trace_id,
-                span_id = %span_id,
-                principal = %principal,
-                http.request.method = %method,
-                http.route = %route,
-                url.path = %path,
-                http.response.status_code = status.as_u16(),
-                http.server.request.duration = duration,
-                error.type = %error_type,
-                exception.message = %cause,
-                "request completed"
-            )
+    if response.extensions().get::<StreamingResponse>().is_some() {
+        let (parts, body) = response.into_parts();
+        let stream = TrackedBody {
+            inner: Box::pin(body.into_data_stream()),
+            scope: Some(scope),
+            context,
+            completed: false,
         };
-    }
-
-    if status.is_server_error() {
-        emit!(error);
-    } else if status.is_client_error() {
-        emit!(warn);
+        Response::from_parts(parts, Body::from_stream(stream))
     } else {
-        emit!(info);
+        let duration = scope.complete(status.as_u16(), &error_type);
+        context.emit(duration, &error_type, &cause);
+        response
     }
+}
 
-    response
+struct AccessContext {
+    request_id: String,
+    trace_id: String,
+    span_id: String,
+    principal: String,
+    method: axum::http::Method,
+    route: String,
+    path: String,
+    status: axum::http::StatusCode,
+    span: tracing::Span,
+}
+
+impl AccessContext {
+    fn emit(&self, duration: f64, error_type: &str, cause: &str) {
+        let _entered = self.span.enter();
+        macro_rules! emit {
+            ($level:ident) => {
+                tracing::$level!(
+                    event.name = "http.access",
+                    request_id = %self.request_id,
+                    trace_id = %self.trace_id,
+                    span_id = %self.span_id,
+                    principal = %self.principal,
+                    http.request.method = %self.method,
+                    http.route = %self.route,
+                    url.path = %self.path,
+                    http.response.status_code = self.status.as_u16(),
+                    http.server.request.duration = duration,
+                    error.type = %error_type,
+                    exception.message = %cause,
+                    "request completed"
+                )
+            };
+        }
+        if self.status.is_server_error() || error_type == "stream_body_error" {
+            emit!(error);
+        } else if self.status.is_client_error() || error_type == "cancelled" {
+            emit!(warn);
+        } else {
+            emit!(info);
+        }
+    }
+}
+
+struct TrackedBody {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    scope: Option<RequestScope>,
+    context: AccessContext,
+    completed: bool,
+}
+
+impl TrackedBody {
+    fn finish(&mut self, error_type: &str, cause: &str) {
+        let Some(mut scope) = self.scope.take() else {
+            return;
+        };
+        let duration = scope.complete(self.context.status.as_u16(), error_type);
+        self.context.emit(duration, error_type, cause);
+        self.completed = true;
+    }
+}
+
+impl Stream for TrackedBody {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(None) => {
+                self.finish("", "");
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.finish("stream_body_error", &error.to_string());
+                Poll::Ready(Some(Err(error)))
+            }
+            other => other,
+        }
+    }
+}
+
+impl Drop for TrackedBody {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.finish("cancelled", "the client dropped the response body");
+        }
+    }
 }

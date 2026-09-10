@@ -47,6 +47,9 @@
   **`messages`** 三種 apiType，且不需要 Copilot 方案。→ VS Code 升為 supported。
 - `2026-09-08` 收子 Agent 對 Cursor 與 Codex Desktop 的查證，兩者證據等級都低（Cursor 是轉述、
   Codex Desktop 只有 issue 不是文件），已在文件標明證據等級，不當成已驗證。
+- `2026-09-11` Claude Code 2.1.267 以 `ANTHROPIC_BASE_URL`／`ANTHROPIC_AUTH_TOKEN`
+  指向本機 gateway，再到可控 Anthropic SSE mock；單次 `claude -p` 精確輸出
+  `W05_CLAUDE_CODE_OK`。這封閉至少一個真 Client 往返判準，但 W01 的研究缺口仍未完成。
 
 ## 已確定不可行
 - **Claude Desktop 用 `ANTHROPIC_BASE_URL`**：Desktop 走的是 Claude apps gateway 的
@@ -67,7 +70,7 @@
 - 「While a gateway credential variable or `apiKeyHelper` is active, a developer's claude.ai
   subscription isn't used... billed per token to whoever owns the credential.」
   → **這證明**席次與 API 計費的邊界主張正確。**證明不了** OpenAI 側的等價聲明（待補）。
-- 本機版本：Claude Code `2.1.263`、codex-cli `0.153.0`（`claude --version` / `codex --version`）。
+- 本機版本：Claude Code `2.1.267`、codex-cli `0.153.0`（`claude --version` / `codex --version`）。
   → **這證明**這兩個版本存在於本機。**證明不了**文件描述的行為在這兩個版本上已生效。
 
 ## 來源

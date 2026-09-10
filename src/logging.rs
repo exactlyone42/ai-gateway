@@ -61,17 +61,16 @@ fn filter() -> EnvFilter {
 /// Installs the subscriber, plus the OTLP span exporter when an endpoint is
 /// configured. Which levels pass still comes from `RUST_LOG`.
 ///
-/// Returns the provider so shutdown can flush it. Without an endpoint there
-/// is no provider and no exporter: spans still exist and still carry ids for
-/// the log records, they are just not sent anywhere.
+/// Returns the provider so shutdown can flush it. Without an endpoint, a local
+/// provider still creates trace ids for logs and the ledger; only export is off.
 pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
     // The exporter is built before the subscriber exists, so a failure here
     // cannot be logged yet -- it is carried out and logged below.
     let (provider, failure) = match otlp_endpoint {
-        None => (None, None),
+        None => (Some(local_provider()), None),
         Some(endpoint) => match provider_for(endpoint) {
             Ok(provider) => (Some(provider), None),
-            Err(error) => (None, Some(error.to_string())),
+            Err(error) => (Some(local_provider()), Some(error.to_string())),
         },
     };
 
@@ -96,6 +95,12 @@ pub fn init(otlp_endpoint: Option<&str>) -> Option<SdkTracerProvider> {
         );
     }
     provider
+}
+
+fn local_provider() -> SdkTracerProvider {
+    SdkTracerProvider::builder()
+        .with_resource(Resource::builder().with_service_name(SERVICE_NAME).build())
+        .build()
 }
 
 /// W3C `traceparent`, so a caller's trace continues through the gateway

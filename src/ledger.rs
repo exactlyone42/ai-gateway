@@ -4,7 +4,7 @@ use std::{
     io::{Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -108,7 +108,7 @@ pub struct CompletedAttempt {
     pub error_type: Option<String>,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -151,7 +151,26 @@ struct RequestRecord {
     selected_model: Option<String>,
     selected_provider: Option<String>,
     estimated_tokens: Option<i64>,
-    queue_duration_ms: i64,
+    #[serde(default = "default_operation")]
+    operation: String,
+    #[serde(default)]
+    client_agent_id: Option<String>,
+    #[serde(default)]
+    parent_agent_id: Option<String>,
+    #[serde(default)]
+    request_received_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    queue_entered_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    queue_left_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    client_first_byte_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    total_latency_ms: Option<i64>,
+    #[serde(default)]
+    gateway_overhead_ms: Option<i64>,
+    #[serde(default)]
+    queue_duration_ms: Option<i64>,
     status: String,
     created_at: DateTime<Utc>,
     started_at: DateTime<Utc>,
@@ -170,6 +189,12 @@ struct AttemptRecord {
     attempt_number: i32,
     started_at: DateTime<Utc>,
     first_token_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    provider_request_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    provider_first_byte_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    provider_ttft_ms: Option<i64>,
     completed_at: DateTime<Utc>,
     status: String,
     error_type: Option<String>,
@@ -197,6 +222,8 @@ struct Spool {
     directory: PathBuf,
     entry_max_bytes: u64,
     state: Mutex<SpoolState>,
+    checkpointing: Mutex<HashSet<Uuid>>,
+    checkpoint_idle: Condvar,
 }
 
 struct SpoolState {
@@ -342,6 +369,42 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn annotate_protocol(
+        &mut self,
+        operation: &str,
+        client_agent_id: Option<String>,
+        parent_agent_id: Option<String>,
+    ) {
+        self.envelope.request.operation = bounded_text(operation.to_owned());
+        self.envelope.request.client_agent_id = bounded(client_agent_id);
+        self.envelope.request.parent_agent_id = bounded(parent_agent_id);
+    }
+
+    pub fn set_client_first_byte_at(&mut self, at: DateTime<Utc>) {
+        self.envelope.request.client_first_byte_at.get_or_insert(at);
+    }
+
+    /// Durably replaces the interruption fallback without publishing it for
+    /// database ingestion. If the response body is dropped, `Drop` publishes
+    /// this latest complete checkpoint instead of the initial empty record.
+    pub async fn checkpoint(&mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
+        self.envelope.complete(completion);
+        let id = self.id.ok_or(LedgerError::InvalidCapacity)?;
+        let spool = Arc::clone(&self.ledger.inner.spool);
+        spool.begin_checkpoint(id)?;
+        let envelope = self.envelope.clone();
+        tokio::task::spawn_blocking(move || {
+            let _checkpoint = CheckpointGuard {
+                spool: Arc::clone(&spool),
+                id,
+            };
+            spool.checkpoint(id, &envelope)
+        })
+        .await
+        .map_err(LedgerError::Worker)??;
+        Ok(())
+    }
+
     pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
         self.envelope.complete(completion);
         self.ledger.inner.spool.encode(&self.envelope)?;
@@ -371,11 +434,13 @@ impl Drop for Reservation {
         let Some(id) = self.id.take() else {
             return;
         };
+        self.envelope.cancel(Utc::now());
+        let envelope = self.envelope.clone();
         let ledger = self.ledger.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let flush_handle = handle.clone();
-                handle.spawn_blocking(move || match ledger.inner.spool.mark_ready(id) {
+                handle.spawn_blocking(move || match ledger.inner.spool.finish(id, &envelope) {
                     Ok(()) => {
                         ledger.schedule_flush(&flush_handle);
                     }
@@ -396,6 +461,51 @@ impl Drop for Reservation {
 }
 
 impl ProviderAttempt {
+    pub fn begin(
+        provider: String,
+        model: String,
+        provider_request_id: Option<String>,
+        started_at: DateTime<Utc>,
+        estimated_usage: TokenUsage,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            provider: bounded_text(provider),
+            model: bounded_text(model),
+            provider_request_id: bounded(provider_request_id),
+            provider_response_id: None,
+            started_at,
+            first_token_at: None,
+            completed_at: started_at,
+            status: "cancelled".to_owned(),
+            error_type: Some("cancelled".to_owned()),
+            estimated_usage,
+            actual_usage: TokenUsage::default(),
+        }
+    }
+
+    pub fn observe_first_byte(&mut self, at: DateTime<Utc>) {
+        self.first_token_at.get_or_insert(at);
+        self.completed_at = at;
+    }
+
+    pub fn observe_response_id(&mut self, id: Option<String>) {
+        if id.is_some() {
+            self.provider_response_id = bounded(id);
+        }
+    }
+
+    pub fn observe_usage(&mut self, usage: TokenUsage, at: DateTime<Utc>) {
+        self.actual_usage = usage;
+        self.completed_at = at;
+    }
+
+    pub fn conclude(&mut self, status: &str, error_type: Option<String>, at: DateTime<Utc>) {
+        self.status = bounded_text(status.to_owned());
+        self.error_type = bounded(error_type);
+        self.completed_at = at;
+    }
+
     pub fn completed(attempt: CompletedAttempt, response_body: &[u8]) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -438,11 +548,31 @@ impl ProviderAttempt {
 }
 
 impl TokenUsage {
-    fn from_response(body: &[u8]) -> Self {
+    pub fn from_response(body: &[u8]) -> Self {
         let Ok(value) = serde_json::from_slice::<Value>(body) else {
             return Self::default();
         };
         let usage = &value["usage"];
+        Self {
+            input_tokens: first_u64(usage, &["input_tokens", "prompt_tokens"]),
+            output_tokens: first_u64(usage, &["output_tokens", "completion_tokens"]),
+            cached_input_tokens: first_u64(
+                usage,
+                &["cache_read_input_tokens", "cached_input_tokens"],
+            )
+            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"])),
+            cache_write_input_tokens: first_u64(
+                usage,
+                &["cache_creation_input_tokens", "cache_write_input_tokens"],
+            ),
+            reasoning_tokens: first_u64(usage, &["reasoning_tokens"]).max(value_at(
+                usage,
+                &["output_tokens_details", "reasoning_tokens"],
+            )),
+        }
+    }
+
+    pub fn from_value(usage: &Value) -> Self {
         Self {
             input_tokens: first_u64(usage, &["input_tokens", "prompt_tokens"]),
             output_tokens: first_u64(usage, &["output_tokens", "completion_tokens"]),
@@ -497,7 +627,16 @@ impl RequestEnvelope {
                 selected_model: None,
                 selected_provider: None,
                 estimated_tokens: start.estimated_tokens,
-                queue_duration_ms: 0,
+                operation: default_operation(),
+                client_agent_id: None,
+                parent_agent_id: None,
+                request_received_at: Some(start.created_at),
+                queue_entered_at: None,
+                queue_left_at: None,
+                client_first_byte_at: None,
+                total_latency_ms: None,
+                gateway_overhead_ms: None,
+                queue_duration_ms: None,
                 status: "interrupted".to_owned(),
                 created_at: start.created_at,
                 started_at: start.created_at,
@@ -513,6 +652,10 @@ impl RequestEnvelope {
         self.request.selected_model = bounded(completion.selected_model);
         self.request.selected_provider = bounded(completion.selected_provider);
         self.request.completed_at = Some(completion.completed_at);
+        self.request.total_latency_ms = self
+            .request
+            .request_received_at
+            .map(|received| (completion.completed_at - received).num_milliseconds());
         self.attempts = completion
             .attempts
             .into_iter()
@@ -528,6 +671,11 @@ impl RequestEnvelope {
                 attempt_number: i32::try_from(index + 1).unwrap_or(i32::MAX),
                 started_at: attempt.started_at,
                 first_token_at: attempt.first_token_at,
+                provider_request_at: Some(attempt.started_at),
+                provider_first_byte_at: attempt.first_token_at,
+                provider_ttft_ms: attempt
+                    .first_token_at
+                    .map(|first| (first - attempt.started_at).num_milliseconds()),
                 completed_at: attempt.completed_at,
                 status: attempt.status,
                 error_type: attempt.error_type,
@@ -536,6 +684,17 @@ impl RequestEnvelope {
             })
             .collect();
 
+        self.request.gateway_overhead_ms = self
+            .request
+            .client_first_byte_at
+            .zip(
+                self.attempts
+                    .first()
+                    .and_then(|attempt| attempt.provider_first_byte_at),
+            )
+            .map(|(client, provider)| (client - provider).num_milliseconds());
+
+        self.usage_records.clear();
         for attempt in &self.attempts {
             if !attempt.estimated_usage.is_empty() {
                 self.usage_records.push(UsageRecord::from_usage(
@@ -552,6 +711,20 @@ impl RequestEnvelope {
                     "provider_reported",
                     &attempt.actual_usage,
                 ));
+            }
+        }
+    }
+
+    fn cancel(&mut self, cancelled_at: DateTime<Utc>) {
+        self.request.status = "cancelled".to_owned();
+        self.request.completed_at = Some(cancelled_at);
+        self.request.total_latency_ms = self
+            .request
+            .request_received_at
+            .map(|received| (cancelled_at - received).num_milliseconds());
+        for attempt in &mut self.attempts {
+            if attempt.status == "cancelled" {
+                attempt.completed_at = cancelled_at;
             }
         }
     }
@@ -584,7 +757,7 @@ impl UsageRecord {
 impl Spool {
     fn open(directory: PathBuf, max_bytes: u64, entry_max_bytes: u64) -> Result<Self, LedgerError> {
         let slot_bytes = entry_max_bytes
-            .checked_mul(2)
+            .checked_mul(3)
             .ok_or(LedgerError::InvalidCapacity)?;
         if entry_max_bytes < MIN_ENTRY_MAX_BYTES || max_bytes < slot_bytes {
             return Err(LedgerError::InvalidCapacity);
@@ -596,7 +769,7 @@ impl Spool {
             let extension = path.extension().and_then(|value| value.to_str());
             match extension {
                 Some("tmp") => fs::remove_file(path).map_err(LedgerError::Io)?,
-                Some(extension @ ("reserved" | "working" | "ready")) => {
+                Some(extension @ ("reserved" | "working" | "next" | "ready")) => {
                     let stem = path
                         .file_stem()
                         .and_then(|value| value.to_str())
@@ -615,24 +788,35 @@ impl Spool {
             let ready = directory.join(format!("{stem}.ready"));
             let reserved = directory.join(format!("{stem}.reserved"));
             let working = directory.join(format!("{stem}.working"));
+            let next = directory.join(format!("{stem}.next"));
             if extensions.contains("ready") {
                 remove_if_present(&reserved)?;
                 remove_if_present(&working)?;
+                remove_if_present(&next)?;
                 ids.insert(stem);
             } else if extensions.contains("reserved") {
-                remove_if_present(&working)?;
-                fs::rename(&reserved, &ready).map_err(LedgerError::Io)?;
+                if extensions.contains("working") && self_contained_envelope(&working)? {
+                    fs::rename(&working, &ready).map_err(LedgerError::Io)?;
+                    remove_if_present(&reserved)?;
+                } else {
+                    remove_if_present(&working)?;
+                    fs::rename(&reserved, &ready).map_err(LedgerError::Io)?;
+                }
+                remove_if_present(&next)?;
                 ids.insert(stem);
             } else {
                 remove_if_present(&working)?;
+                remove_if_present(&next)?;
             }
         }
         File::open(&directory)
             .and_then(|value| value.sync_all())
             .map_err(LedgerError::Io)?;
 
-        // One accepted request reserves both its interrupted record and a
-        // preallocated completion workspace. Completed entries use less disk,
+        // One accepted request reserves its interrupted record and two
+        // checkpoint workspaces. One remains the last good checkpoint while
+        // the other is overwritten, so a torn write cannot destroy both.
+        // Completed entries use less disk,
         // but retaining the conservative slot count guarantees the next
         // request can always finish without allocating after provider cost.
         let slots_max =
@@ -647,7 +831,38 @@ impl Spool {
                 slots_used: ids.len(),
                 slots_max,
             }),
+            checkpointing: Mutex::new(HashSet::new()),
+            checkpoint_idle: Condvar::new(),
         })
+    }
+
+    fn begin_checkpoint(&self, id: Uuid) -> Result<(), LedgerError> {
+        self.checkpointing
+            .lock()
+            .map_err(|_| LedgerError::InvalidCapacity)?
+            .insert(id);
+        Ok(())
+    }
+
+    fn end_checkpoint(&self, id: Uuid) {
+        if let Ok(mut active) = self.checkpointing.lock() {
+            active.remove(&id);
+            self.checkpoint_idle.notify_all();
+        }
+    }
+
+    fn wait_for_checkpoint(&self, id: Uuid) -> Result<(), LedgerError> {
+        let mut active = self
+            .checkpointing
+            .lock()
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        while active.contains(&id) {
+            active = self
+                .checkpoint_idle
+                .wait(active)
+                .map_err(|_| LedgerError::InvalidCapacity)?;
+        }
+        Ok(())
     }
 
     fn reserve(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
@@ -672,35 +887,49 @@ impl Spool {
             self.sync_directory()?;
             return Err(error);
         }
+        let next = self.path(id, "next");
+        if let Err(error) = self.create_preallocated(&next) {
+            remove_if_present(&target)?;
+            remove_if_present(&working)?;
+            remove_if_present(&next)?;
+            self.sync_directory()?;
+            return Err(error);
+        }
         self.sync_directory()?;
         state.slots_used += 1;
         Ok(())
     }
 
     fn finish(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
+        self.wait_for_checkpoint(id)?;
+        self.checkpoint(id, envelope)?;
+        let reserved = self.path(id, "reserved");
+        let working = self.path(id, "working");
+        fs::rename(&working, self.path(id, "ready")).map_err(LedgerError::Io)?;
+        remove_if_present(&reserved)?;
+        remove_if_present(&self.path(id, "next"))?;
+        self.sync_directory()
+    }
+
+    fn checkpoint(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
         let mut bytes = self.encode(envelope)?;
         bytes.resize(
             usize::try_from(self.entry_max_bytes).map_err(|_| LedgerError::InvalidCapacity)?,
             0,
         );
-        let reserved = self.path(id, "reserved");
         let working = self.path(id, "working");
+        let next = self.path(id, "next");
         let mut file = OpenOptions::new()
             .write(true)
-            .open(&working)
+            .open(&next)
             .map_err(LedgerError::Io)?;
         file.seek(SeekFrom::Start(0)).map_err(LedgerError::Io)?;
         file.write_all(&bytes).map_err(LedgerError::Io)?;
         file.sync_all().map_err(LedgerError::Io)?;
         drop(file);
-        fs::rename(&working, self.path(id, "ready")).map_err(LedgerError::Io)?;
-        remove_if_present(&reserved)?;
-        self.sync_directory()
-    }
-
-    fn mark_ready(&self, id: Uuid) -> Result<(), LedgerError> {
-        remove_if_present(&self.path(id, "working"))?;
-        fs::rename(self.path(id, "reserved"), self.path(id, "ready")).map_err(LedgerError::Io)?;
+        fs::rename(&next, &working).map_err(LedgerError::Io)?;
+        self.sync_directory()?;
+        self.create_preallocated(&next)?;
         self.sync_directory()
     }
 
@@ -798,6 +1027,34 @@ impl Spool {
     }
 }
 
+struct CheckpointGuard {
+    spool: Arc<Spool>,
+    id: Uuid,
+}
+
+impl Drop for CheckpointGuard {
+    fn drop(&mut self) {
+        self.spool.end_checkpoint(self.id);
+    }
+}
+
+fn self_contained_envelope(path: &Path) -> Result<bool, LedgerError> {
+    let bytes = fs::read(path).map_err(LedgerError::Io)?;
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |index| index + 1);
+    if end == 0 {
+        return Ok(false);
+    }
+    Ok(serde_json::from_slice::<RequestEnvelope>(&bytes[..end])
+        .is_ok_and(|envelope| envelope.schema_version == SCHEMA_VERSION))
+}
+
+fn default_operation() -> String {
+    "chat_completions".to_owned()
+}
+
 fn remove_if_present(path: &Path) -> Result<(), LedgerError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -858,7 +1115,7 @@ mod tests {
     fn spool_reserves_real_space_and_rejects_the_next_request() {
         let directory = test_directory("capacity");
         let entry_bytes = MIN_ENTRY_MAX_BYTES;
-        let spool = Spool::open(directory.clone(), entry_bytes * 2, entry_bytes).unwrap();
+        let spool = Spool::open(directory.clone(), entry_bytes * 3, entry_bytes).unwrap();
         let first = RequestEnvelope::started(request_start("first"));
         spool.reserve(first.request.id, &first).unwrap();
 
@@ -866,6 +1123,8 @@ mod tests {
         assert_eq!(fs::metadata(reserved).unwrap().len(), entry_bytes);
         let working = spool.path(first.request.id, "working");
         assert_eq!(fs::metadata(&working).unwrap().len(), entry_bytes);
+        let next = spool.path(first.request.id, "next");
+        assert_eq!(fs::metadata(&next).unwrap().len(), entry_bytes);
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -885,7 +1144,7 @@ mod tests {
         let interrupted_directory = test_directory("interrupted-workspace");
         let interrupted = Spool::open(
             interrupted_directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES * 3,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();
@@ -896,7 +1155,7 @@ mod tests {
 
         let reopened = Spool::open(
             interrupted_directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES * 3,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();
@@ -909,7 +1168,7 @@ mod tests {
         let completed_directory = test_directory("completed-before-cleanup");
         let completed = Spool::open(
             completed_directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES * 3,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();
@@ -934,7 +1193,7 @@ mod tests {
 
         let reopened = Spool::open(
             completed_directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES * 3,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();
@@ -945,10 +1204,197 @@ mod tests {
         fs::remove_dir_all(completed_directory).unwrap();
     }
 
+    #[test]
+    fn startup_prefers_a_complete_stream_checkpoint() {
+        let directory = test_directory("stream-checkpoint");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("cancelled-stream"));
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        let now = Utc::now();
+        let mut attempt = ProviderAttempt::begin(
+            "test-provider".to_owned(),
+            "claude-test".to_owned(),
+            Some("provider-request".to_owned()),
+            now,
+            TokenUsage {
+                input_tokens: 11,
+                ..TokenUsage::default()
+            },
+        );
+        attempt.observe_first_byte(now);
+        attempt.observe_response_id(Some("msg_checkpoint".to_owned()));
+        attempt.observe_usage(
+            TokenUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+                ..TokenUsage::default()
+            },
+            now,
+        );
+        envelope.complete(RequestCompletion {
+            status: "cancelled".to_owned(),
+            selected_model: Some("claude-test".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: vec![attempt],
+            completed_at: now,
+        });
+        spool.checkpoint(id, &envelope).unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        assert_eq!(
+            recovered[0].1.attempts[0].provider_response_id.as_deref(),
+            Some("msg_checkpoint")
+        );
+        assert_eq!(recovered[0].1.usage_records.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_torn_later_checkpoint_preserves_the_previous_complete_one() {
+        let directory = test_directory("torn-later-checkpoint");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("torn-checkpoint"));
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        envelope.complete(RequestCompletion {
+            status: "cancelled".to_owned(),
+            selected_model: Some("claude-test".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        });
+        spool.checkpoint(id, &envelope).unwrap();
+
+        fs::write(spool.path(id, "next"), b"partial replacement").unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancellation_publish_waits_for_an_inflight_checkpoint() {
+        let directory = test_directory("checkpoint-race");
+        let spool = Arc::new(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES,
+            )
+            .unwrap(),
+        );
+        let mut envelope = RequestEnvelope::started(request_start("racing-stream"));
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        envelope.complete(RequestCompletion {
+            status: "cancelled".to_owned(),
+            selected_model: Some("claude-test".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        });
+        spool.begin_checkpoint(id).unwrap();
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let publisher = Arc::clone(&spool);
+        let publish = envelope.clone();
+        let task = std::thread::spawn(move || sent.send(publisher.finish(id, &publish)).unwrap());
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "cancellation published before the checkpoint completed"
+        );
+        spool.checkpoint(id, &envelope).unwrap();
+        spool.end_checkpoint(id);
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        task.join().unwrap();
+
+        let recovered = spool.ready().unwrap();
+        assert_eq!(recovered[0].1.request.status, "cancelled");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn spool_decodes_records_written_before_stream_fields_existed() {
+        let directory = test_directory("old-spool");
+        fs::create_dir_all(&directory).unwrap();
+        let envelope = RequestEnvelope::started(request_start("old-record"));
+        let id = envelope.request.id;
+        let mut value = serde_json::to_value(envelope).unwrap();
+        let request = value["request"].as_object_mut().unwrap();
+        for field in [
+            "operation",
+            "client_agent_id",
+            "parent_agent_id",
+            "request_received_at",
+            "queue_entered_at",
+            "queue_left_at",
+            "client_first_byte_at",
+            "total_latency_ms",
+            "gateway_overhead_ms",
+        ] {
+            request.remove(field);
+        }
+        request.insert("queue_duration_ms".to_owned(), Value::from(0));
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.resize(MIN_ENTRY_MAX_BYTES as usize, 0);
+        fs::write(directory.join(format!("{}.reserved", id.simple())), bytes).unwrap();
+        fs::write(
+            directory.join(format!("{}.working", id.simple())),
+            vec![0; MIN_ENTRY_MAX_BYTES as usize],
+        )
+        .unwrap();
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.operation, "chat_completions");
+        assert_eq!(recovered[0].1.request.queue_duration_ms, Some(0));
+        assert_eq!(recovered[0].1.request.request_received_at, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[sqlx::test]
     async fn failed_database_flush_stays_durable_and_recovers_once(pool: Pool<Postgres>) {
         let directory = test_directory("recovery");
-        let spool = Spool::open(directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+        let spool = Spool::open(directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         let mut envelope = RequestEnvelope::started(request_start("recovery-request"));
         let request_id = envelope.request.id;
         spool.reserve(request_id, &envelope).unwrap();
@@ -978,7 +1424,7 @@ mod tests {
 
         let dead_pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 1).unwrap();
         let unavailable =
-            Ledger::open(dead_pool, directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+            Ledger::open(dead_pool, directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         unavailable.schedule_flush(&tokio::runtime::Handle::current());
         unavailable.wait_for_idle().await;
         assert_eq!(ready_count(&directory), 1);
@@ -1011,7 +1457,7 @@ mod tests {
         );
 
         let recovered =
-            Ledger::open(pool.clone(), directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+            Ledger::open(pool.clone(), directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         assert_eq!(recovered.flush_startup().await.unwrap(), 2);
         assert_eq!(ready_count(&directory), 0);
 
@@ -1060,7 +1506,7 @@ mod tests {
         let ledger = Ledger::open(
             pool.clone(),
             directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 4,
+            MIN_ENTRY_MAX_BYTES * 6,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();
@@ -1118,7 +1564,7 @@ mod tests {
 
         let spool = Spool::open(
             directory.clone(),
-            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES * 3,
             MIN_ENTRY_MAX_BYTES,
         )
         .unwrap();

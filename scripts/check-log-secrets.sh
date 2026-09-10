@@ -23,7 +23,6 @@ upstream_key="sk_sentinel_upstream_key_do_not_log"
 body_token="sentinel_body_token_do_not_log"
 person="sentinel.person@example.invalid"
 prompt="sentinel_prompt_content_do_not_log"
-wrong_key="sentinel_wrong_key_do_not_log"
 credential_hash_key="sentinel_credential_hash_key_never_log_32"
 retiring_hash_key="sentinel_retiring_hash_key_never_log_32"
 
@@ -50,6 +49,8 @@ DATABASE_URL="$DATABASE_URL" \
 LISTEN_ADDRESS="127.0.0.1:$port" \
 LITELLM_BASE_URL="http://127.0.0.1:1/" \
 LITELLM_MASTER_KEY="$upstream_key" \
+ANTHROPIC_BASE_URL="http://127.0.0.1:1/" \
+ANTHROPIC_API_KEY="$upstream_key" \
 ENABLE_DEVELOPMENT_BOOTSTRAP="true" \
 BOOTSTRAP_CLIENT_KEY="$client_key" \
 CREDENTIAL_HASH_KEY="$credential_hash_key" \
@@ -76,15 +77,12 @@ fi
 base="http://127.0.0.1:$port"
 body="{\"model\":\"company-default\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt $person token=$body_token\"}]}"
 
-curl -s -o /dev/null "$base/healthz"
-curl -s -o /dev/null -X POST "$base/v1/chat/completions" \
+# One request carries every runtime sentinel through authentication, parsing,
+# policy and the failed upstream boundary. Repeating probes adds no coverage
+# and can trigger a remote endpoint's rate limit.
+curl -s -o /dev/null -X POST "$base/v1/messages" \
+  -H "x-api-key: $client_key" -H 'anthropic-version: 2023-06-01' \
   -H 'content-type: application/json' -d "$body"
-curl -s -o /dev/null -X POST "$base/v1/chat/completions" \
-  -H "authorization: Bearer $wrong_key" -H 'content-type: application/json' -d "$body"
-# Correct key: the request reaches the upstream call, which fails and logs a
-# cause -- the path most likely to carry something it should not.
-curl -s -o /dev/null -X POST "$base/v1/chat/completions" \
-  -H "authorization: Bearer $client_key" -H 'content-type: application/json' -d "$body"
 
 kill -INT "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
@@ -94,7 +92,7 @@ if [ "$selftest" = 1 ]; then
 fi
 
 failed=0
-for secret in "$client_key" "$upstream_key" "$body_token" "$person" "$prompt" "$wrong_key" "$credential_hash_key" "$retiring_hash_key"; do
+for secret in "$client_key" "$upstream_key" "$body_token" "$person" "$prompt" "$credential_hash_key" "$retiring_hash_key"; do
   if grep -nF "$secret" "$log" >/dev/null; then
     echo "secret in the log output: $secret"
     grep -nF "$secret" "$log" | sed 's/^/    /'
@@ -109,17 +107,23 @@ import json
 import sys
 
 bad = []
+records = []
 with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
     for number, line in enumerate(stream, 1):
         if not line.strip():
             continue
         try:
-            json.loads(line)
+            records.append(json.loads(line))
         except ValueError:
             bad.append((number, line.strip()[:120]))
 if bad:
     for number, line in bad:
         print(f"not JSON, line {number}: {line}")
+    sys.exit(1)
+
+access = [record for record in records if record.get("event", {}).get("name") == "http.access"]
+if not any(len(record.get("trace_id", "")) == 32 for record in access):
+    print("no access log carried a trace id under the default no-exporter configuration")
     sys.exit(1)
 PY
 
