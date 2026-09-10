@@ -17,7 +17,10 @@ use thiserror::Error;
 use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
-use crate::identity::PrincipalContext;
+use crate::{
+    identity::PrincipalContext,
+    quota::{QuotaLease, cost_for_usage, total_tokens},
+};
 
 const SCHEMA_VERSION: u8 = 1;
 pub const MIN_ENTRY_MAX_BYTES: u64 = 32 * 1024;
@@ -79,6 +82,13 @@ pub struct RequestPolicySnapshot {
     pub deadline_at: Option<DateTime<Utc>>,
     pub max_queue_time_ms: Option<i64>,
     pub decision: Value,
+}
+
+#[derive(Clone)]
+pub struct RequestQuotaSnapshot {
+    pub reservation_id: Option<Uuid>,
+    pub decision: Value,
+    pub requires_cost: bool,
 }
 
 #[derive(Clone)]
@@ -145,6 +155,7 @@ pub struct Reservation {
     ledger: Ledger,
     id: Option<Uuid>,
     envelope: RequestEnvelope,
+    _quota_lease: Option<QuotaLease>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -221,6 +232,16 @@ struct RequestRecord {
     max_queue_time_ms: Option<i64>,
     #[serde(default)]
     policy_decision: Option<Value>,
+    #[serde(default)]
+    quota_reservation_id: Option<Uuid>,
+    #[serde(default)]
+    quota_decision: Option<Value>,
+    #[serde(default)]
+    quota_requires_cost: bool,
+    #[serde(default)]
+    quota_actual_tokens: Option<i64>,
+    #[serde(default)]
+    quota_actual_cost_microusd: Option<i64>,
     status: String,
     created_at: DateTime<Utc>,
     started_at: DateTime<Utc>,
@@ -315,7 +336,17 @@ impl Ledger {
     }
 
     pub async fn reserve(&self, start: RequestStart) -> Result<Reservation, LedgerError> {
-        let envelope = RequestEnvelope::started(start);
+        self.reserve_with_quota(start, None, None, None).await
+    }
+
+    pub async fn reserve_with_quota(
+        &self,
+        start: RequestStart,
+        gateway_request_id: Option<Uuid>,
+        quota: Option<RequestQuotaSnapshot>,
+        quota_lease: Option<QuotaLease>,
+    ) -> Result<Reservation, LedgerError> {
+        let envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
         let id = envelope.request.id;
         let spool = Arc::clone(&self.inner.spool);
         let stored = envelope.clone();
@@ -326,6 +357,7 @@ impl Ledger {
             ledger: self.clone(),
             id: Some(id),
             envelope,
+            _quota_lease: quota_lease,
         })
     }
 
@@ -336,7 +368,19 @@ impl Ledger {
         client_agent_id: Option<String>,
         parent_agent_id: Option<String>,
     ) -> Result<(), LedgerError> {
-        let mut reservation = self.reserve(start).await?;
+        self.reject_with_quota(start, operation, client_agent_id, parent_agent_id, None)
+            .await
+    }
+
+    pub async fn reject_with_quota(
+        &self,
+        start: RequestStart,
+        operation: &str,
+        client_agent_id: Option<String>,
+        parent_agent_id: Option<String>,
+        quota: Option<RequestQuotaSnapshot>,
+    ) -> Result<(), LedgerError> {
+        let mut reservation = self.reserve_with_quota(start, None, quota, None).await?;
         reservation.annotate_protocol(operation, client_agent_id, parent_agent_id);
         reservation
             .finish(RequestCompletion {
@@ -729,8 +773,17 @@ impl TokenUsage {
 }
 
 impl RequestEnvelope {
+    #[cfg(test)]
     fn started(start: RequestStart) -> Self {
-        let request_id = Uuid::new_v4();
+        Self::started_with(start, None, None)
+    }
+
+    fn started_with(
+        start: RequestStart,
+        gateway_request_id: Option<Uuid>,
+        quota: Option<RequestQuotaSnapshot>,
+    ) -> Self {
+        let request_id = gateway_request_id.unwrap_or_else(Uuid::new_v4);
         let credential_id =
             (start.principal.credential_id != Uuid::nil()).then_some(start.principal.credential_id);
         let selection = start.selection;
@@ -781,6 +834,11 @@ impl RequestEnvelope {
                 deadline_at: policy.as_ref().and_then(|value| value.deadline_at),
                 max_queue_time_ms: policy.as_ref().and_then(|value| value.max_queue_time_ms),
                 policy_decision: policy.map(|value| value.decision),
+                quota_reservation_id: quota.as_ref().and_then(|value| value.reservation_id),
+                quota_decision: quota.as_ref().map(|value| value.decision.clone()),
+                quota_requires_cost: quota.as_ref().is_some_and(|value| value.requires_cost),
+                quota_actual_tokens: None,
+                quota_actual_cost_microusd: None,
                 status: "interrupted".to_owned(),
                 created_at: start.created_at,
                 started_at: start.created_at,
@@ -800,6 +858,34 @@ impl RequestEnvelope {
             .request
             .request_received_at
             .map(|received| (completion.completed_at - received).num_milliseconds());
+        let actual_attempts = completion
+            .attempts
+            .iter()
+            .filter(|attempt| !attempt.actual_usage.is_empty())
+            .collect::<Vec<_>>();
+        if self.request.operation == "count_tokens" && self.request.quota_reservation_id.is_some() {
+            self.request.quota_actual_tokens = Some(0);
+            self.request.quota_actual_cost_microusd = Some(0);
+        }
+        if !actual_attempts.is_empty() {
+            self.request.quota_actual_tokens = actual_attempts
+                .iter()
+                .try_fold(0_u64, |total, attempt| {
+                    total.checked_add(total_tokens(&attempt.actual_usage).ok()?)
+                })
+                .and_then(|value| i64::try_from(value).ok());
+            self.request.quota_actual_cost_microusd = if self.request.quota_requires_cost {
+                actual_attempts
+                    .iter()
+                    .try_fold(0_u64, |total, attempt| {
+                        let metadata = &attempt.selection.as_ref()?.cost_metadata;
+                        total.checked_add(cost_for_usage(metadata, &attempt.actual_usage).ok()?)
+                    })
+                    .and_then(|value| i64::try_from(value).ok())
+            } else {
+                Some(0)
+            };
+        }
         self.attempts = completion
             .attempts
             .into_iter()
@@ -907,7 +993,11 @@ impl UsageRecord {
             cached_input_tokens: to_i64(usage.cached_input_tokens),
             cache_write_input_tokens: to_i64(usage.cache_write_input_tokens),
             reasoning_tokens: to_i64(usage.reasoning_tokens),
-            cost_microusd: None,
+            cost_microusd: attempt
+                .cost_metadata
+                .as_ref()
+                .and_then(|metadata| cost_for_usage(metadata, usage).ok())
+                .and_then(|value| i64::try_from(value).ok()),
             recorded_at: attempt.completed_at,
         }
     }

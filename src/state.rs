@@ -11,6 +11,7 @@ use crate::{
     metrics::Instruments,
     model_registry::{GatewayOperation, ModelRegistry, ProviderProfile, ProviderProfiles},
     policy::PolicyEngine,
+    quota::QuotaEngine,
 };
 use thiserror::Error;
 
@@ -28,6 +29,7 @@ pub struct AppState {
     pub(crate) pool: Pool<Postgres>,
     pub(crate) models: ModelRegistry,
     pub(crate) policies: PolicyEngine,
+    pub(crate) quotas: QuotaEngine,
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
@@ -85,6 +87,7 @@ impl AppState {
             config.policy_cache_capacity,
             Duration::from_secs(config.policy_cache_ttl_seconds),
         );
+        let quotas = QuotaEngine::new(pool.clone());
         let admin = AdminService::new(
             admin_pool,
             credentials.clone(),
@@ -115,6 +118,7 @@ impl AppState {
             pool,
             models,
             policies,
+            quotas,
             credentials,
             admin,
             ledger,

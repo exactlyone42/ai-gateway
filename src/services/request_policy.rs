@@ -29,7 +29,7 @@ pub struct PreparedPolicy {
     pub policy: EffectivePolicy,
     pub selector: ModelSelector,
     pub requested_model: String,
-    rejection: RejectionContext,
+    pub(crate) rejection: RejectionContext,
 }
 
 pub async fn prepare(

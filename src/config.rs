@@ -433,9 +433,10 @@ fn validate_pool_budget(total: u32, admin: u32) -> Result<(), ConfigError> {
             "must be greater than zero".to_owned(),
         ));
     }
-    if admin >= total {
+    if total.saturating_sub(admin) < 2 {
         return Err(ConfigError::InvalidAdminPoolSize(
-            "must leave at least one connection for the data plane".to_owned(),
+            "must leave one quota guard connection and one serving connection for the data plane"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -577,7 +578,7 @@ mod tests {
             Err(ConfigError::InvalidAdminPoolSize(_))
         ));
         assert!(matches!(
-            validate_pool_budget(2, 2),
+            validate_pool_budget(3, 2),
             Err(ConfigError::InvalidAdminPoolSize(_))
         ));
     }

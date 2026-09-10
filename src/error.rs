@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     identity::IdentityError, ledger::LedgerError, model_registry::RegistryError,
-    policy::PolicyError,
+    policy::PolicyError, quota::QuotaError,
 };
 
 #[derive(Debug, Error)]
@@ -21,6 +21,10 @@ pub enum GatewayError {
     InvalidPolicyHint,
     #[error("request denied by policy")]
     PolicyDenied,
+    #[error("request exceeds an active quota")]
+    QuotaExceeded,
+    #[error("request is deferred by a soft quota")]
+    QuotaDeferred,
     #[error("model cannot satisfy required capability: {0}")]
     CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
@@ -45,6 +49,8 @@ pub enum GatewayError {
     RegistryUnavailable(#[source] RegistryError),
     #[error("policy service is unavailable")]
     PolicyUnavailable(#[source] PolicyError),
+    #[error("quota service is unavailable")]
+    QuotaUnavailable(#[source] QuotaError),
 }
 
 /// Carries the failure from the error boundary to the access log, which is the
@@ -68,6 +74,8 @@ impl GatewayError {
             Self::ModelForbidden => "model_forbidden",
             Self::InvalidPolicyHint => "invalid_policy_hint",
             Self::PolicyDenied => "policy_denied",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::QuotaDeferred => "quota_deferred",
             Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
@@ -80,6 +88,7 @@ impl GatewayError {
             Self::LedgerUnavailable(_) => "ledger_unavailable",
             Self::RegistryUnavailable(_) => "model_registry_unavailable",
             Self::PolicyUnavailable(_) => "policy_unavailable",
+            Self::QuotaUnavailable(_) => "quota_unavailable",
         }
     }
 
@@ -92,6 +101,8 @@ impl GatewayError {
             | Self::ModelForbidden
             | Self::InvalidPolicyHint
             | Self::PolicyDenied
+            | Self::QuotaExceeded
+            | Self::QuotaDeferred
             | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
@@ -104,6 +115,7 @@ impl GatewayError {
             Self::LedgerUnavailable(error) => Some(error.to_string()),
             Self::RegistryUnavailable(error) => Some(error.to_string()),
             Self::PolicyUnavailable(error) => Some(error.to_string()),
+            Self::QuotaUnavailable(error) => Some(error.to_string()),
         }
     }
 }
@@ -119,6 +131,7 @@ impl IntoResponse for GatewayError {
             Self::ModelForbidden => StatusCode::FORBIDDEN,
             Self::InvalidPolicyHint => StatusCode::BAD_REQUEST,
             Self::PolicyDenied => StatusCode::FORBIDDEN,
+            Self::QuotaExceeded | Self::QuotaDeferred => StatusCode::TOO_MANY_REQUESTS,
             Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
@@ -131,6 +144,7 @@ impl IntoResponse for GatewayError {
             Self::LedgerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::RegistryUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::PolicyUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::QuotaUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         let mut response = (
             status,
@@ -167,6 +181,12 @@ impl From<RegistryError> for GatewayError {
             | RegistryError::RequestEncoding(_)
             | RegistryError::Database(_)) => Self::RegistryUnavailable(error),
         }
+    }
+}
+
+impl From<QuotaError> for GatewayError {
+    fn from(error: QuotaError) -> Self {
+        Self::QuotaUnavailable(error)
     }
 }
 

@@ -111,7 +111,7 @@ mod tests {
         body::{Body, Bytes, to_bytes},
         extract::OriginalUri,
         http::{HeaderMap, Request, StatusCode},
-        response::Response,
+        response::{IntoResponse as _, Response},
         routing::post,
     };
     use futures_util::StreamExt as _;
@@ -642,6 +642,106 @@ mod tests {
         assert_eq!(evidence["quality"], "standard");
         assert_eq!(evidence["denied"], true);
         assert_eq!(evidence["reason"], "maintenance");
+        assert_eq!(evidence["attempts"], 0);
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn hard_quota_is_a_durable_429_before_the_provider_call(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let provider_id = Uuid::new_v4();
+        let model_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'openai-test', 'Quota provider', 'openai',
+                    'http://127.0.0.1:1', 'env://OPENAI_API_KEY',
+                    ARRAY['openai_chat_completions'], 'active'
+                ) RETURNING id
+            ), inserted_model AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, lifecycle_state
+                ) SELECT $3, $2, id, 'quota-model', 'provider-quota-model',
+                         'Quota model', ARRAY['openai_chat_completions'], 'active'
+                  FROM inserted_provider RETURNING id
+            )
+            INSERT INTO quotas (
+                id, tenant_id, quota_key, revision, configuration, lifecycle_state
+            ) SELECT $4, $2, 'closed', 1,
+                     '{"mode":"hard","limits":{"requests_per_minute":0}}', 'active'
+              FROM inserted_model
+            "#,
+        )
+        .bind(provider_id)
+        .bind(tenant_id)
+        .bind(model_id)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "quota-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"quota-model","max_tokens":10}"#),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("closed hard quota reached the provider path");
+        };
+        assert_eq!(error.kind(), "quota_exceeded");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "quota_exceeded");
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'status', gr.status,
+                'reason', gr.quota_decision->'denial_reason',
+                'limit_kind', gr.quota_decision->'violations'->0->'limit_kind',
+                'attempts', (SELECT count(*) FROM provider_attempts pa
+                    WHERE (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id))
+            )
+            FROM gateway_requests gr WHERE gr.tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["status"], "rejected");
+        assert_eq!(evidence["reason"], "hard_limit");
+        assert_eq!(evidence["limit_kind"], "requests_per_minute");
         assert_eq!(evidence["attempts"], 0);
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
