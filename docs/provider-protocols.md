@@ -7,12 +7,13 @@ Anthropic base URL; LiteLLM and canonical conversion are not involved:
 
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
-- `GET /v1/models` is served from `ALLOWED_MODELS` and does not call upstream.
+- `GET /v1/models` is served from the tenant's active database registry and does not call upstream.
 - `HEAD /api/hello` returns 204 for Claude Code prewarming.
 
 ### Request contract
 
-- Preserve the original path, ordered query string, and JSON body bytes.
+- Preserve the original path and ordered query string. The router may replace only the top-level
+  JSON `model` value with the selected provider model; all other request semantics are preserved.
 - Forward `content-type`, `accept`, and every `anthropic-*` header unchanged.
 - Never forward the client `authorization` or `x-api-key`; inject only the
   server-side `ANTHROPIC_API_KEY` as upstream `x-api-key`.
@@ -60,11 +61,12 @@ The gateway exposes and forwards these endpoints directly to
 
 - `POST /v1/responses`, used by Codex CLI.
 - `POST /v1/chat/completions`, used by other OpenAI-compatible clients.
-- `GET /v1/models` is served from `ALLOWED_MODELS` and does not call upstream.
+- `GET /v1/models` is served from the tenant's active database registry and does not call upstream.
 
 ### Request and response contract
 
-- Preserve the original path, ordered query string, and JSON body bytes.
+- Preserve the original path and ordered query string. The router may replace only the top-level
+  JSON `model` value with the selected provider model; all other request semantics are preserved.
 - Forward `content-type`, `accept`, `openai-beta`, `originator`, `session_id`,
   and `x-stainless-*` headers. Never forward client `authorization` or
   `x-api-key`; inject only the server-side `OPENAI_API_KEY` bearer token.

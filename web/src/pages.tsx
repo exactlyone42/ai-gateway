@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, RefreshCw, ShieldOff, X } from 'lucide-react'
+import { CirclePower, Pencil, Plus, PowerOff, RefreshCw, ShieldOff, Trash2, X } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { adminRequest } from './api'
 import { useAuth } from './auth'
@@ -151,6 +151,7 @@ export function RequestsPage() {
     ]} />{data.next_cursor && <button className="load-more" onClick={() => setCursor(data.next_cursor)}>Next page</button>}</>}</QueryBody>
     {selected && <div className="drawer-backdrop" onClick={() => setSelected(null)}><aside className="drawer" onClick={(event) => event.stopPropagation()}><header><h2>Request detail</h2><button className="icon-button" title="Close" onClick={() => setSelected(null)}><X /></button></header>
       <QueryBody query={detail}>{(data) => <><dl className="detail-list"><dt>Request ID</dt><dd>{data.request.request_id}</dd><dt>Trace ID</dt><dd>{data.request.trace_id ?? 'Unavailable'}</dd><dt>Status</dt><dd><Status value={data.request.status} /></dd><dt>Operation</dt><dd>{data.request.operation}</dd></dl>
+        <h3>Registry selection</h3><dl className="detail-list"><dt>Selector</dt><dd>{data.request.selector_kind ? `${data.request.selector_kind}:${data.request.selector_value}` : 'Unavailable'}</dd><dt>Alias</dt><dd>{data.request.selected_alias_id ? `${data.request.selected_alias_id} v${data.request.selected_alias_version}` : 'Direct model'}</dd><dt>Model</dt><dd>{data.request.selected_model_id ? `${data.request.selected_model_id} v${data.request.selected_model_version}` : 'Unavailable'}</dd><dt>Provider</dt><dd>{data.request.selected_provider_id ? `${data.request.selected_provider_id} v${data.request.selected_provider_version}` : 'Unavailable'}</dd><dt>Provider model</dt><dd>{data.request.selected_provider_model_id ?? 'Unavailable'}</dd><dt>Cost metadata</dt><dd><code>{JSON.stringify(data.request.selected_cost_metadata ?? {})}</code></dd></dl>
         <h3>Provider attempts</h3><DataTable rows={data.attempts} columns={[{ key: 'attempt_number', label: '#' }, { key: 'provider', label: 'Provider' }, { key: 'model', label: 'Model' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />
         <Unavailable reason={data.retry_fallback_history?.unavailable_reason} /><Unavailable reason={data.trace_spans?.unavailable_reason} /></>}</QueryBody>
     </aside></div>}
@@ -177,12 +178,78 @@ export function UsagePage() {
 }
 
 export function CatalogPage() {
+  const auth = useAuth()
+  const queryClient = useQueryClient()
   const query = useAdminQuery<JsonObject>(['catalog'], '/catalog')
-  return <Page title="Models & Providers"><QueryBody query={query}>{(data) => <>
-    {!data.activation?.available && <Unavailable reason={data.activation?.unavailable_reason} />}
-    <section className="section"><h2>Models</h2><DataTable rows={data.models ?? []} columns={[{ key: 'public_model_id', label: 'Public model' }, { key: 'provider_key', label: 'Provider' }, { key: 'quality_tier', label: 'Tier' }, { key: 'context_window', label: 'Context' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }]} /></section>
-    <section className="section"><h2>Providers</h2><DataTable rows={data.providers ?? []} columns={[{ key: 'display_name', label: 'Provider' }, { key: 'provider_type', label: 'Type' }, { key: 'base_url', label: 'Base URL' }, { key: 'credential_configured', label: 'Credential', render: (row) => row.credential_configured ? 'Configured' : 'Missing' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }]} /></section>
-  </>}</QueryBody></Page>
+  const [creating, setCreating] = useState<'provider' | 'model' | 'alias' | null>(null)
+  const [editing, setEditing] = useState<{ kind: 'provider' | 'model' | 'alias'; row: JsonObject } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const canWrite = auth.role !== 'viewer'
+  const canActivate = auth.role === 'admin'
+  const mutate = async (path: string, init: RequestInit) => {
+    setBusy(true); setError(null)
+    try {
+      await adminRequest(path, auth.token!, auth.clear, init)
+      setCreating(null)
+      setEditing(null)
+      await queryClient.invalidateQueries({ queryKey: ['catalog'] })
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
+    finally { setBusy(false) }
+  }
+  const lifecycle = (resource: string, row: JsonObject, impact = '') => {
+    const state = row.lifecycle_state === 'active' ? 'disabled' : 'active'
+    if (state === 'disabled' && impact && !window.confirm(`Disable ${row.display_name ?? row.public_model_id ?? row.provider_key}? ${impact}`)) return
+    return mutate(`/${resource}/${row.id}/lifecycle`, { method: 'POST', body: JSON.stringify({ version: row.version, state }) })
+  }
+  const actionColumn = (kind: 'provider' | 'model' | 'alias', resource: string, impact: (row: JsonObject) => string = () => '') => (canWrite || canActivate) ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
+    {canWrite && ['draft', 'disabled'].includes(row.lifecycle_state) && <><button className="icon-button" title="Edit" disabled={busy} onClick={() => setEditing({ kind, row })}><Pencil /></button><button className="icon-button danger" title="Archive" disabled={busy} onClick={() => void mutate(`/${resource}/${row.id}?version=${row.version}`, { method: 'DELETE' })}><Trash2 /></button></>}
+    {canActivate && row.lifecycle_state !== 'archived' && <button className={`icon-button ${row.lifecycle_state === 'active' ? 'danger' : ''}`} title={row.lifecycle_state === 'active' ? 'Disable' : 'Activate'} disabled={busy} onClick={() => void lifecycle(resource, row, impact(row))}>{row.lifecycle_state === 'active' ? <PowerOff /> : <CirclePower />}</button>}
+  </div> }] : []
+  return <Page title="Models & Providers" actions={canWrite ? <div className="toolbar"><button onClick={() => setCreating('provider')}><Plus size={16} />Provider</button><button onClick={() => setCreating('model')}><Plus size={16} />Model</button><button onClick={() => setCreating('alias')}><Plus size={16} />Alias</button></div> : undefined}>
+    {error && <div className="state error">{error}</div>}
+    <QueryBody query={query}>{(data) => <>
+      <section className="section catalog-table"><h2>Quality aliases</h2><DataTable rows={data.aliases ?? []} columns={[{ key: 'quality_tier', label: 'Tier' }, { key: 'operation', label: 'Operation' }, { key: 'public_model_id', label: 'Model' }, { key: 'provider_key', label: 'Provider' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, ...actionColumn('alias', 'model-aliases')]} /></section>
+      <section className="section catalog-table"><h2>Models</h2><DataTable rows={data.models ?? []} columns={[{ key: 'display_name', label: 'Model' }, { key: 'public_model_id', label: 'Public ID' }, { key: 'provider_key', label: 'Provider' }, { key: 'context_window', label: 'Context' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, ...actionColumn('model', 'models', (row) => `${(data.aliases ?? []).filter((alias: JsonObject) => alias.model_id === row.id && alias.lifecycle_state === 'active').length} active aliases will also be disabled.`)]} /></section>
+      <section className="section catalog-table"><h2>Providers</h2><DataTable rows={data.providers ?? []} columns={[{ key: 'display_name', label: 'Provider' }, { key: 'provider_type', label: 'Type' }, { key: 'base_url', label: 'Base URL' }, { key: 'credential_configured', label: 'Credential', render: (row) => row.credential_configured ? 'Configured' : 'Missing' }, { key: 'lifecycle_state', label: 'State', render: (row) => <Status value={row.lifecycle_state} /> }, ...actionColumn('provider', 'providers', (row) => `${(data.models ?? []).filter((model: JsonObject) => model.provider_id === row.id && model.lifecycle_state === 'active').length} active models and their aliases will also be disabled.`)]} /></section>
+      {(creating || editing) && <CatalogDialog kind={creating ?? editing!.kind} initial={editing?.row} providers={data.providers ?? []} models={data.models ?? []} busy={busy} onClose={() => { setCreating(null); setEditing(null) }} onSubmit={(path, body, method) => void mutate(path, { method, body: JSON.stringify(body) })} />}
+    </>}</QueryBody>
+  </Page>
+}
+
+function CatalogDialog({ kind, initial, providers, models, busy, onClose, onSubmit }: { kind: 'provider' | 'model' | 'alias'; initial?: JsonObject; providers: JsonObject[]; models: JsonObject[]; busy: boolean; onClose: () => void; onSubmit: (path: string, body: JsonObject, method: string) => void }) {
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setValidationError(null)
+    const data = new FormData(event.currentTarget)
+    const capabilities = data.getAll('capabilities').map(String)
+    const path = initial ? `/${kind === 'alias' ? 'model-aliases' : `${kind}s`}/${initial.id}` : `/${kind === 'alias' ? 'model-aliases' : `${kind}s`}`
+    const version = initial ? { version: initial.version } : {}
+    if (kind === 'provider') {
+      const credentialRef = data.get('credential_ref')
+      onSubmit(path, { ...version, ...(!initial ? { provider_key: data.get('provider_key'), provider_type: data.get('provider_type') } : {}), display_name: data.get('display_name'), base_url: data.get('base_url'), ...(!initial || credentialRef ? { credential_ref: credentialRef } : {}), supported_operations: data.getAll('operations') }, initial ? 'PATCH' : 'POST')
+    }
+    if (kind === 'model') {
+      let costMetadata: JsonObject
+      try { costMetadata = JSON.parse(String(data.get('cost_metadata') || '{}')) }
+      catch { setValidationError('Cost metadata must be valid JSON.'); return }
+      if (!costMetadata || Array.isArray(costMetadata) || typeof costMetadata !== 'object') {
+        setValidationError('Cost metadata must be a JSON object.')
+        return
+      }
+      onSubmit(path, { ...version, ...(!initial ? { provider_id: data.get('provider_id'), public_model_id: data.get('public_model_id') } : {}), provider_model_id: data.get('provider_model_id'), display_name: data.get('display_name'), description: data.get('description') || null, context_window: Number(data.get('context_window')) || null, max_output_tokens: Number(data.get('max_output_tokens')) || null, latency_class: data.get('latency_class') || null, cost_metadata: costMetadata, supported_operations: data.getAll('operations'), capabilities, supports_streaming: capabilities.includes('streaming'), supports_tools: capabilities.includes('tools'), supports_reasoning: capabilities.includes('reasoning'), supports_images: capabilities.includes('images'), supports_structured_output: capabilities.includes('structured_output') }, initial ? 'PATCH' : 'POST')
+    }
+    if (kind === 'alias') onSubmit(path, { ...version, operation: data.get('operation'), quality_tier: data.get('quality_tier'), model_id: data.get('model_id') }, initial ? 'PATCH' : 'POST')
+  }
+  const operations = ['anthropic_messages', 'anthropic_count_tokens', 'openai_responses', 'openai_chat_completions']
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{initial ? 'Edit' : 'Create'} {kind}</h2><button type="button" className="icon-button" title="Close" onClick={onClose}><X /></button></header>
+    {validationError && <div className="state error">{validationError}</div>}
+    {kind === 'provider' && <><label>Name<input name="display_name" required maxLength={120} defaultValue={initial?.display_name} /></label>{!initial && <><label>Provider key<input name="provider_key" required pattern="[a-z][a-z0-9\-]{0,62}" /></label><label>Type<select name="provider_type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="xai">xAI</option><option value="local">Local</option></select></label></>}<label>Base URL<input name="base_url" required type="url" defaultValue={initial?.base_url} /></label><label>Credential reference<input name="credential_ref" required={!initial} placeholder={initial ? 'Leave blank to keep current reference' : 'env://OPENAI_API_KEY'} pattern="env://[A-Z][A-Z0-9_]{2,127}" /></label><fieldset><legend>Operations</legend>{operations.map((value) => <label className="check-label" key={value}><input type="checkbox" name="operations" value={value} defaultChecked={(initial?.supported_operations ?? []).includes(value)} />{value.replaceAll('_', ' ')}</label>)}</fieldset></>}
+    {kind === 'model' && <>{!initial && <><label>Provider<select name="provider_id" required><option value="">Select provider</option>{providers.map((row) => <option key={row.id} value={row.id}>{row.display_name}</option>)}</select></label><label>Public model ID<input name="public_model_id" required maxLength={255} /></label></>}<label>Name<input name="display_name" required defaultValue={initial?.display_name} /></label><label>Provider model ID<input name="provider_model_id" required maxLength={255} defaultValue={initial?.provider_model_id} /></label><label>Description<input name="description" maxLength={1024} defaultValue={initial?.description} /></label><label>Context window<input name="context_window" type="number" min="1" defaultValue={initial?.context_window} /></label><label>Max output tokens<input name="max_output_tokens" type="number" min="1" defaultValue={initial?.max_output_tokens} /></label><label>Latency class<input name="latency_class" maxLength={64} defaultValue={initial?.latency_class} /></label><label>Cost metadata<textarea name="cost_metadata" defaultValue={JSON.stringify(initial?.cost_metadata ?? {})} /></label><fieldset><legend>Operations</legend>{operations.map((value) => <label className="check-label" key={value}><input type="checkbox" name="operations" value={value} defaultChecked={(initial?.supported_operations ?? []).includes(value)} />{value.replaceAll('_', ' ')}</label>)}</fieldset><fieldset><legend>Capabilities</legend>{['streaming', 'tools', 'reasoning', 'images', 'structured_output'].map((value) => <label className="check-label" key={value}><input type="checkbox" name="capabilities" value={value} defaultChecked={Boolean(initial?.[`supports_${value}`])} />{value.replaceAll('_', ' ')}</label>)}</fieldset></>}
+    {kind === 'alias' && <><label>Quality<select name="quality_tier" defaultValue={initial?.quality_tier}><option>economy</option><option>standard</option><option>advanced</option><option>premium</option></select></label><label>Operation<select name="operation" defaultValue={initial?.operation}>{operations.map((value) => <option key={value}>{value}</option>)}</select></label><label>Model<select name="model_id" required defaultValue={initial?.model_id}><option value="">Select model</option>{models.map((row) => <option key={row.id} value={row.id}>{row.display_name ?? row.public_model_id}</option>)}</select></label></>}
+    <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>
+  </form></div>
 }
 
 export function GovernancePage() {

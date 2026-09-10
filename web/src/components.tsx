@@ -44,7 +44,7 @@ export function DataTable({ columns, rows, onRow }: {
   if (!rows.length) return <Empty />
   return <div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column.key}>{column.label}</th>)}{onRow && <th aria-label="Open" />}</tr></thead>
     <tbody>{rows.map((row, index) => <tr key={row.id ?? index} className={onRow ? 'clickable' : ''} onClick={() => onRow?.(row)}>
-      {columns.map((column) => <td key={column.key}>{column.render ? column.render(row) : String(row[column.key] ?? 'Unavailable')}</td>)}
+      {columns.map((column) => <td key={column.key} data-label={column.label}>{column.render ? column.render(row) : String(row[column.key] ?? 'Unavailable')}</td>)}
       {onRow && <td><ChevronRight size={16} /></td>}
     </tr>)}</tbody></table></div>
 }

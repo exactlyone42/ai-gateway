@@ -83,13 +83,15 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
   yield；final checkpoint 先 durable 再 publish，rename 失敗可在重啟恢復；兩個 provider 分別落帳。
 - 2026-09-11T01:21+08:00：PR #32 合入 `dev`（merge `609e651a`）；`rust` CI 與兩個
   board sync check 全部 SUCCESS。Codex 私有 model metadata 缺口移交 W10。
+- 2026-09-11 W10 更正移交事實：0.153.0 custom provider 實跑未呼叫 `/v1/models`；官方設定
+  以本機 `model_catalog_json` 載入 startup catalog。W06 當時觀察到的 GET 不是該模式的契約。
 
 ## 已確定不可行
 - 用 Chat Completions 支援 Codex：`wire_api` 目前只接受 Responses。
 - 把 OpenAI `response.completed` 與 Chat 的 `finish_reason`／`[DONE]` 當同一種 wire 終止事件：
   Chat 的 usage 可能晚到，Responses 的失敗／不完整又是明確 terminal，合併會漏帳或誤判成功。
-- 在 W06 猜 Codex 私有 `models[]` 的 context window／reasoning metadata：會向 client 宣告不存在的能力；
-  W10 用真正模型註冊表提供前，明確模型可工作但 Codex 會顯示 fallback warning。
+- 由 HTTP gateway 消除 Codex custom-provider fallback warning：0.153.0 不向 gateway 查模型，
+  只讀本機 `model_catalog_json`；明確模型仍可工作，catalog 要由 operator 另行維護。
 
 ## 證據
 - `DATABASE_URL=.../gateway_w05_validation ./scripts/check.sh all`：71 passed、0 failed、
@@ -99,8 +101,8 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
   server secret、429/error code 與 PostgreSQL usage/ID 均有獨立測試。
 - malformed 陰性對照：暫時把缺 `data:` 改成接受後，指定測試 0 passed／1 failed；恢復後
   1 passed／0 failed，錯誤訊息鎖定 missing data。
-- Codex 0.153.0 一次實際往返：GET `/v1/models`、POST `/v1/responses`，輸出
-  `W06_CODEX_OK`；capture 為 `stream=true`、provider authorization 僅 server key。
+- Codex 0.153.0 一次實際往返輸出 `W06_CODEX_OK`；capture 為 `stream=true`、provider
+  authorization 僅 server key。W10 重驗 custom provider 只送 `POST /v1/responses`。
 - terminal ordering 陰性對照：暫時把 final ledger write 移到第一個 SSE event yield 後，
   指定測試 0 passed／1 failed（spool 沒有 completed）；恢復後 1 passed／0 failed。
 - publish fault injection：在 `.ready` 位置建立障礙迫使 rename 失敗，重啟後仍從 final
@@ -118,4 +120,4 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
 | 共用抽象 | relay 管生命週期；observer 管協定狀態 | relay 直接辨識各家 event 名 | 避免表面共用、內部仍按 provider 分支 |
 
 ## 下一步
-1. W10 從真正模型註冊表提供 Codex `models[]` 能力 metadata，不在 W06 猜值。
+1. W10 提供標準 `/v1/models`；Codex 私有 startup catalog 留在本機 `model_catalog_json`。

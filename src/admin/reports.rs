@@ -469,9 +469,17 @@ impl AdminService {
                 ) FROM models m JOIN providers p
                     ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
                   WHERE m.tenant_id = $1), '[]'::jsonb),
+                'aliases', COALESCE((SELECT jsonb_agg(
+                    (to_jsonb(a) - 'tenant_id') || jsonb_build_object(
+                        'public_model_id', m.public_model_id,
+                        'provider_key', p.provider_key
+                    ) ORDER BY a.operation, a.quality_tier
+                ) FROM model_aliases a
+                  JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+                  JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+                  WHERE a.tenant_id = $1), '[]'::jsonb),
                 'activation', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'provider and model activation are implemented in W10'
+                    'available', true
                 )
             )
             "#,
@@ -637,6 +645,8 @@ fn safe_audit_state(target_type: &str, state: Option<Value>) -> Option<Value> {
             "provider_type",
             "base_url",
             "credential_ref",
+            "supported_operations",
+            "enabled",
             "lifecycle_state",
             "version",
             "created_at",
@@ -647,9 +657,12 @@ fn safe_audit_state(target_type: &str, state: Option<Value>) -> Option<Value> {
             "provider_id",
             "public_model_id",
             "provider_model_id",
+            "display_name",
+            "description",
             "quality_tier",
             "context_window",
             "max_output_tokens",
+            "supported_operations",
             "capabilities",
             "supports_streaming",
             "supports_tools",
@@ -658,7 +671,19 @@ fn safe_audit_state(target_type: &str, state: Option<Value>) -> Option<Value> {
             "supports_structured_output",
             "cost_metadata",
             "latency_class",
+            "enabled",
             "lifecycle_state",
+            "version",
+            "created_at",
+            "updated_at",
+        ],
+        "model_alias" => &[
+            "id",
+            "operation",
+            "quality_tier",
+            "model_id",
+            "lifecycle_state",
+            "enabled",
             "version",
             "created_at",
             "updated_at",

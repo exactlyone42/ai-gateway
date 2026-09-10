@@ -1,34 +1,41 @@
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 
-use crate::{error::GatewayError, logging, state::AppState};
+use crate::{error::GatewayError, logging, model_registry::ProviderProfile, state::AppState};
 
 pub struct UpstreamResponse {
     pub response: reqwest::Response,
 }
 
-/// Sends one raw Anthropic request. Parsing belongs to the accounting sidecar;
-/// the bytes on the wire are never rebuilt from JSON.
-#[tracing::instrument(name = "provider.attempt", skip_all)]
+/// Sends one native Anthropic request after the router has replaced only the
+/// public model selector with the provider model id.
+#[tracing::instrument(
+    name = "provider.attempt",
+    skip_all,
+    fields(gen_ai.system = %profile.provider_key, gen_ai.request.model = %provider_model_id)
+)]
 pub async fn forward(
     state: &AppState,
     path_and_query: &str,
     client_headers: &HeaderMap,
     body: axum::body::Bytes,
+    profile: &ProviderProfile,
+    provider_model_id: &str,
 ) -> Result<UpstreamResponse, GatewayError> {
     let mut headers = provider_headers(client_headers);
     logging::inject_context(&mut headers);
     headers.insert(
         HeaderName::from_static("x-api-key"),
-        HeaderValue::from_str(&state.config.anthropic_api_key)
-            .map_err(|_| GatewayError::InvalidConfiguration)?,
+        HeaderValue::from_str(
+            profile
+                .api_key_secret()
+                .ok_or(GatewayError::InvalidConfiguration)?,
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?,
     );
 
     let response = state
         .client
-        .post(format!(
-            "{}{}",
-            state.config.anthropic_base_url, path_and_query
-        ))
+        .post(format!("{}{}", profile.base_url, path_and_query))
         .headers(headers)
         .body(body)
         .send()

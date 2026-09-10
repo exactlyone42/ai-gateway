@@ -111,6 +111,10 @@ tr.clickable:hover td { background: #f1f7f3; }
 .dialog header, .drawer header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .dialog header h2, .drawer header h2 { margin: 0; }
 .dialog label { margin-top: 16px; }
+.dialog fieldset { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 16px; border: 1px solid var(--line); padding: 12px; }
+.dialog legend { padding: 0 5px; color: #435047; font-size: 13px; font-weight: 650; }
+.dialog .check-label { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: 0; overflow-wrap: anywhere; font-weight: 500; }
+.dialog .check-label input { width: 16px; min-height: 16px; margin: 0; }
 .dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 .secret { display: block; margin: 18px 0; border: 1px solid var(--line); border-radius: 4px; padding: 14px; overflow-wrap: anywhere; color: #193b2c; background: #edf7f1; font-size: 12px; }
 .drawer-backdrop { place-items: stretch end; padding: 0; }
@@ -156,6 +160,12 @@ tr.clickable:hover td { background: #f1f7f3; }
   .health-list small { grid-column: 1 / -1; }
   .dialog-backdrop { padding: 10px; }
   .dialog { padding: 18px; }
+  .catalog-table .table-scroll { overflow: visible; border: 0; background: transparent; }
+  .catalog-table table, .catalog-table tbody { display: block; }
+  .catalog-table thead { display: none; }
+  .catalog-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+  .catalog-table td { display: grid; min-width: 0; max-width: none; gap: 4px; border: 0; overflow-wrap: anywhere; }
+  .catalog-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 }
 
 @media (max-width: 390px) {

@@ -6,7 +6,11 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{AdminContext, AdminError, AdminService, AuditEntry, append_audit, validate_name};
+use crate::model_registry::GatewayOperation;
+
+use super::{
+    AdminContext, AdminError, AdminService, AuditEntry, append_audit, map_conflict, validate_name,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
@@ -17,6 +21,7 @@ pub enum ResourceKind {
     Credentials,
     Providers,
     Models,
+    ModelAliases,
     Policies,
     Quotas,
 }
@@ -45,6 +50,7 @@ impl FromStr for ResourceKind {
             "credentials" => Ok(Self::Credentials),
             "providers" => Ok(Self::Providers),
             "models" => Ok(Self::Models),
+            "model-aliases" => Ok(Self::ModelAliases),
             "policies" => Ok(Self::Policies),
             "quotas" => Ok(Self::Quotas),
             _ => Err(AdminError::NotFound),
@@ -62,6 +68,7 @@ impl ResourceKind {
             Self::Credentials => "credentials",
             Self::Providers => "providers",
             Self::Models => "models",
+            Self::ModelAliases => "model-aliases",
             Self::Policies => "policies",
             Self::Quotas => "quotas",
         }
@@ -76,6 +83,7 @@ impl ResourceKind {
             Self::Credentials => "credential",
             Self::Providers => "provider",
             Self::Models => "model",
+            Self::ModelAliases => "model_alias",
             Self::Policies => "policy",
             Self::Quotas => "quota",
         }
@@ -106,6 +114,7 @@ const LIST_RESOURCES: &str = r#"
         UNION ALL SELECT 'credentials', id, tenant_id, to_jsonb(credentials) FROM credentials
         UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers
         UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models
+        UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases
         UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies
         UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas
     ) resources
@@ -123,6 +132,7 @@ const GET_RESOURCE: &str = r#"
         UNION ALL SELECT 'credentials', id, tenant_id, to_jsonb(credentials) FROM credentials
         UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers
         UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models
+        UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases
         UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies
         UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas
     ) resources
@@ -138,6 +148,13 @@ pub struct ListQuery {
 #[derive(Deserialize)]
 pub struct DeleteQuery {
     pub version: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleInput {
+    pub version: i64,
+    pub state: String,
 }
 
 #[derive(Serialize)]
@@ -178,6 +195,8 @@ struct ProviderCreate {
     provider_type: String,
     base_url: String,
     credential_ref: String,
+    #[serde(default)]
+    supported_operations: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -186,9 +205,13 @@ struct ModelCreate {
     provider_id: Uuid,
     public_model_id: String,
     provider_model_id: String,
+    display_name: Option<String>,
+    description: Option<String>,
     quality_tier: Option<String>,
     context_window: Option<i64>,
     max_output_tokens: Option<i64>,
+    #[serde(default)]
+    supported_operations: Vec<String>,
     #[serde(default)]
     capabilities: Vec<String>,
     #[serde(default)]
@@ -204,6 +227,14 @@ struct ModelCreate {
     #[serde(default)]
     cost_metadata: serde_json::Map<String, Value>,
     latency_class: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelAliasCreate {
+    operation: String,
+    quality_tier: String,
+    model_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +288,7 @@ struct ProviderPatch {
     display_name: Option<String>,
     base_url: Option<String>,
     credential_ref: Option<String>,
+    supported_operations: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -264,9 +296,12 @@ struct ProviderPatch {
 struct ModelPatch {
     version: i64,
     provider_model_id: Option<String>,
+    display_name: Option<String>,
+    description: Option<String>,
     quality_tier: Option<String>,
     context_window: Option<i64>,
     max_output_tokens: Option<i64>,
+    supported_operations: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
     supports_streaming: Option<bool>,
     supports_tools: Option<bool>,
@@ -275,6 +310,15 @@ struct ModelPatch {
     supports_structured_output: Option<bool>,
     cost_metadata: Option<serde_json::Map<String, Value>>,
     latency_class: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelAliasPatch {
+    version: i64,
+    operation: Option<String>,
+    quality_tier: Option<String>,
+    model_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -321,6 +365,9 @@ impl AdminService {
             }
             ResourceKind::Models => {
                 "SELECT to_jsonb(models) FROM models WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
+            }
+            ResourceKind::ModelAliases => {
+                "SELECT to_jsonb(model_aliases) FROM model_aliases WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
             }
             ResourceKind::Policies => {
                 "SELECT to_jsonb(policies) FROM policies WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
@@ -470,11 +517,13 @@ impl AdminService {
             ResourceKind::Providers => {
                 let input: ProviderCreate = decode(payload)?;
                 validate_name(&input.display_name)?;
+                validate_operations(&input.supported_operations)?;
                 let value: Value = sqlx::query_scalar(
                     r#"
                     INSERT INTO providers (
-                        id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        id, tenant_id, provider_key, display_name, provider_type, base_url,
+                        credential_ref, supported_operations
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     RETURNING to_jsonb(providers)
                     "#,
                 )
@@ -485,20 +534,34 @@ impl AdminService {
                 .bind(input.provider_type)
                 .bind(input.base_url)
                 .bind(input.credential_ref)
+                .bind(input.supported_operations)
                 .fetch_one(&mut *transaction)
                 .await?;
                 (value, None)
             }
             ResourceKind::Models => {
                 let input: ModelCreate = decode(payload)?;
+                let display_name = input
+                    .display_name
+                    .unwrap_or_else(|| input.public_model_id.clone());
+                validate_name(&display_name)?;
+                validate_model_fields(
+                    &input.public_model_id,
+                    &input.provider_model_id,
+                    input.description.as_deref(),
+                    input.latency_class.as_deref(),
+                    &input.supported_operations,
+                    &input.cost_metadata,
+                )?;
                 let value: Value = sqlx::query_scalar(
                     r#"
                     INSERT INTO models (
                         id, tenant_id, provider_id, public_model_id, provider_model_id,
-                        quality_tier, context_window, max_output_tokens, capabilities,
+                        display_name, description,
+                        quality_tier, context_window, max_output_tokens, supported_operations, capabilities,
                         supports_streaming, supports_tools, supports_reasoning, supports_images,
                         supports_structured_output, cost_metadata, latency_class
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                     RETURNING to_jsonb(models)
                     "#,
                 )
@@ -507,9 +570,12 @@ impl AdminService {
                 .bind(input.provider_id)
                 .bind(input.public_model_id)
                 .bind(input.provider_model_id)
+                .bind(display_name)
+                .bind(input.description)
                 .bind(input.quality_tier)
                 .bind(input.context_window)
                 .bind(input.max_output_tokens)
+                .bind(input.supported_operations)
                 .bind(json!(input.capabilities))
                 .bind(input.supports_streaming)
                 .bind(input.supports_tools)
@@ -518,6 +584,25 @@ impl AdminService {
                 .bind(input.supports_structured_output)
                 .bind(Value::Object(input.cost_metadata))
                 .bind(input.latency_class)
+                .fetch_one(&mut *transaction)
+                .await?;
+                (value, None)
+            }
+            ResourceKind::ModelAliases => {
+                let input: ModelAliasCreate = decode(payload)?;
+                let value: Value = sqlx::query_scalar(
+                    r#"
+                    INSERT INTO model_aliases (
+                        id, tenant_id, operation, quality_tier, model_id
+                    ) VALUES ($1, $2, $3, $4, $5)
+                    RETURNING to_jsonb(model_aliases)
+                    "#,
+                )
+                .bind(id)
+                .bind(context.tenant_id)
+                .bind(input.operation)
+                .bind(input.quality_tier)
+                .bind(input.model_id)
                 .fetch_one(&mut *transaction)
                 .await?;
                 (value, None)
@@ -713,12 +798,21 @@ impl AdminService {
             }
             ResourceKind::Providers => {
                 let input: ProviderPatch = decode(payload)?;
+                if let Some(display_name) = input.display_name.as_deref() {
+                    validate_name(display_name)?;
+                }
+                if let Some(operations) = input.supported_operations.as_deref() {
+                    validate_operations(operations)?;
+                }
                 sqlx::query_scalar(
                     r#"
                     UPDATE providers
                     SET display_name = COALESCE($4, display_name), base_url = COALESCE($5, base_url),
-                        credential_ref = COALESCE($6, credential_ref), version = version + 1, updated_at = now()
-                    WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft'
+                        credential_ref = COALESCE($6, credential_ref),
+                        supported_operations = COALESCE($7, supported_operations),
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND id = $2 AND version = $3
+                      AND lifecycle_state IN ('draft', 'disabled')
                     RETURNING to_jsonb(providers)
                     "#,
                 )
@@ -728,29 +822,38 @@ impl AdminService {
                 .bind(input.display_name)
                 .bind(input.base_url)
                 .bind(input.credential_ref)
+                .bind(input.supported_operations)
                 .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or(AdminError::Conflict)?
             }
             ResourceKind::Models => {
                 let input: ModelPatch = decode(payload)?;
+                if let Some(display_name) = input.display_name.as_deref() {
+                    validate_name(display_name)?;
+                }
+                validate_optional_model_fields(&input)?;
                 sqlx::query_scalar(
                     r#"
                     UPDATE models SET
                         provider_model_id = COALESCE($4, provider_model_id),
-                        quality_tier = COALESCE($5, quality_tier),
-                        context_window = COALESCE($6, context_window),
-                        max_output_tokens = COALESCE($7, max_output_tokens),
-                        capabilities = COALESCE($8, capabilities),
-                        supports_streaming = COALESCE($9, supports_streaming),
-                        supports_tools = COALESCE($10, supports_tools),
-                        supports_reasoning = COALESCE($11, supports_reasoning),
-                        supports_images = COALESCE($12, supports_images),
-                        supports_structured_output = COALESCE($13, supports_structured_output),
-                        cost_metadata = COALESCE($14, cost_metadata),
-                        latency_class = COALESCE($15, latency_class),
+                        display_name = COALESCE($5, display_name),
+                        description = COALESCE($6, description),
+                        quality_tier = COALESCE($7, quality_tier),
+                        context_window = COALESCE($8, context_window),
+                        max_output_tokens = COALESCE($9, max_output_tokens),
+                        supported_operations = COALESCE($10, supported_operations),
+                        capabilities = COALESCE($11, capabilities),
+                        supports_streaming = COALESCE($12, supports_streaming),
+                        supports_tools = COALESCE($13, supports_tools),
+                        supports_reasoning = COALESCE($14, supports_reasoning),
+                        supports_images = COALESCE($15, supports_images),
+                        supports_structured_output = COALESCE($16, supports_structured_output),
+                        cost_metadata = COALESCE($17, cost_metadata),
+                        latency_class = COALESCE($18, latency_class),
                         version = version + 1, updated_at = now()
-                    WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft'
+                    WHERE tenant_id = $1 AND id = $2 AND version = $3
+                      AND lifecycle_state IN ('draft', 'disabled')
                     RETURNING to_jsonb(models)
                     "#,
                 )
@@ -758,9 +861,12 @@ impl AdminService {
                 .bind(id)
                 .bind(input.version)
                 .bind(input.provider_model_id)
+                .bind(input.display_name)
+                .bind(input.description)
                 .bind(input.quality_tier)
                 .bind(input.context_window)
                 .bind(input.max_output_tokens)
+                .bind(input.supported_operations)
                 .bind(input.capabilities.map(|value| json!(value)))
                 .bind(input.supports_streaming)
                 .bind(input.supports_tools)
@@ -792,6 +898,30 @@ impl AdminService {
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(AdminError::Conflict)?
+            }
+            ResourceKind::ModelAliases => {
+                let input: ModelAliasPatch = decode(payload)?;
+                sqlx::query_scalar(
+                    r#"
+                    UPDATE model_aliases SET
+                        operation = COALESCE($4, operation),
+                        quality_tier = COALESCE($5, quality_tier),
+                        model_id = COALESCE($6, model_id),
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND id = $2 AND version = $3
+                      AND lifecycle_state IN ('draft', 'disabled')
+                    RETURNING to_jsonb(model_aliases)
+                    "#,
+                )
+                .bind(context.tenant_id)
+                .bind(id)
+                .bind(input.version)
+                .bind(input.operation)
+                .bind(input.quality_tier)
+                .bind(input.model_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(AdminError::Conflict)?
             }
         };
         append_audit(
@@ -847,6 +977,7 @@ impl AdminService {
             }
             ResourceKind::Providers
             | ResourceKind::Models
+            | ResourceKind::ModelAliases
             | ResourceKind::Policies
             | ResourceKind::Quotas => {
                 return self
@@ -856,6 +987,205 @@ impl AdminService {
         };
         self.update_resource(context, target, payload, source_ip, peer_ip, request_id)
             .await
+    }
+
+    pub async fn set_registry_lifecycle(
+        &self,
+        context: &AdminContext,
+        target: ResourceTarget,
+        input: LifecycleInput,
+        source_ip: std::net::IpAddr,
+        peer_ip: std::net::IpAddr,
+        request_id: &str,
+    ) -> Result<ResourceMutationOutput, AdminError> {
+        let ResourceTarget { kind, id } = target;
+        if context.role != super::AdminRole::Admin {
+            return Err(AdminError::Forbidden);
+        }
+        if input.version <= 0 || !matches!(input.state.as_str(), "active" | "disabled") {
+            return Err(AdminError::InvalidRequest);
+        }
+        if !matches!(
+            kind,
+            ResourceKind::Providers | ResourceKind::Models | ResourceKind::ModelAliases
+        ) {
+            return Err(AdminError::InvalidRequest);
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(context.tenant_id)
+            .execute(&mut *transaction)
+            .await?;
+        let before = self
+            .lock_resource(&mut transaction, context, kind, id)
+            .await?;
+        let cascaded_before = if input.state == "disabled" {
+            load_registry_cascade(&mut transaction, context.tenant_id, kind, id).await?
+        } else if kind == ResourceKind::ModelAliases {
+            load_alias_replacement(&mut transaction, context.tenant_id, id).await?
+        } else {
+            Vec::new()
+        };
+        if kind == ResourceKind::Providers && input.state == "active" {
+            let operations = before["supported_operations"]
+                .as_array()
+                .ok_or(AdminError::InvalidRequest)?
+                .iter()
+                .map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(AdminError::InvalidRequest)?;
+            let trusted = self.provider_profiles.as_ref().is_some_and(|profiles| {
+                profiles.validates(
+                    context.tenant_id,
+                    before["credential_ref"].as_str().unwrap_or_default(),
+                    before["provider_key"].as_str().unwrap_or_default(),
+                    before["base_url"].as_str().unwrap_or_default(),
+                    &operations,
+                )
+            });
+            if !trusted {
+                return Err(AdminError::InvalidRequest);
+            }
+        }
+        if kind == ResourceKind::ModelAliases && input.state == "active" {
+            sqlx::query(
+                r#"
+                UPDATE model_aliases SET lifecycle_state = 'disabled',
+                    version = version + 1, updated_at = now()
+                WHERE tenant_id = $1
+                  AND operation = $2 AND quality_tier = $3
+                  AND id <> $4 AND lifecycle_state = 'active'
+                "#,
+            )
+            .bind(context.tenant_id)
+            .bind(
+                before["operation"]
+                    .as_str()
+                    .ok_or(AdminError::InvalidRequest)?,
+            )
+            .bind(
+                before["quality_tier"]
+                    .as_str()
+                    .ok_or(AdminError::InvalidRequest)?,
+            )
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let statement = match (kind, input.state.as_str()) {
+            (ResourceKind::Providers, "active") => {
+                "UPDATE providers SET lifecycle_state = 'active', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(providers)"
+            }
+            (ResourceKind::Providers, "disabled") => {
+                r#"
+                WITH disabled_aliases AS (
+                    UPDATE model_aliases a SET lifecycle_state = 'disabled',
+                        version = a.version + 1, updated_at = now()
+                    FROM models m
+                    WHERE (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+                      AND m.tenant_id = $1 AND m.provider_id = $2
+                      AND a.lifecycle_state = 'active'
+                ), disabled_models AS (
+                    UPDATE models SET lifecycle_state = 'disabled',
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND provider_id = $2 AND lifecycle_state = 'active'
+                )
+                UPDATE providers SET lifecycle_state = 'disabled',
+                    version = version + 1, updated_at = now()
+                WHERE tenant_id = $1 AND id = $2 AND version = $3
+                  AND lifecycle_state = 'active'
+                RETURNING to_jsonb(providers)
+                "#
+            }
+            (ResourceKind::Models, "active") => {
+                r#"
+                UPDATE models m SET lifecycle_state = 'active',
+                    version = m.version + 1, updated_at = now()
+                FROM providers p
+                WHERE (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+                  AND m.tenant_id = $1 AND m.id = $2 AND m.version = $3
+                  AND m.lifecycle_state IN ('draft', 'disabled')
+                  AND p.lifecycle_state = 'active'
+                  AND valid_gateway_operations(m.supported_operations)
+                  AND m.supported_operations <@ p.supported_operations
+                RETURNING to_jsonb(m)
+                "#
+            }
+            (ResourceKind::Models, "disabled") => {
+                r#"
+                WITH disabled_aliases AS (
+                    UPDATE model_aliases SET lifecycle_state = 'disabled',
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND model_id = $2 AND lifecycle_state = 'active'
+                )
+                UPDATE models SET lifecycle_state = 'disabled',
+                    version = version + 1, updated_at = now()
+                WHERE tenant_id = $1 AND id = $2 AND version = $3
+                  AND lifecycle_state = 'active'
+                RETURNING to_jsonb(models)
+                "#
+            }
+            (ResourceKind::ModelAliases, "active") => {
+                r#"
+                UPDATE model_aliases a SET lifecycle_state = 'active',
+                    version = a.version + 1, updated_at = now()
+                FROM models m
+                JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+                WHERE (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+                  AND a.tenant_id = $1 AND a.id = $2 AND a.version = $3
+                  AND a.lifecycle_state IN ('draft', 'disabled')
+                  AND m.lifecycle_state = 'active' AND p.lifecycle_state = 'active'
+                  AND a.operation = ANY(p.supported_operations)
+                  AND a.operation = ANY(m.supported_operations)
+                RETURNING to_jsonb(a)
+                "#
+            }
+            (ResourceKind::ModelAliases, "disabled") => {
+                "UPDATE model_aliases SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(model_aliases)"
+            }
+            _ => return Err(AdminError::InvalidRequest),
+        };
+        let after: Value = sqlx::query_scalar(statement)
+            .bind(context.tenant_id)
+            .bind(id)
+            .bind(input.version)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_conflict)?
+            .ok_or(AdminError::Conflict)?;
+        append_registry_cascade_audits(
+            &mut transaction,
+            context,
+            &cascaded_before,
+            source_ip,
+            peer_ip,
+            request_id,
+        )
+        .await?;
+        append_audit(
+            &mut transaction,
+            AuditEntry {
+                tenant_id: context.tenant_id,
+                actor_id: context.account_id,
+                role: context.role,
+                action: &format!("admin.{}.{}", kind.singular(), input.state),
+                target_type: kind.singular(),
+                target_id: Some(id),
+                before: Some(before),
+                after: Some(after.clone()),
+                source_ip,
+                peer_ip,
+                request_id,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ResourceMutationOutput {
+            resource: after,
+            secret: None,
+        })
     }
 
     pub async fn rotate_credential(
@@ -1019,10 +1349,13 @@ impl AdminService {
             .await?;
         let statement = match kind {
             ResourceKind::Providers => {
-                "UPDATE providers SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(providers)"
+                "UPDATE providers SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(providers)"
             }
             ResourceKind::Models => {
-                "UPDATE models SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(models)"
+                "UPDATE models SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(models)"
+            }
+            ResourceKind::ModelAliases => {
+                "UPDATE model_aliases SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(model_aliases)"
             }
             ResourceKind::Policies => {
                 "UPDATE policies SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'draft' RETURNING to_jsonb(policies)"
@@ -1068,18 +1401,195 @@ fn decode<T: DeserializeOwned>(payload: Value) -> Result<T, AdminError> {
     serde_json::from_value(payload).map_err(|_| AdminError::InvalidRequest)
 }
 
+fn validate_operations(operations: &[String]) -> Result<(), AdminError> {
+    if operations.is_empty()
+        || operations
+            .iter()
+            .any(|operation| GatewayOperation::parse(operation).is_none())
+    {
+        return Err(AdminError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_model_fields(
+    public_model_id: &str,
+    provider_model_id: &str,
+    description: Option<&str>,
+    latency_class: Option<&str>,
+    operations: &[String],
+    cost_metadata: &serde_json::Map<String, Value>,
+) -> Result<(), AdminError> {
+    if public_model_id.trim() != public_model_id
+        || provider_model_id.trim() != provider_model_id
+        || public_model_id.is_empty()
+        || provider_model_id.is_empty()
+        || public_model_id.len() > 255
+        || provider_model_id.len() > 255
+        || public_model_id.starts_with("quality:")
+        || description.is_some_and(|value| value.trim().is_empty() || value.len() > 1024)
+        || latency_class.is_some_and(|value| value.len() > 64)
+        || serde_json::to_vec(cost_metadata).map_or(true, |value| value.len() > 4096)
+    {
+        return Err(AdminError::InvalidRequest);
+    }
+    validate_operations(operations)
+}
+
+fn validate_optional_model_fields(input: &ModelPatch) -> Result<(), AdminError> {
+    if input
+        .provider_model_id
+        .as_deref()
+        .is_some_and(|value| value.trim() != value || value.is_empty() || value.len() > 255)
+        || input
+            .description
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 1024)
+        || input
+            .latency_class
+            .as_deref()
+            .is_some_and(|value| value.len() > 64)
+        || input
+            .cost_metadata
+            .as_ref()
+            .is_some_and(|value| serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > 4096))
+    {
+        return Err(AdminError::InvalidRequest);
+    }
+    if let Some(operations) = input.supported_operations.as_deref() {
+        validate_operations(operations)?;
+    }
+    Ok(())
+}
+
+async fn load_registry_cascade(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    kind: ResourceKind,
+    id: Uuid,
+) -> Result<Vec<Value>, AdminError> {
+    if !matches!(kind, ResourceKind::Providers | ResourceKind::Models) {
+        return Ok(Vec::new());
+    }
+    let rows: Value = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(jsonb_agg(item ORDER BY item->>'target_type', item->>'id'), '[]'::jsonb)
+        FROM (
+            SELECT jsonb_build_object('target_type', 'model', 'id', m.id, 'before', to_jsonb(m)) AS item
+            FROM models m
+            WHERE $2 = 'provider' AND m.tenant_id = $1 AND m.provider_id = $3
+              AND m.lifecycle_state = 'active'
+            UNION ALL
+            SELECT jsonb_build_object('target_type', 'model_alias', 'id', a.id, 'before', to_jsonb(a))
+            FROM model_aliases a
+            JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+            WHERE a.tenant_id = $1 AND a.lifecycle_state = 'active'
+              AND (($2 = 'provider' AND m.provider_id = $3) OR ($2 = 'model' AND m.id = $3))
+        ) cascade_rows
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(kind.singular())
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(rows.as_array().cloned().unwrap_or_default())
+}
+
+async fn load_alias_replacement(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Vec<Value>, AdminError> {
+    let rows: Value = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'target_type', 'model_alias', 'id', current.id, 'before', to_jsonb(current)
+        )), '[]'::jsonb)
+        FROM model_aliases target
+        JOIN model_aliases current
+          ON current.tenant_id = target.tenant_id
+         AND current.operation = target.operation
+         AND current.quality_tier = target.quality_tier
+         AND current.id <> target.id
+        WHERE target.tenant_id = $1 AND target.id = $2
+          AND current.lifecycle_state = 'active'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(rows.as_array().cloned().unwrap_or_default())
+}
+
+async fn append_registry_cascade_audits(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &AdminContext,
+    cascaded: &[Value],
+    source_ip: std::net::IpAddr,
+    peer_ip: std::net::IpAddr,
+    request_id: &str,
+) -> Result<(), AdminError> {
+    if cascaded.is_empty() {
+        return Ok(());
+    }
+    let audit_ids = (0..cascaded.len())
+        .map(|_| Uuid::new_v4())
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        WITH ids AS (
+            SELECT id, ordinal FROM unnest($1::uuid[]) WITH ORDINALITY AS value(id, ordinal)
+        ), entries AS (
+            SELECT value, ordinal
+            FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS item(value, ordinal)
+        )
+        INSERT INTO audit_logs (
+            id, tenant_id, actor_admin_id, actor_role, action, target_type,
+            target_id, before_state, after_state, occurred_at, source_ip, peer_ip, request_id
+        )
+        SELECT ids.id, $3, $4, $5,
+               'admin.' || (entries.value->>'target_type') || '.disabled',
+               entries.value->>'target_type', (entries.value->>'id')::uuid,
+               entries.value->'before',
+               (entries.value->'before') || jsonb_build_object(
+                   'lifecycle_state', 'disabled',
+                   'version', ((entries.value->'before'->>'version')::bigint + 1)
+               ),
+               now(), $6::inet, $7::inet, $8
+        FROM entries JOIN ids USING (ordinal)
+        "#,
+    )
+    .bind(audit_ids)
+    .bind(Value::Array(cascaded.to_vec()))
+    .bind(context.tenant_id)
+    .bind(context.account_id)
+    .bind(context.role.as_str())
+    .bind(source_ip.to_string())
+    .bind(peer_ip.to_string())
+    .bind(request_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, str::FromStr as _, time::Duration};
+    use std::{net::IpAddr, str::FromStr as _, sync::Arc, time::Duration};
 
     use serde_json::json;
     use sqlx::{PgPool, Row as _};
     use uuid::Uuid;
 
-    use super::{ListQuery, ResourceKind, ResourceTarget, RotateCredentialInput};
+    use super::{
+        LifecycleInput, ListQuery, ResourceKind, ResourceTarget, RotateCredentialInput,
+        validate_model_fields,
+    };
     use crate::{
         admin::{AdminContext, AdminError, AdminRole, AdminService, AdminServiceConfig},
         identity::{CredentialService, IdentityError},
+        model_registry::{GatewayOperation, ProviderProfile, ProviderProfiles},
     };
 
     fn service(pool: PgPool) -> AdminService {
@@ -1107,8 +1617,62 @@ mod tests {
         )
     }
 
+    fn provider_profiles(tenant_id: Uuid) -> ProviderProfiles {
+        ProviderProfiles::new([ProviderProfile::bearer(
+            "env://PROVIDER_ONE_KEY",
+            "provider-one",
+            "https://provider.example",
+            vec![GatewayOperation::OpenAiResponses],
+            vec![tenant_id],
+            Arc::<str>::from("server-secret"),
+        )])
+        .unwrap()
+    }
+
     fn id(output: &crate::admin::ResourceMutationOutput) -> Uuid {
         Uuid::parse_str(output.resource["id"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn model_metadata_is_bounded_and_selector_namespace_is_reserved() {
+        let operations = vec!["openai_responses".to_owned()];
+        assert!(
+            validate_model_fields(
+                "company-model",
+                "provider-model",
+                Some("description"),
+                Some("standard"),
+                &operations,
+                &serde_json::Map::new(),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_model_fields(
+                "quality:gold",
+                "provider-model",
+                None,
+                None,
+                &operations,
+                &serde_json::Map::new(),
+            )
+            .is_err()
+        );
+        let oversized = serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+            json!({"price": "x".repeat(4097)}),
+        )
+        .unwrap();
+        assert!(
+            validate_model_fields(
+                "company-model",
+                "provider-model",
+                None,
+                None,
+                &operations,
+                &oversized,
+            )
+            .is_err()
+        );
     }
 
     #[sqlx::test]
@@ -1227,7 +1791,8 @@ mod tests {
                     "display_name": "OpenAI primary",
                     "provider_type": "openai",
                     "base_url": "https://api.openai.com",
-                    "credential_ref": "env://OPENAI_PRIMARY_KEY"
+                    "credential_ref": "env://OPENAI_PRIMARY_KEY",
+                    "supported_operations": ["openai_responses"]
                 }),
                 source,
                 source,
@@ -1243,7 +1808,8 @@ mod tests {
                 json!({
                     "provider_id": provider_id,
                     "public_model_id": "company-default",
-                    "provider_model_id": "provider-model"
+                    "provider_model_id": "provider-model",
+                    "supported_operations": ["openai_responses"]
                 }),
                 source,
                 source,
@@ -1472,6 +2038,310 @@ mod tests {
         .unwrap()
         .get("count");
         assert_eq!(audit_count, 19);
+    }
+
+    #[sqlx::test]
+    async fn registry_lifecycle_is_trusted_tenant_safe_and_cascading(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'admin', 'admin')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let other_tenant = AdminContext {
+            tenant_id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool.clone()).with_provider_profiles(provider_profiles(tenant_id));
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+
+        let provider = service
+            .create_resource(
+                &context,
+                ResourceKind::Providers,
+                json!({
+                    "provider_key": "provider-one",
+                    "display_name": "Provider One",
+                    "provider_type": "openai",
+                    "base_url": "https://provider.example",
+                    "credential_ref": "env://PROVIDER_ONE_KEY",
+                    "supported_operations": ["openai_responses"]
+                }),
+                source,
+                source,
+                "create-provider",
+            )
+            .await
+            .unwrap();
+        let provider_id = id(&provider);
+        let model = service
+            .create_resource(
+                &context,
+                ResourceKind::Models,
+                json!({
+                    "provider_id": provider_id,
+                    "public_model_id": "company-model",
+                    "provider_model_id": "provider-model",
+                    "display_name": "Company Model",
+                    "supported_operations": ["openai_responses"],
+                    "supports_streaming": true
+                }),
+                source,
+                source,
+                "create-model",
+            )
+            .await
+            .unwrap();
+        let model_id = id(&model);
+        let alias = service
+            .create_resource(
+                &context,
+                ResourceKind::ModelAliases,
+                json!({
+                    "operation": "openai_responses",
+                    "quality_tier": "premium",
+                    "model_id": model_id
+                }),
+                source,
+                source,
+                "create-alias",
+            )
+            .await
+            .unwrap();
+        let alias_id = id(&alias);
+
+        assert!(matches!(
+            service
+                .set_registry_lifecycle(
+                    &context,
+                    ResourceTarget::new(ResourceKind::Models, model_id),
+                    LifecycleInput {
+                        version: 1,
+                        state: "active".to_owned()
+                    },
+                    source,
+                    source,
+                    "activate-too-early",
+                )
+                .await,
+            Err(AdminError::Conflict)
+        ));
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Providers, provider_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-provider",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Models, model_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-model",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::ModelAliases, alias_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-alias",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .set_registry_lifecycle(
+                    &other_tenant,
+                    ResourceTarget::new(ResourceKind::Providers, provider_id),
+                    LifecycleInput {
+                        version: 2,
+                        state: "disabled".to_owned()
+                    },
+                    source,
+                    source,
+                    "cross-tenant-disable",
+                )
+                .await,
+            Err(AdminError::NotFound)
+        ));
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Providers, provider_id),
+                LifecycleInput {
+                    version: 2,
+                    state: "disabled".to_owned(),
+                },
+                source,
+                source,
+                "disable-provider",
+            )
+            .await
+            .unwrap();
+
+        let states: (String, String, String) = sqlx::query_as(
+            r#"
+            SELECT p.lifecycle_state, m.lifecycle_state, a.lifecycle_state
+            FROM providers p
+            JOIN models m ON (m.tenant_id, m.provider_id) = (p.tenant_id, p.id)
+            JOIN model_aliases a ON (a.tenant_id, a.model_id) = (m.tenant_id, m.id)
+            WHERE p.tenant_id = $1 AND p.id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(provider_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            states,
+            (
+                "disabled".to_owned(),
+                "disabled".to_owned(),
+                "disabled".to_owned()
+            )
+        );
+        let cascade_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND action IN ('admin.model.disabled', 'admin.model_alias.disabled')",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(cascade_audits, 2);
+
+        let provider = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Providers, provider_id),
+                json!({"version": 3, "display_name": "Provider One repaired"}),
+                source,
+                source,
+                "repair-provider",
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.resource["version"], 4);
+        let model = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Models, model_id),
+                json!({"version": 3, "provider_model_id": "provider-model-v2"}),
+                source,
+                source,
+                "repair-model",
+            )
+            .await
+            .unwrap();
+        assert_eq!(model.resource["version"], 4);
+
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Providers, provider_id),
+                LifecycleInput {
+                    version: 4,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "reactivate-provider",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Models, model_id),
+                LifecycleInput {
+                    version: 4,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "reactivate-model",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::ModelAliases, alias_id),
+                LifecycleInput {
+                    version: 3,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "reactivate-alias",
+            )
+            .await
+            .unwrap();
+        let replacement = service
+            .create_resource(
+                &context,
+                ResourceKind::ModelAliases,
+                json!({"operation": "openai_responses", "quality_tier": "premium", "model_id": model_id}),
+                source,
+                source,
+                "create-replacement-alias",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::ModelAliases, id(&replacement)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "swap-alias",
+            )
+            .await
+            .unwrap();
+        let active_aliases: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM model_aliases WHERE tenant_id = $1 AND operation = 'openai_responses' AND quality_tier = 'premium' AND lifecycle_state = 'active'",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_aliases, 1);
     }
 
     #[sqlx::test]

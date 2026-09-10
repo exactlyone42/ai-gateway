@@ -31,6 +31,8 @@ directly. Others use a small, explicit adapter:
 
 Exact compatibility is tracked in `docs/client-compatibility.md`; product
 capabilities can change and must be verified before declaring support.
+Model registry administration and lifecycle ordering are documented in
+`docs/model-registry.md`.
 
 ## Current milestone
 
@@ -39,12 +41,12 @@ The repository contains the native Anthropic and OpenAI data-plane slice:
 - `GET /healthz`
 - `POST /v1/messages` and `/v1/messages/count_tokens`
 - `POST /v1/responses` and `/v1/chat/completions`, including incremental SSE
-- `GET /v1/models` from the configured model allowlist
+- tenant-scoped `GET /v1/models` and deterministic routing from the active PostgreSQL registry
 - tenant-scoped virtual credentials with constant-time HMAC verification
 - cancellation propagation, durable usage accounting, request IDs, traces,
   metrics, and structured JSON logs
 
-An explicitly configured bootstrap key remains a dev-only compatibility path. Issued virtual
+An explicitly configured bootstrap key and `ALLOWED_MODELS` remain a dev-only compatibility path. Issued virtual
 credentials resolve through PostgreSQL to a user, device, client and agent.
 
 The work from here is split into 18 independently reviewable segments. Read

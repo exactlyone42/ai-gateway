@@ -73,6 +73,7 @@ env \
   LISTEN_ADDRESS="127.0.0.1:$gateway_port" \
   DATABASE_URL="$database_url" \
   DATABASE_MAX_CONNECTIONS=2 \
+  ADMIN_DATABASE_MAX_CONNECTIONS=1 \
   OPENAI_BASE_URL="http://127.0.0.1:$mock_port" \
   OPENAI_API_KEY=fixture-provider-key \
   ANTHROPIC_BASE_URL="http://127.0.0.1:$mock_port" \
@@ -133,6 +134,13 @@ if [ "$mode" = all ] || [ "$mode" = codex ]; then
       "Reply with exactly W06_CODEX_OK and nothing else." \
       >"$runtime/codex.out" 2>"$runtime/codex.err"
   grep -Fxq 'W06_CODEX_OK' "$runtime/codex.out"
+  grep -Fq 'Model metadata for' "$runtime/codex.err"
+  grep -Fq 'company-default' "$runtime/codex.err"
+  grep -Fq 'Defaulting to fallback metadata' "$runtime/codex.err"
+  if grep -Fq '/v1/models' "$runtime/gateway.log"; then
+    echo "Codex 0.153.0 unexpectedly called gateway model discovery; update the contract" >&2
+    exit 1
+  fi
   diff -u \
     "$root/tests/fixtures/client-roundtrip/captures/codex-cli-0.153.0.json" \
     "$runtime/captures/codex-cli.json"

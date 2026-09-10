@@ -68,8 +68,23 @@ pub struct RequestStart {
     pub quality: Option<String>,
     pub budget_class: Option<String>,
     pub estimated_tokens: Option<i64>,
+    pub selection: Option<ModelSelectionSnapshot>,
     pub principal: PrincipalContext,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ModelSelectionSnapshot {
+    pub selector_kind: String,
+    pub selector_value: String,
+    pub alias_id: Option<Uuid>,
+    pub alias_version: Option<i64>,
+    pub model_id: Uuid,
+    pub model_version: i64,
+    pub provider_id: Uuid,
+    pub provider_version: i64,
+    pub provider_model_id: String,
+    pub cost_metadata: Value,
 }
 
 #[derive(Clone)]
@@ -95,6 +110,7 @@ pub struct ProviderAttempt {
     error_type: Option<String>,
     estimated_usage: TokenUsage,
     actual_usage: TokenUsage,
+    selection: Option<ModelSelectionSnapshot>,
 }
 
 pub struct CompletedAttempt {
@@ -171,6 +187,26 @@ struct RequestRecord {
     gateway_overhead_ms: Option<i64>,
     #[serde(default)]
     queue_duration_ms: Option<i64>,
+    #[serde(default)]
+    selector_kind: Option<String>,
+    #[serde(default)]
+    selector_value: Option<String>,
+    #[serde(default)]
+    selected_alias_id: Option<Uuid>,
+    #[serde(default)]
+    selected_alias_version: Option<i64>,
+    #[serde(default)]
+    selected_model_id: Option<Uuid>,
+    #[serde(default)]
+    selected_model_version: Option<i64>,
+    #[serde(default)]
+    selected_provider_id: Option<Uuid>,
+    #[serde(default)]
+    selected_provider_version: Option<i64>,
+    #[serde(default)]
+    selected_provider_model_id: Option<String>,
+    #[serde(default)]
+    selected_cost_metadata: Option<Value>,
     status: String,
     created_at: DateTime<Utc>,
     started_at: DateTime<Utc>,
@@ -200,6 +236,18 @@ struct AttemptRecord {
     error_type: Option<String>,
     estimated_usage: TokenUsage,
     actual_usage: TokenUsage,
+    #[serde(default)]
+    provider_id: Option<Uuid>,
+    #[serde(default)]
+    provider_version: Option<i64>,
+    #[serde(default)]
+    model_id: Option<Uuid>,
+    #[serde(default)]
+    model_version: Option<i64>,
+    #[serde(default)]
+    provider_model_id: Option<String>,
+    #[serde(default)]
+    cost_metadata: Option<Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -369,6 +417,20 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn annotate_selection(&mut self, selection: &ModelSelectionSnapshot) {
+        self.envelope.request.selector_kind = Some(selection.selector_kind.clone());
+        self.envelope.request.selector_value = Some(selection.selector_value.clone());
+        self.envelope.request.selected_alias_id = selection.alias_id;
+        self.envelope.request.selected_alias_version = selection.alias_version;
+        self.envelope.request.selected_model_id = Some(selection.model_id);
+        self.envelope.request.selected_model_version = Some(selection.model_version);
+        self.envelope.request.selected_provider_id = Some(selection.provider_id);
+        self.envelope.request.selected_provider_version = Some(selection.provider_version);
+        self.envelope.request.selected_provider_model_id =
+            Some(selection.provider_model_id.clone());
+        self.envelope.request.selected_cost_metadata = Some(selection.cost_metadata.clone());
+    }
+
     pub fn annotate_protocol(
         &mut self,
         operation: &str,
@@ -480,7 +542,13 @@ impl ProviderAttempt {
             error_type: Some("cancelled".to_owned()),
             estimated_usage,
             actual_usage: TokenUsage::default(),
+            selection: None,
         }
+    }
+
+    pub fn with_selection(mut self, selection: Option<ModelSelectionSnapshot>) -> Self {
+        self.selection = selection;
+        self
     }
 
     pub fn observe_first_byte(&mut self, at: DateTime<Utc>) {
@@ -519,6 +587,7 @@ impl ProviderAttempt {
             error_type: bounded(attempt.error_type),
             estimated_usage: TokenUsage::default(),
             actual_usage: TokenUsage::from_response(response_body),
+            selection: None,
         }
     }
 
@@ -542,6 +611,7 @@ impl ProviderAttempt {
             error_type: Some(bounded_text(error_type)),
             estimated_usage: TokenUsage::default(),
             actual_usage: TokenUsage::default(),
+            selection: None,
         }
     }
 }
@@ -623,6 +693,7 @@ impl RequestEnvelope {
         let request_id = Uuid::new_v4();
         let credential_id =
             (start.principal.credential_id != Uuid::nil()).then_some(start.principal.credential_id);
+        let selection = start.selection;
         Self {
             schema_version: SCHEMA_VERSION,
             request: RequestRecord {
@@ -654,6 +725,18 @@ impl RequestEnvelope {
                 total_latency_ms: None,
                 gateway_overhead_ms: None,
                 queue_duration_ms: None,
+                selector_kind: selection.as_ref().map(|value| value.selector_kind.clone()),
+                selector_value: selection.as_ref().map(|value| value.selector_value.clone()),
+                selected_alias_id: selection.as_ref().and_then(|value| value.alias_id),
+                selected_alias_version: selection.as_ref().and_then(|value| value.alias_version),
+                selected_model_id: selection.as_ref().map(|value| value.model_id),
+                selected_model_version: selection.as_ref().map(|value| value.model_version),
+                selected_provider_id: selection.as_ref().map(|value| value.provider_id),
+                selected_provider_version: selection.as_ref().map(|value| value.provider_version),
+                selected_provider_model_id: selection
+                    .as_ref()
+                    .map(|value| value.provider_model_id.clone()),
+                selected_cost_metadata: selection.map(|value| value.cost_metadata),
                 status: "interrupted".to_owned(),
                 created_at: start.created_at,
                 started_at: start.created_at,
@@ -698,6 +781,21 @@ impl RequestEnvelope {
                 error_type: attempt.error_type,
                 estimated_usage: attempt.estimated_usage,
                 actual_usage: attempt.actual_usage,
+                provider_id: attempt.selection.as_ref().map(|value| value.provider_id),
+                provider_version: attempt
+                    .selection
+                    .as_ref()
+                    .map(|value| value.provider_version),
+                model_id: attempt.selection.as_ref().map(|value| value.model_id),
+                model_version: attempt.selection.as_ref().map(|value| value.model_version),
+                provider_model_id: attempt
+                    .selection
+                    .as_ref()
+                    .map(|value| value.provider_model_id.clone()),
+                cost_metadata: attempt
+                    .selection
+                    .as_ref()
+                    .map(|value| value.cost_metadata.clone()),
             })
             .collect();
 
@@ -1226,6 +1324,45 @@ mod tests {
     }
 
     #[test]
+    fn initial_reservation_durably_contains_the_registry_selection() {
+        let directory = test_directory("initial-selection");
+        let spool = Spool::open(directory.clone(), 96 * 1024, 32 * 1024).unwrap();
+        let model_id = Uuid::new_v4();
+        let provider_id = Uuid::new_v4();
+        let mut start = request_start("durable-selection");
+        start.selection = Some(ModelSelectionSnapshot {
+            selector_kind: "quality".to_owned(),
+            selector_value: "premium".to_owned(),
+            alias_id: Some(Uuid::new_v4()),
+            alias_version: Some(2),
+            model_id,
+            model_version: 3,
+            provider_id,
+            provider_version: 4,
+            provider_model_id: "provider-model".to_owned(),
+            cost_metadata: serde_json::json!({"input_microusd": 2}),
+        });
+        let envelope = RequestEnvelope::started(start);
+        spool.reserve(envelope.request.id, &envelope).unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(directory.clone(), 96 * 1024, 32 * 1024).unwrap();
+        let ready = reopened.ready().unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].1.request.selected_model_id, Some(model_id));
+        assert_eq!(ready[0].1.request.selected_provider_id, Some(provider_id));
+        assert_eq!(
+            ready[0].1.request.selected_provider_model_id.as_deref(),
+            Some("provider-model")
+        );
+        assert_eq!(
+            ready[0].1.request.selected_cost_metadata.as_ref().unwrap()["input_microusd"],
+            2
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn startup_prefers_a_complete_stream_checkpoint() {
         let directory = test_directory("stream-checkpoint");
         let spool = Spool::open(
@@ -1634,6 +1771,11 @@ mod tests {
         )
         .unwrap();
         let long = "x".repeat(2048);
+        let bounded_registry_id = "m".repeat(255);
+        let bounded_cost_metadata = serde_json::json!({
+            "padding": "c".repeat(4082)
+        });
+        assert!(serde_json::to_vec(&bounded_cost_metadata).unwrap().len() <= 4096);
         let mut envelope = RequestEnvelope::started(RequestStart {
             request_id: long.clone(),
             session_id: Some(long.clone()),
@@ -1644,6 +1786,18 @@ mod tests {
             quality: Some(long.clone()),
             budget_class: Some(long.clone()),
             estimated_tokens: Some(i64::MAX),
+            selection: Some(ModelSelectionSnapshot {
+                selector_kind: "quality".to_owned(),
+                selector_value: "premium".to_owned(),
+                alias_id: Some(Uuid::new_v4()),
+                alias_version: Some(i64::MAX),
+                model_id: Uuid::new_v4(),
+                model_version: i64::MAX,
+                provider_id: Uuid::new_v4(),
+                provider_version: i64::MAX,
+                provider_model_id: bounded_registry_id,
+                cost_metadata: bounded_cost_metadata,
+            }),
             principal: PrincipalContext::bootstrap(),
             created_at: Utc::now(),
         });
@@ -1682,6 +1836,7 @@ mod tests {
             quality: None,
             budget_class: None,
             estimated_tokens: None,
+            selection: None,
             principal: PrincipalContext::bootstrap(),
             created_at: Utc::now(),
         }

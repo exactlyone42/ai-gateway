@@ -11,13 +11,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let traces = logging::init(config.otlp_endpoint.as_deref());
     let meters = metrics::init(config.otlp_endpoint.as_deref());
-    if !config.allowed_models.iter().any(|model| {
-        let model = model.to_ascii_lowercase();
-        model.contains("claude") || model.contains("anthropic")
-    }) {
+    if config.credential_environment == "dev"
+        && !config.allowed_models.iter().any(|model| {
+            let model = model.to_ascii_lowercase();
+            model.contains("claude") || model.contains("anthropic")
+        })
+    {
         tracing::warn!(
             error.type = "anthropic_model_not_discoverable",
-            "configured model ids contain neither claude nor anthropic; Claude Code discovery may show no models"
+            "development model ids contain neither claude nor anthropic; Claude Code discovery may show no models"
         );
     }
     let address = config.listen_address;

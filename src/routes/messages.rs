@@ -17,6 +17,9 @@ use crate::{
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::{REQUEST_ID_HEADER, RequestReceivedAt},
+    model_registry::{
+        CapabilityRequirements, GatewayOperation, ModelSelector, parse_request, rewrite_model,
+    },
     routes::{BodyBytes, body_bytes},
     services::{anthropic, sse::MetadataParser, streaming},
     state::AppState,
@@ -37,6 +40,13 @@ impl Operation {
         match self {
             Self::Messages => "messages",
             Self::CountTokens => "count_tokens",
+        }
+    }
+
+    fn gateway(self) -> GatewayOperation {
+        match self {
+            Self::Messages => GatewayOperation::AnthropicMessages,
+            Self::CountTokens => GatewayOperation::AnthropicCountTokens,
         }
     }
 }
@@ -92,17 +102,36 @@ async fn proxy(
     body: Bytes,
     operation: Operation,
 ) -> Result<Response, GatewayError> {
-    let metadata: Value = serde_json::from_slice(&body).map_err(GatewayError::InvalidRequest)?;
-    ensure_model_allowed(&state, &metadata)?;
-    let model = metadata
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let is_stream = matches!(operation, Operation::Messages)
-        && metadata.get("stream").and_then(Value::as_bool) == Some(true);
+    let mut metadata = parse_request(&body).map_err(GatewayError::InvalidRequest)?;
+    let gateway_operation = operation.gateway();
+    let selector = ModelSelector::parse(
+        metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )?;
+    let required = CapabilityRequirements::from_request(gateway_operation, &metadata);
+    let selection = state
+        .models
+        .select(
+            principal.tenant_id,
+            principal.is_development_bootstrap(),
+            gateway_operation,
+            selector,
+            required,
+        )
+        .await?;
+    let requested_model = selection.selector.requested_value();
+    let quality = selection.selector.quality().map(ToOwned::to_owned);
+    let model = selection.public_model_id.clone();
+    let provider_model = selection.provider_model_id.clone();
+    let provider = selection.provider_key.clone();
+    let profile = selection.profile.clone();
+    let selection_snapshot = selection.ledger_snapshot();
+    let body = Bytes::from(rewrite_model(&body, &mut metadata, &provider_model)?);
+    let is_stream = matches!(operation, Operation::Messages) && required.streaming;
     let estimated = matches!(operation, Operation::Messages).then(|| TokenUsage {
-        input_tokens: u64::try_from(body.len().div_ceil(4)).unwrap_or(u64::MAX),
+        input_tokens: estimate_input_tokens(body.len()),
         ..TokenUsage::default()
     });
     let trace_id = match logging::current_trace_ids().0 {
@@ -116,14 +145,15 @@ async fn proxy(
             session_id: header_text(&headers, "x-claude-code-session-id")
                 .or_else(|| header_text(&headers, "x-session-id")),
             trace_id,
-            requested_model: Some(model.clone()),
+            requested_model: Some(requested_model),
             workload_class: None,
             urgency: None,
-            quality: None,
+            quality,
             budget_class: None,
             estimated_tokens: estimated
                 .as_ref()
                 .map(|usage| i64::try_from(usage.input_tokens).unwrap_or(i64::MAX)),
+            selection: selection_snapshot.clone(),
             principal,
             created_at: received_at,
         })
@@ -133,9 +163,17 @@ async fn proxy(
         header_text(&headers, "x-claude-code-agent-id"),
         header_text(&headers, "x-claude-code-parent-agent-id"),
     );
-
     let provider_request_at = Utc::now();
-    let upstream = match anthropic::forward(&state, path_and_query, &headers, body).await {
+    let upstream = match anthropic::forward(
+        &state,
+        path_and_query,
+        &headers,
+        body,
+        &profile,
+        &provider_model,
+    )
+    .await
+    {
         Ok(value) => value,
         Err(error) => {
             let completed_at = Utc::now();
@@ -143,14 +181,17 @@ async fn proxy(
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
-                    selected_provider: Some(state.config.anthropic_provider.clone()),
-                    attempts: vec![ProviderAttempt::failed(
-                        state.config.anthropic_provider.clone(),
-                        model,
-                        provider_request_at,
-                        completed_at,
-                        error.kind().to_owned(),
-                    )],
+                    selected_provider: Some(provider.clone()),
+                    attempts: vec![
+                        ProviderAttempt::failed(
+                            provider,
+                            provider_model,
+                            provider_request_at,
+                            completed_at,
+                            error.kind().to_owned(),
+                        )
+                        .with_selection(selection_snapshot.clone()),
+                    ],
                     completed_at,
                 })
                 .await?;
@@ -166,12 +207,13 @@ async fn proxy(
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     let attempt = ProviderAttempt::begin(
-        state.config.anthropic_provider.clone(),
-        model.clone(),
+        provider.clone(),
+        provider_model,
         provider_request_id,
         provider_request_at,
         estimated.unwrap_or_default(),
-    );
+    )
+    .with_selection(selection_snapshot);
 
     if !status.is_success() || !is_stream {
         let mut attempt = attempt;
@@ -184,7 +226,7 @@ async fn proxy(
                     .finish(completion(
                         StatusCode::BAD_GATEWAY,
                         model,
-                        state.config.anthropic_provider.clone(),
+                        provider.clone(),
                         attempt,
                         failed_at,
                     ))
@@ -219,7 +261,7 @@ async fn proxy(
             .finish(completion(
                 status,
                 model,
-                state.config.anthropic_provider.clone(),
+                provider.clone(),
                 attempt,
                 completed_at,
             ))
@@ -232,7 +274,7 @@ async fn proxy(
         reservation,
         attempt,
         model,
-        state.config.anthropic_provider.clone(),
+        provider,
         MetadataParser::default(),
         state.config.stream_event_max_bytes,
     )
@@ -303,18 +345,9 @@ fn response_header_allowed(name: &HeaderName) -> bool {
         || name.as_str().starts_with("anthropic-")
 }
 
-fn ensure_model_allowed(state: &AppState, body: &Value) -> Result<(), GatewayError> {
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    state
-        .config
-        .allowed_models
-        .iter()
-        .any(|allowed| allowed == model)
-        .then_some(())
-        .ok_or(GatewayError::ModelForbidden)
+#[tracing::instrument(name = "token.estimate", skip_all)]
+fn estimate_input_tokens(bytes: usize) -> u64 {
+    u64::try_from(bytes.div_ceil(4)).unwrap_or(u64::MAX)
 }
 
 fn uri_string(uri: &axum::http::Uri) -> &str {
@@ -337,18 +370,35 @@ fn ledger_request_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-pub async fn models(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({
+pub async fn models(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<PrincipalContext>,
+) -> Result<Json<Value>, GatewayError> {
+    let models = state
+        .models
+        .list(principal.tenant_id, principal.is_development_bootstrap())
+        .await?;
+    Ok(Json(json!({
         "object": "list",
-        "data": state.config.allowed_models.iter().map(|id| json!({
-            "id": id,
+        "data": models.into_iter().map(|model| json!({
+            "id": model.id,
             "object": "model",
             "created": 0,
-            "owned_by": "gateway",
+            "owned_by": model.provider_key,
             "type": "model",
-            "display_name": id,
+            "display_name": model.display_name,
+            "description": model.description,
+            "context_window": model.context_window,
+            "max_output_tokens": model.max_output_tokens,
+            "capabilities": {
+                "streaming": model.supports_streaming,
+                "tools": model.supports_tools,
+                "reasoning": model.supports_reasoning,
+                "images": model.supports_images,
+                "structured_output": model.supports_structured_output,
+            },
         })).collect::<Vec<_>>()
-    }))
+    })))
 }
 
 pub async fn hello() -> impl IntoResponse {

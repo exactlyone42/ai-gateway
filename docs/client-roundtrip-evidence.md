@@ -50,6 +50,12 @@ the versioned evidence is updated. It also refuses a database name that does not
 contain `test`, `validation`, or `disposable`, and requires the explicit mutation
 flag because gateway startup runs migrations.
 
+For Codex 0.153.0 the harness also locks the observed custom-provider metadata
+boundary: the client emits its unknown-model fallback warning and does not call
+the gateway `/v1/models` endpoint. Codex documents `model_catalog_json` as a
+startup-loaded local path. The gateway cannot remove that warning over its HTTP
+provider contract and does not fabricate a private catalog.
+
 Tool counts are observations, not capability contracts. Claude Code exposed 54
 tools in this run; isolated Codex exposed 9. Earlier Codex runs exposed 17. The
 contract therefore records serialization and a nonzero list, not a fixed count.

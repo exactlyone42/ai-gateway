@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `admin-api-rbac` |
 | 開始 | `2026-09-11T03:17+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T04:00+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -68,6 +68,8 @@
   一次性 secret 關閉即消失、viewer UI 無寫入控制且直打 API 403；桌面/手機無 console/HTTP error。
 - `2026-09-11T03:51+08:00` disposable DB 跑 `check.sh all` 全綠；production Docker image 建置並確認
   binary、SPA index、favicon 都存在。
+- `2026-09-11T04:00+08:00` PR #35 的 Rust 與 board sync CI 全綠，合進 `dev`；merge
+  `333fd01e7d16d0a18eaa7619356333b00efb4901`。
 
 ## 已確定不可行
 - 直接重建規格 §48／§92 原文：repo 沒有原清單；只能建立可驗證的本地契約並標明來源缺失。
@@ -96,6 +98,4 @@
 | 未交付資料 | null + reason | 0／假資料 | 未知不能看起來像真的零 |
 
 ## 下一步
-1. 建立 read API 契約、索引與雙 tenant／actual-first／cursor 測試。
-2. 建 Vite React app、session/client/query 層與九頁真資料 UI。
-3. 接同源靜態部署、CSP、frontend 四關進 `check.sh all`；Playwright desktop/mobile 驗收。
+1. 已完成；模型與政策頁面的 unavailable 狀態依 W10-W13 各自回填。
