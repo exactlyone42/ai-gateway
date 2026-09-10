@@ -1,14 +1,14 @@
 # LOOP: scheduler-admission
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開（開工時建）｜分支 `feature/scheduler-admission`｜段落 `W13`
+> 卡 [#40](https://github.com/DnaBoss/agent-pool-gateway/issues/40)｜分支 `feature/scheduler-admission`｜段落 `W13`
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P1 |
 | 前置 | `policy-engine`, `quota-ratelimit` |
-| 開始 | — |
+| 開始 | `2026-09-11T06:52:04+08:00` |
 | 結束 | — |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
@@ -56,12 +56,16 @@
 六級權重、aging、其餘七維上限、downgrade／reroute 留給下一刀。
 
 ## 已知
-- 現況沒有排隊、沒有併發上限，請求直接轉發上游。
+- W12 已在 quota admission 實作 tenant/scoped hard/soft 配額與 request-lifetime concurrency lease；
+  Scheduler 必須消費其結果，不得另建平行 quota counter。
 - 規格 §22 把排程器定位成核心能力：閘道不只是 Router，同時是 AI Compute Scheduler。
 - 規格 §27 要求第一版就要有 aging，不能等。
 - 規格 §28 把保留容量列為 P0/P1 重要功能。
 
 - W07 移交（2026-09-09）：span 樹缺 `scheduler.queue` 節點（規格 §58）。這一段有排隊實作後補上，作法照 `src/services/chat.rs`。
+- 查重：2026-09-11 開工時無同名遠端分支、open PR、對應 open issue 或其它 worktree owner；
+  建立唯一卡 #40 與 `feature/scheduler-admission`。
+- Reviewer 使用獨立 `codex exec`，計畫與完整 diff 各審一次；高／中風險須修正或以規格與實測裁定。
 
 ## 已做
 - （待填）
@@ -81,7 +85,7 @@
 | --- | --- | --- | --- |
 
 ## 下一步
-1. Admission control 七項判斷 ＋ 五種決策。
-2. 有上限佇列 ＋ WFQ ＋ aging。
-3. 保留容量 ＋ 多維併發上限。
-4. 兩個陰性對照（關掉機制要看得到症狀）。
+1. 定案 scheduler 與 quota/ledger/provider 的呼叫順序、容量設定格式、取消與 shutdown ownership。
+2. 有上限佇列、六級 weighted fairness＋aging、互動／背景保留容量與九維 lease。
+3. 接上兩種 provider path、queue timestamps/span/metrics、Admin runtime；補 timeout/deadline/cancel 測試。
+4. 用機制開關做 aging 與保留容量陰性對照；W18 再跑 100-request 混合負載數字。
