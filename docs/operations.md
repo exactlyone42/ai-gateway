@@ -13,6 +13,18 @@ accounts and model aliases. A client key is valid in exactly one environment.
 4. Pilot team with low budgets and one model class.
 5. Canary production replicas, then measured expansion.
 
+## Usage ledger migration
+
+`20260910220000_usage_ledger.sql` is expand-only: it adds ledger tables, indexes,
+constraints, and append-only triggers without changing existing identity tables.
+Deploy the migration before a binary that writes ledger envelopes.
+
+Rollback the binary first and leave the ledger schema in place. Dropping these
+tables is not an operational rollback because it destroys billing evidence. A
+later corrective migration must be forward-only, preserve existing rows, and
+backfill in one set-based SQL statement. Before any destructive replacement,
+take and verify a PostgreSQL backup and document the restore command.
+
 ## Alerts
 
 Pool capacity below reserve, spend velocity anomaly, repeated 401/403 from a
