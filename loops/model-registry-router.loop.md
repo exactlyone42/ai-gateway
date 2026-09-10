@@ -1,14 +1,14 @@
 # LOOP: model-registry-router
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開（開工時建；取代作廢的 [#6](https://github.com/DnaBoss/agent-pool-gateway/issues/6)）｜分支 `feature/model-registry-router`｜段落 `W10`
+> 卡 [#36](https://github.com/DnaBoss/agent-pool-gateway/issues/36)（取代作廢的 [#6](https://github.com/DnaBoss/agent-pool-gateway/issues/6)）｜分支 `feature/model-registry-router`｜段落 `W10`
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P1 |
 | 前置 | `workspace-foundation` |
-| 開始 | — |
+| 開始 | `2026-09-11T04:04+08:00` |
 | 結束 | — |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
@@ -42,9 +42,18 @@
 - W06 移交（2026-09-11）：Codex CLI 0.153.0 啟動時會讀 `/v1/models` 的私有 `models[]`
   metadata；一般 OpenAI `data[]` 可讓明確指定模型工作，但會有 fallback warning。W10 必須從
   真實欄位產生 context window／reasoning／能力 metadata，不得用猜值消除 warning。
+- 查重：既有 loop 接手；開放卡只有引用 W10 的 #22，沒有專屬卡；遠端無同名分支或 PR，故建立 #36。
+- Reviewer 6 high／4 medium：採納單一真相切換、provider trust binding、跨資源狀態交易、wire
+  protocol 維度、只改 model 的協定契約、alias/能力單一真相、選擇快照落帳、真 Client discovery
+  與觀測欄位實測。完整 idempotency replay 屬 W17；W10 先保存 selection/version，禁止透明改路由。
+- Dev bootstrap 是唯一相容例外：只對 nil tenant 使用明示的 development registry；正式 tenant
+  沒有 active registry 就 fail closed，不回退 `ALLOWED_MODELS`。
+- Provider 啟用必須綁 server-side credential profile 的 origin、wire protocol、auth scheme，禁止
+  Admin 任意組合 URL 與 secret ref；redirect 預設關閉，避免 SSRF 與 credential confused-deputy。
 
 ## 已做
-- （待填）
+- `2026-09-11T04:04+08:00` W09 PR #35／merge `333fd01`／CI success 後接手；完成卡、分支、PR 查重，
+  建立 #36 並加入 Project #2；獨立 Codex 計畫審查完成（6 high／4 medium）。
 
 ## 已確定不可行
 - （待填）
@@ -58,8 +67,12 @@
 ## Trade-off
 | 決策 | 選了什麼 | 放棄了什麼 | 為什麼 |
 | --- | --- | --- | --- |
+| 切換 | 正式 tenant 只讀 DB registry | production fallback 到舊白名單 | hot disable 必須有單一真相 |
+| Alias | protocol-scoped alias 是 routing 真相 | 同時用 model quality_tier 隱式選擇 | 避免兩套映射與名稱碰撞 |
+| 停用 | commit 後開始 select 的請求立即生效 | 取消已選中的 in-flight request | 不把 W19 lifecycle 混進 Router |
 
 ## 下一步
-1. 延伸 W08 的 draft schema，完成從環境變數白名單遷移（行為保持）與啟用狀態 enforcement。
-2. quality alias 對應表 ＋ Admin 可改。
-3. 確定性 Router ＋ 能力檢查 ＋ 陰性對照。
+1. migration：provider/model 狀態機、generated enabled、wire protocol、protocol-scoped alias、選擇快照。
+2. Config 建不可變 credential profile；Admin-only activate/disable 以固定鎖序、CAS、audit 維持依賴。
+3. tenant-scoped Router 一次查詢選擇；能力 fail closed，只允許改寫 model 欄位，其餘語意保持。
+4. `/v1/models` 真 metadata、Admin Web 操作、ledger/trace/log；整合、競態、跨 tenant 與 Client 驗收。

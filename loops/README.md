@@ -28,8 +28,8 @@
 | [openai-native](./openai-native.loop.md) | W06 | 已交付 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
 | [observability-otel](./observability-otel.loop.md) | W07 | 已交付（部分移交） | P1 | 任何一次請求都查得到卡在哪一步、花多久、誰發的 |
 | [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 已交付 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
-| [admin-web](./admin-web.loop.md) | W09 | 進行中 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
-| [model-registry-router](./model-registry-router.loop.md) | W10 | 未開始 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
+| [admin-web](./admin-web.loop.md) | W09 | 已交付 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
+| [model-registry-router](./model-registry-router.loop.md) | W10 | 進行中 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
 | [policy-engine](./policy-engine.loop.md) | W11 | 未開始 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
 | [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 未開始 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
 | [scheduler-admission](./scheduler-admission.loop.md) | W13 | 未開始 | P1 | 互動工作不被背景餓死，背景工作也不會永遠排不到 |
@@ -43,7 +43,7 @@
 ## 現在該做哪一個
 
 看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`；W00–W06 已交付，W08 正在進行。W08 完成後
-依前置條件逐段推進 W09–W19，並回收 W07 的移交判準。
+`W02 → W03/W04 → W05 → W06 → W14`；W00–W09 已交付，W10 正在進行。W10 完成後
+依前置條件逐段推進 W11–W19，並回收 W07 的移交判準。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
