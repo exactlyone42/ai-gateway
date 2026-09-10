@@ -25,7 +25,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Migrations run before the listener binds. A gateway serving requests
     // against a half-migrated schema is worse than one that did not start, so
     // this failure is fatal and says so.
-    let pool = db::pool(&config.database_url, config.database_max_connections)?;
+    let pool = db::pool(&config.database_url, config.data_database_max_connections())?;
     db::migrate(&pool).await?;
     info!("database schema is up to date");
 
@@ -40,9 +40,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "agent pool gateway started");
-    axum::serve(listener, routes::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        routes::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // Spans buffered by the batch exporter are lost unless the provider is
     // shut down, so a clean exit is the difference between having the last

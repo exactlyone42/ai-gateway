@@ -263,7 +263,7 @@ impl CredentialService {
             r#"
             WITH expired AS (
                 UPDATE credentials
-                SET status = 'expired'
+                SET status = 'expired', version = version + 1, updated_at = now()
                 WHERE tenant_id = $1
                   AND fingerprint = $2
                   AND status IN ('active', 'disabled')
@@ -276,6 +276,26 @@ impl CredentialService {
                   AND status = 'active'
                   AND revoked_at IS NULL
                   AND (expires_at IS NULL OR expires_at > now())
+                  AND (user_id IS NULL OR EXISTS (
+                      SELECT 1 FROM users
+                      WHERE users.tenant_id = credentials.tenant_id
+                        AND users.id = credentials.user_id AND users.status = 'active'
+                  ))
+                  AND (device_id IS NULL OR EXISTS (
+                      SELECT 1 FROM devices
+                      WHERE devices.tenant_id = credentials.tenant_id
+                        AND devices.id = credentials.device_id AND devices.status = 'active'
+                  ))
+                  AND (client_id IS NULL OR EXISTS (
+                      SELECT 1 FROM clients
+                      WHERE clients.tenant_id = credentials.tenant_id
+                        AND clients.id = credentials.client_id AND clients.status = 'active'
+                  ))
+                  AND (agent_id IS NULL OR EXISTS (
+                      SELECT 1 FROM agents
+                      WHERE agents.tenant_id = credentials.tenant_id
+                        AND agents.id = credentials.agent_id AND agents.status = 'active'
+                  ))
                 RETURNING *
             )
             SELECT c.secret_hash, c.hash_key_id, c.expires_at,
@@ -336,7 +356,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'revoked', revoked_at = now()
+            SET status = 'revoked', revoked_at = now(), version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2
               AND status IN ('active', 'disabled')
             RETURNING id
@@ -354,7 +374,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'disabled'
+            SET status = 'disabled', version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2 AND status = 'active'
               AND (expires_at IS NULL OR expires_at > now())
             RETURNING id
@@ -372,7 +392,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'active'
+            SET status = 'active', version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2 AND status = 'disabled'
               AND revoked_at IS NULL
               AND (expires_at IS NULL OR expires_at > now())
@@ -389,7 +409,7 @@ impl CredentialService {
         let result = sqlx::query(
             r#"
             UPDATE credentials
-            SET status = 'expired'
+            SET status = 'expired', version = version + 1, updated_at = now()
             WHERE tenant_id = $1
               AND status IN ('active', 'disabled')
               AND expires_at <= now()
@@ -432,7 +452,7 @@ impl CredentialService {
                 SET expires_at = LEAST(
                     COALESCE(current.expires_at, now() + $3 * interval '1 second'),
                     now() + $3 * interval '1 second'
-                )
+                ), version = current.version + 1, updated_at = now()
                 FROM old
                 WHERE current.tenant_id = old.tenant_id AND current.id = old.id
                 RETURNING old."type", old.display_name, old.user_id,
@@ -484,7 +504,7 @@ impl CredentialService {
             .ok_or(IdentityError::InvalidTransition)
     }
 
-    fn generate(&self, tenant_id: Uuid) -> Result<KeyMaterial, IdentityError> {
+    pub(crate) fn generate(&self, tenant_id: Uuid) -> Result<KeyMaterial, IdentityError> {
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(IdentityError::Random)?;
         let encoded = URL_SAFE_NO_PAD.encode(random);
@@ -552,6 +572,15 @@ impl CredentialService {
             .lock()
             .map_err(|_| IdentityError::CacheUnavailable)
     }
+
+    pub(crate) async fn lifecycle_write(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.lifecycle_gate.clone().write_owned().await
+    }
+
+    pub(crate) fn clear_tenant_cache(&self, tenant_id: Uuid) -> Result<(), IdentityError> {
+        self.cache_lock()?.clear_tenant(tenant_id);
+        Ok(())
+    }
 }
 
 struct HashKeys {
@@ -571,12 +600,12 @@ fn map_rotation_error(error: sqlx::Error) -> IdentityError {
     }
 }
 
-struct KeyMaterial {
-    plaintext: String,
-    key_prefix: String,
-    fingerprint: [u8; 32],
-    secret_hash: [u8; 32],
-    hash_key_id: String,
+pub(crate) struct KeyMaterial {
+    pub(crate) plaintext: String,
+    pub(crate) key_prefix: String,
+    pub(crate) fingerprint: [u8; 32],
+    pub(crate) secret_hash: [u8; 32],
+    pub(crate) hash_key_id: String,
 }
 
 impl KeyMaterial {
@@ -834,12 +863,18 @@ mod tests {
             otlp_endpoint: None,
             database_url: "managed-by-sqlx-test".to_owned(),
             database_max_connections: 1,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
@@ -1098,12 +1133,18 @@ mod tests {
             otlp_endpoint: None,
             database_url: "managed-by-sqlx-test".to_owned(),
             database_max_connections: 2,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
@@ -1176,12 +1217,18 @@ mod tests {
             otlp_endpoint: None,
             database_url: "postgres://gateway@127.0.0.1:1/gateway".to_owned(),
             database_max_connections: 1,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()

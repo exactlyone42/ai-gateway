@@ -33,6 +33,8 @@
 ## 已知
 - 現況模型白名單來自環境變數 `ALLOWED_MODELS`（`src/config.rs`），
   只在 provider service 做字串比對，沒有能力、成本、品質等級的概念。
+- W08 擁有 Model／Provider 的 tenant-safe draft CRUD schema；W10 接手把 draft 轉成可啟用的
+  registry，讓 enable/disable 在下一次推論前真的生效，並補對應 audit，不能另建平行資料表。
 - 規格 §20：實際模型名稱會變，所以註冊表必須動態可設定。
 - 規格 §34：第一版優先「明確的確定性路由」，之後才加自動路由。**第一版不做 ML Router。**
 
@@ -58,6 +60,6 @@
 | --- | --- | --- | --- |
 
 ## 下一步
-1. `models` schema ＋ 從環境變數白名單遷移過去（行為保持）。
+1. 延伸 W08 的 draft schema，完成從環境變數白名單遷移（行為保持）與啟用狀態 enforcement。
 2. quality alias 對應表 ＋ Admin 可改。
 3. 確定性 Router ＋ 能力檢查 ＋ 陰性對照。

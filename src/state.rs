@@ -1,9 +1,10 @@
 use reqwest::Client;
 use sha2::{Digest, Sha256};
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use std::time::Duration;
 
 use crate::{
+    admin::{AdminService, AdminServiceConfig},
     config::Config,
     identity::CredentialService,
     ledger::{Ledger, LedgerError},
@@ -23,6 +24,7 @@ pub struct AppState {
     /// pool exists and readiness decides whether it currently works.
     pub(crate) pool: Pool<Postgres>,
     pub(crate) credentials: CredentialService,
+    pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
 }
 
@@ -45,6 +47,22 @@ impl AppState {
             config.credential_cache_capacity,
             Duration::from_secs(config.credential_cache_ttl_seconds),
         );
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(config.admin_database_max_connections)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
+        let admin = AdminService::new(
+            admin_pool,
+            credentials.clone(),
+            AdminServiceConfig {
+                hash_key: config.credential_hash_key.clone(),
+                hash_key_id: config.credential_hash_key_id.clone(),
+                retiring_hash_keys: config.credential_retiring_hash_keys.clone(),
+                bootstrap_token: config.admin_bootstrap_token.clone(),
+                bootstrap_tenant_id: config.admin_bootstrap_tenant_id,
+                session_ttl: Duration::from_secs(config.admin_session_ttl_seconds),
+            },
+        );
         let ledger = Ledger::open(
             pool.clone(),
             config.ledger_spool_dir.clone(),
@@ -58,6 +76,7 @@ impl AppState {
             instruments: Instruments::new(),
             pool,
             credentials,
+            admin,
             ledger,
         })
     }

@@ -20,14 +20,14 @@
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 18 個可獨立審查的段落，並先確認可行性。卡 #20 |
-| [client-compatibility](./client-compatibility.loop.md) | W01 | 進行中 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
+| [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
 | [identity-credential](./identity-credential.loop.md) | W03 | 已交付 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
 | [usage-ledger](./usage-ledger.loop.md) | W04 | 已交付 | P0 | 每一筆請求與用量都落在 PostgreSQL，DB 短暫不可用也不會無聲遺失 |
 | [anthropic-native](./anthropic-native.loop.md) | W05 | 已交付 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
 | [openai-native](./openai-native.loop.md) | W06 | 已交付 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
 | [observability-otel](./observability-otel.loop.md) | W07 | 已交付（部分移交） | P1 | 任何一次請求都查得到卡在哪一步、花多久、誰發的 |
-| [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 未開始 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
+| [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 進行中 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
 | [admin-web](./admin-web.loop.md) | W09 | 未開始 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
 | [model-registry-router](./model-registry-router.loop.md) | W10 | 未開始 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
 | [policy-engine](./policy-engine.loop.md) | W11 | 未開始 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
@@ -43,7 +43,7 @@
 ## 現在該做哪一個
 
 看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`；W02–W06 已交付，W01 正在收尾。W01 合併後先做
-W08，接著依前置條件逐段推進 W09–W19，並回收 W07 的移交判準。
+`W02 → W03/W04 → W05 → W06 → W14`；W00–W06 已交付，W08 正在進行。W08 完成後
+依前置條件逐段推進 W09–W19，並回收 W07 的移交判準。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
