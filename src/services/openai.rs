@@ -16,6 +16,10 @@ use crate::{
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
+    model_registry::{
+        CapabilityRequirements, GatewayOperation, ModelSelector, ProviderProfile, parse_request,
+        rewrite_model,
+    },
     services::streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data, relay},
     state::AppState,
 };
@@ -50,6 +54,13 @@ impl Operation {
             }
         }
     }
+
+    fn gateway(self) -> GatewayOperation {
+        match self {
+            Self::Responses => GatewayOperation::OpenAiResponses,
+            Self::ChatCompletions => GatewayOperation::OpenAiChatCompletions,
+        }
+    }
 }
 
 pub struct Reply {
@@ -75,23 +86,52 @@ struct BufferedContext {
     reservation: crate::ledger::Reservation,
     attempt: ProviderAttempt,
     model: String,
+    provider: String,
     operation: Operation,
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
-    let metadata: Value =
-        serde_json::from_slice(&request.body).map_err(GatewayError::InvalidRequest)?;
+    let mut metadata = parse_request(&request.body).map_err(GatewayError::InvalidRequest)?;
     if request.operation == Operation::Responses
         && metadata.get("background").and_then(Value::as_bool) == Some(true)
     {
         return Err(GatewayError::UnsupportedRequest);
     }
-    let model = ensure_model_allowed(state, &metadata)?.to_owned();
-    let is_stream = metadata.get("stream").and_then(Value::as_bool) == Some(true);
+    let operation = request.operation.gateway();
+    let selector = ModelSelector::parse(
+        metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )?;
+    let required = CapabilityRequirements::from_request(operation, &metadata);
+    let selection = state
+        .models
+        .select(
+            request.principal.tenant_id,
+            request.principal.is_development_bootstrap(),
+            operation,
+            selector,
+            required,
+        )
+        .await?;
+    let requested_model = selection.selector.requested_value();
+    let quality = selection.selector.quality().map(ToOwned::to_owned);
+    let model = selection.public_model_id.clone();
+    let provider_model = selection.provider_model_id.clone();
+    let provider = selection.provider_key.clone();
+    let profile = selection.profile.clone();
+    let selection_snapshot = selection.ledger_snapshot();
+    let body = Bytes::from(rewrite_model(
+        &request.body,
+        &mut metadata,
+        &provider_model,
+    )?);
+    let is_stream = required.streaming;
     let observer = request.operation.observer(&metadata)?;
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
     let estimated = TokenUsage {
-        input_tokens: u64::try_from(request.body.len().div_ceil(4)).unwrap_or(u64::MAX),
+        input_tokens: estimate_input_tokens(body.len()),
         ..TokenUsage::default()
     };
     let trace_id = match logging::current_trace_ids().0 {
@@ -105,25 +145,27 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             session_id: header_text(&request.headers, "x-codex-session-id")
                 .or_else(|| header_text(&request.headers, "x-session-id")),
             trace_id,
-            requested_model: Some(model.clone()),
+            requested_model: Some(requested_model),
             workload_class: None,
             urgency: None,
-            quality: None,
+            quality,
             budget_class: None,
             estimated_tokens: Some(i64::try_from(estimated.input_tokens).unwrap_or(i64::MAX)),
+            selection: selection_snapshot.clone(),
             principal: request.principal,
             created_at: request.received_at,
         })
         .await?;
     reservation.annotate_protocol(request.operation.name(), None, None);
-
     let provider_request_at = Utc::now();
     let upstream = match forward(
         state,
         &request.path_and_query,
         &request.headers,
-        request.body,
+        body,
         idempotency_key,
+        &profile,
+        &provider_model,
     )
     .await
     {
@@ -134,14 +176,17 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
-                    selected_provider: Some(state.config.openai_provider.clone()),
-                    attempts: vec![ProviderAttempt::failed(
-                        state.config.openai_provider.clone(),
-                        model,
-                        provider_request_at,
-                        completed_at,
-                        error.kind().to_owned(),
-                    )],
+                    selected_provider: Some(provider.clone()),
+                    attempts: vec![
+                        ProviderAttempt::failed(
+                            provider,
+                            provider_model,
+                            provider_request_at,
+                            completed_at,
+                            error.kind().to_owned(),
+                        )
+                        .with_selection(selection_snapshot.clone()),
+                    ],
                     completed_at,
                 })
                 .await?;
@@ -158,12 +203,13 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     let attempt = ProviderAttempt::begin(
-        state.config.openai_provider.clone(),
-        model.clone(),
+        provider.clone(),
+        provider_model,
         provider_request_id,
         provider_request_at,
         estimated,
-    );
+    )
+    .with_selection(selection_snapshot);
     let content_is_sse = upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -176,7 +222,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             reservation,
             attempt,
             model,
-            state.config.openai_provider.clone(),
+            provider.clone(),
             observer,
             state.config.stream_event_max_bytes,
         )
@@ -189,53 +235,56 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         });
     }
 
-    finish_buffered(
-        state,
-        BufferedContext {
-            response: upstream,
-            status,
-            headers: response_headers,
-            reservation,
-            attempt,
-            model,
-            operation: request.operation,
-        },
-    )
+    finish_buffered(BufferedContext {
+        response: upstream,
+        status,
+        headers: response_headers,
+        reservation,
+        attempt,
+        model,
+        provider,
+        operation: request.operation,
+    })
     .await
 }
 
-#[tracing::instrument(name = "provider.attempt", skip_all)]
+#[tracing::instrument(
+    name = "provider.attempt",
+    skip_all,
+    fields(gen_ai.system = %profile.provider_key, gen_ai.request.model = %provider_model_id)
+)]
 async fn forward(
     state: &AppState,
     path_and_query: &str,
     client_headers: &HeaderMap,
     body: Bytes,
     idempotency_key: Option<HeaderValue>,
+    profile: &ProviderProfile,
+    provider_model_id: &str,
 ) -> Result<reqwest::Response, GatewayError> {
     let mut headers = provider_headers(client_headers);
     if let Some(value) = idempotency_key {
         headers.insert(HeaderName::from_static("idempotency-key"), value);
     }
     logging::inject_context(&mut headers);
-    let authorization = HeaderValue::from_str(&format!("Bearer {}", state.config.openai_api_key))
-        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let authorization = HeaderValue::from_str(&format!(
+        "Bearer {}",
+        profile
+            .bearer_secret()
+            .ok_or(GatewayError::InvalidConfiguration)?
+    ))
+    .map_err(|_| GatewayError::InvalidConfiguration)?;
     headers.insert(header::AUTHORIZATION, authorization);
     Ok(state
         .client
-        .post(format!(
-            "{}{}",
-            state.config.openai_base_url, path_and_query
-        ))
+        .post(format!("{}{}", profile.base_url, path_and_query))
         .headers(headers)
         .body(body)
         .send()
         .await?)
 }
 
-async fn finish_buffered(
-    state: &AppState,
-    context: BufferedContext,
-) -> Result<Reply, GatewayError> {
+async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError> {
     let BufferedContext {
         response,
         status,
@@ -243,6 +292,7 @@ async fn finish_buffered(
         mut reservation,
         mut attempt,
         model,
+        provider,
         operation,
     } = context;
     let mut stream = response.bytes_stream();
@@ -262,7 +312,7 @@ async fn finish_buffered(
                     .finish(RequestCompletion {
                         status: "failed".to_owned(),
                         selected_model: Some(model),
-                        selected_provider: Some(state.config.openai_provider.clone()),
+                        selected_provider: Some(provider),
                         attempts: vec![attempt],
                         completed_at,
                     })
@@ -296,7 +346,7 @@ async fn finish_buffered(
         .finish(RequestCompletion {
             status: request_status.to_owned(),
             selected_model: Some(model),
-            selected_provider: Some(state.config.openai_provider.clone()),
+            selected_provider: Some(provider),
             attempts: vec![attempt],
             completed_at,
         })
@@ -368,18 +418,9 @@ fn provider_idempotency_key(
         .map_err(|_| GatewayError::InvalidConfiguration)
 }
 
-fn ensure_model_allowed<'a>(state: &AppState, body: &'a Value) -> Result<&'a str, GatewayError> {
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    state
-        .config
-        .allowed_models
-        .iter()
-        .any(|allowed| allowed == model)
-        .then_some(model)
-        .ok_or(GatewayError::ModelForbidden)
+#[tracing::instrument(name = "token.estimate", skip_all)]
+fn estimate_input_tokens(bytes: usize) -> u64 {
+    u64::try_from(bytes.div_ceil(4)).unwrap_or(u64::MAX)
 }
 
 fn provider_headers(client: &HeaderMap) -> HeaderMap {

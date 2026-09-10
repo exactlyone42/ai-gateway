@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::error::ErrorType;
 use crate::identity::CredentialService;
+use crate::model_registry::ProviderProfiles;
 
 mod accounts;
 mod reports;
@@ -24,8 +25,8 @@ mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
 pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, UsageQuery};
 pub use resources::{
-    DeleteQuery, ListQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
-    RotateCredentialInput,
+    DeleteQuery, LifecycleInput, ListQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
+    ResourceTarget, RotateCredentialInput,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -38,6 +39,7 @@ pub struct AdminService {
     bootstrap_tenant_id: Option<Uuid>,
     session_ttl: Duration,
     credentials: CredentialService,
+    provider_profiles: Option<ProviderProfiles>,
 }
 
 pub struct AdminServiceConfig {
@@ -142,6 +144,12 @@ pub const RBAC_RULES: &[RbacRule] = &[
         route: "/admin/v1/system-health",
         action: AdminAction::ReadResource,
         roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "POST",
+        route: "/admin/v1/{resource}/{id}/lifecycle",
+        action: AdminAction::MutateResource,
+        roles: ADMINS,
     },
     RbacRule {
         method: "POST",
@@ -341,7 +349,13 @@ impl AdminService {
             bootstrap_tenant_id: config.bootstrap_tenant_id,
             session_ttl: config.session_ttl,
             credentials,
+            provider_profiles: None,
         }
+    }
+
+    pub fn with_provider_profiles(mut self, profiles: ProviderProfiles) -> Self {
+        self.provider_profiles = Some(profiles);
+        self
     }
 
     pub async fn bootstrap(
@@ -790,8 +804,9 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 fn map_conflict(error: sqlx::Error) -> AdminError {
     if error
         .as_database_error()
-        .and_then(|database| database.constraint())
-        == Some("admin_bootstrap_claims_pkey")
+        .and_then(|database| database.code())
+        .as_deref()
+        == Some("23505")
     {
         AdminError::Conflict
     } else {
@@ -807,10 +822,20 @@ mod tests {
     use sqlx::{PgPool, Row as _, postgres::PgPoolOptions};
     use uuid::Uuid;
 
-    use super::{AdminError, AdminRole, AdminService, AdminServiceConfig, BootstrapInput};
+    use super::{
+        AdminError, AdminRole, AdminService, AdminServiceConfig, BootstrapInput, authorize,
+    };
     use crate::identity::CredentialService;
 
     const BOOTSTRAP: &str = "test-admin-bootstrap-token-at-least-32-bytes";
+
+    #[test]
+    fn registry_lifecycle_requires_an_admin() {
+        let route = "/admin/v1/{resource}/{id}/lifecycle";
+        assert!(authorize("POST", route, AdminRole::Admin).is_some());
+        assert!(authorize("POST", route, AdminRole::Operator).is_none());
+        assert!(authorize("POST", route, AdminRole::Viewer).is_none());
+    }
 
     fn service(pool: PgPool, tenant_id: Uuid) -> AdminService {
         service_with_keys(pool, tenant_id, "v1", Vec::new())

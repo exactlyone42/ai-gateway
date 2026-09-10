@@ -8,6 +8,7 @@ pub mod ledger;
 mod logging;
 mod metrics;
 mod middleware;
+mod model_registry;
 mod routes;
 mod services;
 pub mod startup;

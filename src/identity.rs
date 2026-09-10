@@ -18,6 +18,8 @@ const MAX_ROTATION_OVERLAP: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
+    #[error("tenant id must not be the nil UUID")]
+    InvalidTenant,
     #[error("invalid credential")]
     InvalidCredential,
     #[error("credential state does not allow this operation")]
@@ -77,6 +79,12 @@ impl PrincipalContext {
             agent_id: None,
             agent_name: None,
         }
+    }
+
+    pub fn is_development_bootstrap(&self) -> bool {
+        self.tenant_id.is_nil()
+            && self.credential_id.is_nil()
+            && self.credential_name == "development bootstrap"
     }
 
     /// Logs use an opaque identifier. Display names remain available to the
@@ -160,6 +168,9 @@ impl CredentialService {
         &self,
         input: NewPrincipal<'_>,
     ) -> Result<PrincipalIds, IdentityError> {
+        if input.tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let ids = PrincipalIds {
             user_id: Uuid::new_v4(),
             device_id: Uuid::new_v4(),
@@ -210,6 +221,9 @@ impl CredentialService {
         &self,
         input: NewCredential<'_>,
     ) -> Result<IssuedCredential, IdentityError> {
+        if input.tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let material = self.generate(input.tenant_id)?;
         let id = Uuid::new_v4();
         sqlx::query(
@@ -505,6 +519,9 @@ impl CredentialService {
     }
 
     pub(crate) fn generate(&self, tenant_id: Uuid) -> Result<KeyMaterial, IdentityError> {
+        if tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(IdentityError::Random)?;
         let encoded = URL_SAFE_NO_PAD.encode(random);
@@ -767,9 +784,10 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
+    use serde_json::Value;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -847,6 +865,7 @@ mod tests {
 
     #[sqlx::test]
     async fn lifecycle_is_tenant_safe_and_revocation_beats_the_cache(pool: Pool<Postgres>) {
+        let tenant_id = Uuid::new_v4();
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
@@ -872,6 +891,7 @@ mod tests {
             credential_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![tenant_id, Uuid::nil()],
             admin_session_ttl_seconds: 900,
             admin_allowed_origin: None,
             admin_trusted_proxy_ips: Vec::new(),
@@ -883,7 +903,7 @@ mod tests {
             ledger_spool_entry_max_bytes: 32 * 1024,
         };
         let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
-        let tenant_id = Uuid::new_v4();
+        seed_active_openai_model(&pool, tenant_id).await;
         let principal = state
             .credentials
             .create_principal(NewPrincipal {
@@ -905,6 +925,38 @@ mod tests {
             })
             .await
             .unwrap();
+
+        let models = routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models?limit=1000")
+                    .header("authorization", format!("Bearer {}", issued.plaintext))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models.status(), StatusCode::OK);
+        let models: Value =
+            serde_json::from_slice(&to_bytes(models.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(models["data"][0]["id"], "company-default");
+        assert_eq!(models["data"][0]["display_name"], "Company default");
+
+        let tools_rejected = routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", format!("Bearer {}", issued.plaintext))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","tools":[{"type":"function"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tools_rejected.status(), StatusCode::BAD_REQUEST);
 
         assert!(!database_contains(&pool, &issued.plaintext).await);
         assert_eq!(
@@ -1117,6 +1169,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        let tenant_id = Uuid::new_v4();
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
@@ -1142,6 +1195,7 @@ mod tests {
             credential_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![tenant_id],
             admin_session_ttl_seconds: 900,
             admin_allowed_origin: None,
             admin_trusted_proxy_ips: Vec::new(),
@@ -1153,7 +1207,7 @@ mod tests {
             ledger_spool_entry_max_bytes: 32 * 1024,
         };
         let state = Arc::new(AppState::new(config, bounded_pool).unwrap());
-        let tenant_id = Uuid::new_v4();
+        seed_active_openai_model(&pool, tenant_id).await;
         let principal = state
             .credentials
             .create_principal(NewPrincipal {
@@ -1226,6 +1280,7 @@ mod tests {
             credential_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![Uuid::new_v4()],
             admin_session_ttl_seconds: 900,
             admin_allowed_origin: None,
             admin_trusted_proxy_ips: Vec::new(),
@@ -1264,6 +1319,36 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    async fn seed_active_openai_model(pool: &Pool<Postgres>, tenant_id: Uuid) {
+        sqlx::query(
+            r#"
+            WITH provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $2, $1, 'openai-test', 'OpenAI test', 'openai',
+                    'http://127.0.0.1:1', 'env://OPENAI_API_KEY',
+                    ARRAY['openai_chat_completions'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, lifecycle_state
+            )
+            SELECT $3, $1, id, 'company-default', 'company-default',
+                   'Company default', ARRAY['openai_chat_completions'], 'active'
+            FROM provider
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn database_contains(pool: &Pool<Postgres>, needle: &str) -> bool {

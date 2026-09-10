@@ -6,7 +6,7 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
-use crate::{identity::IdentityError, ledger::LedgerError};
+use crate::{identity::IdentityError, ledger::LedgerError, model_registry::RegistryError};
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
@@ -14,6 +14,8 @@ pub enum GatewayError {
     Unauthorized,
     #[error("model is not allowed by policy")]
     ModelForbidden,
+    #[error("model cannot satisfy required capability: {0}")]
+    CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
     InvalidRequest(#[source] serde_json::Error),
     #[error("request option is not supported by this gateway")]
@@ -32,6 +34,8 @@ pub enum GatewayError {
     ResponseBuild(#[from] axum::http::Error),
     #[error("usage ledger is unavailable")]
     LedgerUnavailable(#[from] LedgerError),
+    #[error("model registry is unavailable")]
+    RegistryUnavailable(#[source] RegistryError),
 }
 
 /// Carries the failure from the error boundary to the access log, which is the
@@ -53,6 +57,7 @@ impl GatewayError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
+            Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
             Self::PayloadTooLarge => "payload_too_large",
@@ -62,6 +67,7 @@ impl GatewayError {
             Self::Upstream(_) => "upstream_unavailable",
             Self::ResponseBuild(_) => "response_build_failed",
             Self::LedgerUnavailable(_) => "ledger_unavailable",
+            Self::RegistryUnavailable(_) => "model_registry_unavailable",
         }
     }
 
@@ -72,6 +78,7 @@ impl GatewayError {
         match self {
             Self::Unauthorized
             | Self::ModelForbidden
+            | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
             | Self::InvalidConfiguration => None,
@@ -81,6 +88,7 @@ impl GatewayError {
             Self::Upstream(error) => Some(error.to_string()),
             Self::ResponseBuild(error) => Some(error.to_string()),
             Self::LedgerUnavailable(error) => Some(error.to_string()),
+            Self::RegistryUnavailable(error) => Some(error.to_string()),
         }
     }
 }
@@ -94,6 +102,7 @@ impl IntoResponse for GatewayError {
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
+            Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -103,6 +112,7 @@ impl IntoResponse for GatewayError {
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::LedgerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::RegistryUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         let mut response = (
             status,
@@ -111,6 +121,21 @@ impl IntoResponse for GatewayError {
             .into_response();
         response.extensions_mut().insert(failure);
         response
+    }
+}
+
+impl From<RegistryError> for GatewayError {
+    fn from(error: RegistryError) -> Self {
+        match error {
+            RegistryError::InvalidSelector | RegistryError::ModelUnavailable => {
+                Self::ModelForbidden
+            }
+            RegistryError::CapabilityMismatch(capability) => Self::CapabilityMismatch(capability),
+            error @ (RegistryError::UntrustedProvider
+            | RegistryError::InvalidProviderProfile
+            | RegistryError::RequestEncoding(_)
+            | RegistryError::Database(_)) => Self::RegistryUnavailable(error),
+        }
     }
 }
 

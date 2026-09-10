@@ -6,8 +6,8 @@ Admin API 是 tenant-scoped control plane。它使用獨立的 Admin login crede
 session；`x-api-key` 與資料面的 Client API Key 一律拒絕。Tenant 只來自已驗證 session，body、query
 與 header 都不能指定或覆寫。
 
-W08 只讓 Provider、Model、Policy、Quota 建立及修改 `draft`，或封存成 `archived`。Provider／Model
-由 W10 啟用，Policy 由 W11 啟用，Quota 由 W12 啟用；Admin API 出現資料列不代表資料面已套用。
+Provider、Model 與 Model Alias 可由 W10 建立、修改、啟用、停用或封存。Policy 由 W11 啟用，
+Quota 由 W12 啟用；Admin API 出現 draft/disabled 資料列不代表資料面已套用。
 
 ## 認證與 bootstrap
 
@@ -26,7 +26,7 @@ DB 只存 domain-separated HMAC、fingerprint 與非秘密 key id。Session 絕�
 
 | 操作 | admin | operator | viewer |
 | --- | --- | --- | --- |
-| 讀取九類資源 | allow | allow | allow |
+| 讀取十類資源 | allow | allow | allow |
 | 建立、修改、停用、撤銷、封存、輪替 | allow | allow | deny + audit |
 | 列出、建立、修改 Admin account／角色 | allow | deny | deny |
 | 登出自己的 session | allow | allow | allow |
@@ -38,7 +38,7 @@ admin 並行降級時仍至少留下一位 active admin。
 ## 資源端點
 
 `{resource}` 只接受 `users`、`devices`、`clients`、`agents`、`credentials`、`providers`、
-`models`、`policies`、`quotas`。
+`models`、`model-aliases`、`policies`、`quotas`。
 
 | 動作 | 端點 | 契約 |
 | --- | --- | --- |
@@ -48,6 +48,7 @@ admin 並行降級時仍至少留下一位 active admin。
 | update | `PATCH /admin/v1/{resource}/{id}` | body 必帶目前 `version` |
 | delete semantics | `DELETE /admin/v1/{resource}/{id}?version=N` | identity 停用、credential 撤銷、draft 封存 |
 | rotate key | `POST /admin/v1/credentials/{id}/rotate` | body 帶 `version`、1..900 秒 overlap |
+| registry lifecycle | `POST /admin/v1/{providers|models|model-aliases}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
 
 所有 mutable resource 使用 version CAS；stale version 回 409。User／Device／Client／Agent 是四個
 獨立 Principal 維度，一把 credential 可同時指向多個維度，但至少一個；停用任一已關聯維度會在
@@ -75,5 +76,5 @@ Admin request body 上限 1 MiB。CORS 只允許 `ADMIN_ALLOWED_ORIGIN` 的單�
 ## 驗收
 
 `./scripts/check.sh all` 會跑 migration、tenant/FK、bootstrap one-shot、session 撤銷、角色版本失效、
-並行最後-admin 保護、九類 CRUD/CAS/audit、viewer 403、body 上限、credential cache 失效及 pool 隔離。
+並行最後-admin 保護、十類 CRUD/CAS/audit、viewer 403、body 上限、credential cache 失效及 pool 隔離。
 RBAC 陰性對照必須實際移除 middleware 檢查，確認 viewer mutation 測試變紅後再還原。

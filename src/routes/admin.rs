@@ -13,9 +13,9 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, ListQuery, ReportListQuery,
-        ReportWindowQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
-        RotateCredentialInput, SessionOutput, UsageQuery, authorize,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, LifecycleInput, ListQuery,
+        ReportListQuery, ReportWindowQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
+        ResourceTarget, RotateCredentialInput, SessionOutput, UsageQuery, authorize,
     },
     middleware::REQUEST_ID_HEADER,
     state::AppState,
@@ -34,6 +34,10 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/v1/governance", get(governance_report))
         .route("/admin/v1/system-health", get(system_health_report))
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
+        .route(
+            "/admin/v1/{resource}/{id}/lifecycle",
+            post(set_registry_lifecycle),
+        )
         .route(
             "/admin/v1/admin-accounts",
             get(list_admin_accounts).post(create_admin_account),
@@ -320,6 +324,31 @@ async fn delete_resource(
                 &context,
                 ResourceTarget::new(kind, id),
                 query.version,
+                source,
+                peer.ip(),
+                request_id(&headers)?,
+            )
+            .await?,
+    ))
+}
+
+async fn set_registry_lifecycle(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((resource, id)): Path<(String, uuid::Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<LifecycleInput>,
+) -> Result<Json<ResourceMutationOutput>, AdminError> {
+    let kind = resource.parse::<ResourceKind>()?;
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    Ok(Json(
+        state
+            .admin
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(kind, id),
+                input,
                 source,
                 peer.ip(),
                 request_id(&headers)?,

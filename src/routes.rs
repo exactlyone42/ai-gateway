@@ -162,6 +162,7 @@ mod tests {
             credential_cache_ttl_seconds: 60,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![Uuid::nil()],
             admin_session_ttl_seconds: 900,
             admin_allowed_origin: None,
             admin_trusted_proxy_ips: Vec::new(),
@@ -675,6 +676,7 @@ mod tests {
                 quality: None,
                 budget_class: None,
                 estimated_tokens: None,
+                selection: None,
                 principal: PrincipalContext::bootstrap(),
                 created_at: Utc::now(),
             })

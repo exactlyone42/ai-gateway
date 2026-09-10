@@ -50,6 +50,7 @@ pub struct Config {
     pub credential_cache_ttl_seconds: u64,
     pub admin_bootstrap_token: Option<String>,
     pub admin_bootstrap_tenant_id: Option<Uuid>,
+    pub provider_allowed_tenant_ids: Vec<Uuid>,
     pub admin_session_ttl_seconds: u64,
     pub admin_allowed_origin: Option<String>,
     pub admin_trusted_proxy_ips: Vec<IpAddr>,
@@ -68,6 +69,10 @@ pub enum ConfigError {
     InvalidPoolSize(#[from] std::num::ParseIntError),
     #[error("invalid ADMIN_DATABASE_MAX_CONNECTIONS: {0}")]
     InvalidAdminPoolSize(String),
+    #[error("tenant ids must not be the nil UUID")]
+    NilTenant,
+    #[error("invalid PROVIDER_ALLOWED_TENANT_IDS entry: {0}")]
+    InvalidProviderTenant(String),
     #[error("CREDENTIAL_HASH_KEY must contain at least 32 bytes")]
     WeakCredentialHashKey,
     #[error("credential hash key ids must use lowercase ASCII letters, digits or hyphens")]
@@ -242,8 +247,21 @@ impl Config {
                     .map_err(|error| ConfigError::InvalidAdminBootstrapTenant(error.to_string()))
             })
             .transpose()?;
+        if admin_bootstrap_tenant_id.is_some_and(|tenant_id| tenant_id.is_nil()) {
+            return Err(ConfigError::NilTenant);
+        }
         if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
             return Err(ConfigError::IncompleteAdminBootstrap);
+        }
+        let mut provider_allowed_tenant_ids =
+            provider_tenant_ids(env::var("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default())?;
+        if let Some(tenant_id) = admin_bootstrap_tenant_id
+            && !provider_allowed_tenant_ids.contains(&tenant_id)
+        {
+            provider_allowed_tenant_ids.push(tenant_id);
+        }
+        if bootstrap_client_key.is_some() {
+            provider_allowed_tenant_ids.push(Uuid::nil());
         }
         if admin_bootstrap_token
             .as_ref()
@@ -326,6 +344,7 @@ impl Config {
             credential_cache_ttl_seconds,
             admin_bootstrap_token,
             admin_bootstrap_tenant_id,
+            provider_allowed_tenant_ids,
             admin_session_ttl_seconds,
             admin_allowed_origin,
             admin_trusted_proxy_ips,
@@ -338,6 +357,23 @@ impl Config {
     pub fn data_database_max_connections(&self) -> u32 {
         self.database_max_connections - self.admin_database_max_connections
     }
+}
+
+fn provider_tenant_ids(value: String) -> Result<Vec<Uuid>, ConfigError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map_err(|_| ConfigError::InvalidProviderTenant(value.to_owned()))
+                .and_then(|tenant_id| {
+                    (!tenant_id.is_nil())
+                        .then_some(tenant_id)
+                        .ok_or(ConfigError::NilTenant)
+                })
+        })
+        .collect()
 }
 
 fn valid_origin(value: &str, environment: &str) -> bool {
@@ -477,6 +513,19 @@ mod tests {
             bootstrap_client_key("dev", true, Some(" key ".to_owned())).unwrap(),
             Some("key".to_owned())
         );
+    }
+
+    #[test]
+    fn provider_tenants_are_explicit_and_non_nil() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(
+            provider_tenant_ids(tenant.to_string()).unwrap(),
+            vec![tenant]
+        );
+        assert!(matches!(
+            provider_tenant_ids(Uuid::nil().to_string()),
+            Err(ConfigError::NilTenant)
+        ));
     }
 
     #[test]
