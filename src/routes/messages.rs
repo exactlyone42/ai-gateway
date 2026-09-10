@@ -20,8 +20,11 @@ use crate::{
     model_registry::{
         CapabilityRequirements, GatewayOperation, ModelSelector, parse_request, rewrite_model,
     },
+    policy::value_text,
     routes::{BodyBytes, body_bytes},
-    services::{anthropic, sse::MetadataParser, streaming},
+    services::{
+        anthropic, request_policy, request_policy::RejectionContext, sse::MetadataParser, streaming,
+    },
     state::AppState,
 };
 
@@ -110,6 +113,26 @@ async fn proxy(
             .and_then(Value::as_str)
             .unwrap_or_default(),
     )?;
+    let prepared = request_policy::prepare(
+        &state,
+        &headers,
+        selector,
+        RejectionContext {
+            principal: principal.clone(),
+            received_at,
+            request_id: ledger_request_id(&headers),
+            session_id: header_text(&headers, "x-claude-code-session-id")
+                .or_else(|| header_text(&headers, "x-session-id")),
+            operation: operation.name(),
+            client_agent_id: header_text(&headers, "x-claude-code-agent-id"),
+            parent_agent_id: header_text(&headers, "x-claude-code-parent-agent-id"),
+            estimated_tokens: matches!(operation, Operation::Messages)
+                .then(|| i64::try_from(estimate_input_tokens(body.len())).unwrap_or(i64::MAX)),
+        },
+    )
+    .await?;
+    let requested_model = prepared.requested_model.clone();
+    let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(gateway_operation, &metadata);
     let selection = state
         .models
@@ -117,12 +140,17 @@ async fn proxy(
             principal.tenant_id,
             principal.is_development_bootstrap(),
             gateway_operation,
-            selector,
+            prepared.selector.clone(),
             required,
         )
         .await?;
-    let requested_model = selection.selector.requested_value();
-    let quality = selection.selector.quality().map(ToOwned::to_owned);
+    request_policy::enforce_selected_model(
+        &state,
+        &prepared,
+        &selection.public_model_id,
+        selection.ledger_snapshot(),
+    )
+    .await?;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
@@ -146,14 +174,15 @@ async fn proxy(
                 .or_else(|| header_text(&headers, "x-session-id")),
             trace_id,
             requested_model: Some(requested_model),
-            workload_class: None,
-            urgency: None,
-            quality,
-            budget_class: None,
+            workload_class: Some(value_text(&policy.workload_class)),
+            urgency: Some(value_text(&policy.urgency)),
+            quality: Some(value_text(&policy.quality)),
+            budget_class: Some(value_text(&policy.budget_class)),
             estimated_tokens: estimated
                 .as_ref()
                 .map(|usage| i64::try_from(usage.input_tokens).unwrap_or(i64::MAX)),
             selection: selection_snapshot.clone(),
+            policy: Some(policy.ledger_snapshot()),
             principal,
             created_at: received_at,
         })
@@ -163,6 +192,7 @@ async fn proxy(
         header_text(&headers, "x-claude-code-agent-id"),
         header_text(&headers, "x-claude-code-parent-agent-id"),
     );
+    let mut reservation = request_policy::enforce_deadline(reservation, policy).await?;
     let provider_request_at = Utc::now();
     let upstream = match anthropic::forward(
         &state,

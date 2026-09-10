@@ -48,7 +48,7 @@ admin 並行降級時仍至少留下一位 active admin。
 | update | `PATCH /admin/v1/{resource}/{id}` | body 必帶目前 `version` |
 | delete semantics | `DELETE /admin/v1/{resource}/{id}?version=N` | identity 停用、credential 撤銷、draft 封存 |
 | rotate key | `POST /admin/v1/credentials/{id}/rotate` | body 帶 `version`、1..900 秒 overlap |
-| registry lifecycle | `POST /admin/v1/{providers|models|model-aliases}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
+| lifecycle | `POST /admin/v1/{providers|models|model-aliases|policies}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
 
 所有 mutable resource 使用 version CAS；stale version 回 409。User／Device／Client／Agent 是四個
 獨立 Principal 維度，一把 credential 可同時指向多個維度，但至少一個；停用任一已關聯維度會在
@@ -56,6 +56,7 @@ admin 並行降級時仍至少留下一位 active admin。
 
 Credential 的完整 plaintext 只在 create／rotate 回應一次；list／get／audit 都移除 `secret_hash` 與
 `fingerprint`。Provider 只接受 `env://NAME` 格式的 `credential_ref`，不接受 inline secret。
+Credential-scoped policy 會綁定輪替家族；新 key 在 overlap 期間不會失去舊 key 的 hard constraints。
 
 ## 稽核與錯誤
 

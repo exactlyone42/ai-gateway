@@ -501,8 +501,12 @@ impl AdminService {
                     ORDER BY q.quota_key, q.revision DESC)
                     FROM quotas q WHERE q.tenant_id = $1), '[]'::jsonb),
                 'policy_runtime', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'policy activation and evaluation are implemented in W11'
+                    'available', true,
+                    'active_count', (SELECT count(*) FROM policies p
+                        WHERE p.tenant_id = $1 AND p.lifecycle_state = 'active'),
+                    'resolution_order', jsonb_build_array(
+                        'global', 'user', 'device', 'client', 'agent', 'credential', 'request_hint'
+                    )
                 ),
                 'quota_runtime', jsonb_build_object(
                     'available', false,

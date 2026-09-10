@@ -471,16 +471,17 @@ impl CredentialService {
                 WHERE current.tenant_id = old.tenant_id AND current.id = old.id
                 RETURNING old."type", old.display_name, old.user_id,
                           old.device_id, old.client_id, old.agent_id,
-                          old.expires_at AS inherited_expires_at
+                          old.expires_at AS inherited_expires_at,
+                          COALESCE(old.rotation_root_id, old.id) AS rotation_root_id
             ), inserted AS (
                 INSERT INTO credentials (
                     id, tenant_id, "type", display_name, secret_hash, hash_key_id, key_prefix,
                     fingerprint, user_id, device_id, client_id, agent_id,
-                    expires_at, rotated_from_id
+                    expires_at, rotated_from_id, rotation_root_id
                 )
                 SELECT $4, $1, "type", display_name, $5, $6, $7,
                        $8, user_id, device_id, client_id, agent_id,
-                       COALESCE($9, inherited_expires_at), $2
+                       COALESCE($9, inherited_expires_at), $2, rotation_root_id
                 FROM shortened
                 RETURNING id
             )
@@ -889,6 +890,8 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
             provider_allowed_tenant_ids: vec![tenant_id, Uuid::nil()],
@@ -1193,6 +1196,8 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
             provider_allowed_tenant_ids: vec![tenant_id],
@@ -1278,6 +1283,8 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
             admin_bootstrap_token: None,
             admin_bootstrap_tenant_id: None,
             provider_allowed_tenant_ids: vec![Uuid::new_v4()],

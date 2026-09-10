@@ -69,8 +69,16 @@ pub struct RequestStart {
     pub budget_class: Option<String>,
     pub estimated_tokens: Option<i64>,
     pub selection: Option<ModelSelectionSnapshot>,
+    pub policy: Option<RequestPolicySnapshot>,
     pub principal: PrincipalContext,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct RequestPolicySnapshot {
+    pub deadline_at: Option<DateTime<Utc>>,
+    pub max_queue_time_ms: Option<i64>,
+    pub decision: Value,
 }
 
 #[derive(Clone)]
@@ -207,6 +215,12 @@ struct RequestRecord {
     selected_provider_model_id: Option<String>,
     #[serde(default)]
     selected_cost_metadata: Option<Value>,
+    #[serde(default)]
+    deadline_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    max_queue_time_ms: Option<i64>,
+    #[serde(default)]
+    policy_decision: Option<Value>,
     status: String,
     created_at: DateTime<Utc>,
     started_at: DateTime<Utc>,
@@ -313,6 +327,26 @@ impl Ledger {
             id: Some(id),
             envelope,
         })
+    }
+
+    pub async fn reject(
+        &self,
+        start: RequestStart,
+        operation: &str,
+        client_agent_id: Option<String>,
+        parent_agent_id: Option<String>,
+    ) -> Result<(), LedgerError> {
+        let mut reservation = self.reserve(start).await?;
+        reservation.annotate_protocol(operation, client_agent_id, parent_agent_id);
+        reservation
+            .finish(RequestCompletion {
+                status: "rejected".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: Vec::new(),
+                completed_at: Utc::now(),
+            })
+            .await
     }
 
     pub async fn flush_startup(&self) -> Result<usize, LedgerError> {
@@ -440,6 +474,12 @@ impl Reservation {
         self.envelope.request.operation = bounded_text(operation.to_owned());
         self.envelope.request.client_agent_id = bounded(client_agent_id);
         self.envelope.request.parent_agent_id = bounded(parent_agent_id);
+    }
+
+    pub fn annotate_policy(&mut self, policy: RequestPolicySnapshot) {
+        self.envelope.request.deadline_at = policy.deadline_at;
+        self.envelope.request.max_queue_time_ms = policy.max_queue_time_ms;
+        self.envelope.request.policy_decision = Some(policy.decision);
     }
 
     pub fn set_client_first_byte_at(&mut self, at: DateTime<Utc>) {
@@ -694,6 +734,7 @@ impl RequestEnvelope {
         let credential_id =
             (start.principal.credential_id != Uuid::nil()).then_some(start.principal.credential_id);
         let selection = start.selection;
+        let policy = start.policy;
         Self {
             schema_version: SCHEMA_VERSION,
             request: RequestRecord {
@@ -737,6 +778,9 @@ impl RequestEnvelope {
                     .as_ref()
                     .map(|value| value.provider_model_id.clone()),
                 selected_cost_metadata: selection.map(|value| value.cost_metadata),
+                deadline_at: policy.as_ref().and_then(|value| value.deadline_at),
+                max_queue_time_ms: policy.as_ref().and_then(|value| value.max_queue_time_ms),
+                policy_decision: policy.map(|value| value.decision),
                 status: "interrupted".to_owned(),
                 created_at: start.created_at,
                 started_at: start.created_at,
@@ -1798,6 +1842,7 @@ mod tests {
                 provider_model_id: bounded_registry_id,
                 cost_metadata: bounded_cost_metadata,
             }),
+            policy: None,
             principal: PrincipalContext::bootstrap(),
             created_at: Utc::now(),
         });
@@ -1837,6 +1882,7 @@ mod tests {
             budget_class: None,
             estimated_tokens: None,
             selection: None,
+            policy: None,
             principal: PrincipalContext::bootstrap(),
             created_at: Utc::now(),
         }

@@ -32,6 +32,11 @@ test('real gateway serves all admin views on desktop and mobile', async ({ brows
   })
   expect(operatorAccountResponse.status()).toBe(201)
   const { login_token: operatorLoginToken } = await operatorAccountResponse.json()
+  const operatorSessionResponse = await request.post('/admin/v1/sessions', {
+    headers: { authorization: `Bearer ${operatorLoginToken}`, 'x-request-id': crypto.randomUUID() },
+  })
+  expect(operatorSessionResponse.status()).toBe(201)
+  const { access_token: operatorToken } = await operatorSessionResponse.json()
 
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
   const page = await desktop.newPage()
@@ -138,6 +143,37 @@ test('real gateway serves all admin views on desktop and mobile', async ({ brows
   await page.screenshot({ path: '../.artifacts/w10-catalog-desktop.png', fullPage: true })
   await page.getByRole('link', { name: 'Policies & Scheduler' }).click()
   await expect(page.getByRole('heading', { name: 'Policies & Scheduler' })).toBeVisible()
+  await expect(page.getByText('Policy runtime')).toBeVisible()
+  await page.getByRole('button', { name: 'Policy', exact: true }).click()
+  await page.getByLabel('Policy key').fill('interactive-default')
+  await page.getByLabel('Scope').selectOption('user')
+  await page.getByLabel('Scope target').selectOption({ index: 1 })
+  const policyTargetId = await page.getByLabel('Scope target').inputValue()
+  await page.getByLabel('Configuration').fill('{invalid')
+  await page.locator('form.dialog').getByRole('button', { name: 'Create', exact: true }).click()
+  await expect(page.getByText('Configuration must be valid JSON.')).toBeVisible()
+  await page.getByLabel('Configuration').fill(JSON.stringify({ defaults: { workload_class: 'interactive', urgency: 'immediate', quality: 'premium', budget_class: 'normal' }, constraints: { max_quality: 'standard' } }))
+  await page.locator('form.dialog').getByRole('button', { name: 'Create', exact: true }).click()
+  const policyRow = page.getByRole('row').filter({ hasText: 'interactive-default' })
+  await expect(policyRow).toBeVisible()
+  await expect(policyRow.getByText(`user · ${policyTargetId.slice(0, 8)}`)).toBeVisible()
+  await policyRow.getByTitle('Edit policy').click()
+  await page.getByLabel('Configuration').fill(JSON.stringify({ defaults: { workload_class: 'interactive', urgency: 'immediate', quality: 'premium', budget_class: 'normal' }, constraints: { max_quality: 'standard', max_budget_class: 'normal' } }))
+  await page.locator('form.dialog').getByRole('button', { name: 'Save' }).click()
+  await policyRow.getByTitle('Activate policy').click()
+  await expect(policyRow.getByText('active', { exact: true })).toBeVisible()
+  await page.screenshot({ path: '../.artifacts/w11-policy-desktop.png', fullPage: true })
+  await policyRow.getByTitle('Disable policy').click()
+  await expect(policyRow.getByText('disabled', { exact: true })).toBeVisible()
+  await policyRow.getByTitle('Activate policy').click()
+  await expect(policyRow.getByText('active', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Policy', exact: true }).click()
+  await page.getByLabel('Policy key').fill('archive-me')
+  await page.getByLabel('Configuration').fill('{}')
+  await page.locator('form.dialog').getByRole('button', { name: 'Create', exact: true }).click()
+  const archivedPolicy = page.getByRole('row').filter({ hasText: 'archive-me' })
+  await archivedPolicy.getByTitle('Archive policy').click()
+  await expect(archivedPolicy.getByText('archived', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'System Health' }).click()
   await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible()
   await page.getByRole('link', { name: 'Audit' }).click()
@@ -153,11 +189,18 @@ test('real gateway serves all admin views on desktop and mobile', async ({ brows
   await viewerPage.getByRole('link', { name: 'Credentials' }).click()
   await expect(viewerPage.getByRole('heading', { name: 'Credentials' })).toBeVisible()
   await expect(viewerPage.getByRole('button', { name: 'Create', exact: true })).toHaveCount(0)
+  await viewerPage.getByRole('link', { name: 'Policies & Scheduler' }).click()
+  await expect(viewerPage.getByRole('button', { name: 'Policy', exact: true })).toHaveCount(0)
   const denied = await request.post('/admin/v1/users', {
     headers: { authorization: `Bearer ${viewerToken}`, 'x-request-id': crypto.randomUUID() },
     data: { display_name: 'Denied' },
   })
   expect(denied.status()).toBe(403)
+  const deniedPolicy = await request.post('/admin/v1/policies', {
+    headers: { authorization: `Bearer ${viewerToken}`, 'x-request-id': crypto.randomUUID() },
+    data: { policy_key: 'denied', revision: 1, configuration: {} },
+  })
+  expect(deniedPolicy.status()).toBe(403)
 
   const operator = await browser.newContext({ viewport: { width: 1024, height: 768 } })
   const operatorPage = await operator.newPage()
@@ -167,6 +210,19 @@ test('real gateway serves all admin views on desktop and mobile', async ({ brows
   await operatorPage.getByRole('link', { name: 'Models & Providers' }).click()
   await expect(operatorPage.getByRole('button', { name: 'Provider', exact: true })).toBeVisible()
   await expect(operatorPage.getByTitle('Disable')).toHaveCount(0)
+  await operatorPage.getByRole('link', { name: 'Policies & Scheduler' }).click()
+  await expect(operatorPage.getByRole('button', { name: 'Policy', exact: true })).toBeVisible()
+  await expect(operatorPage.getByTitle('Disable policy')).toHaveCount(0)
+  const governance = await request.get('/admin/v1/governance', {
+    headers: { authorization: `Bearer ${operatorToken}` },
+  })
+  const governanceBody = await governance.json()
+  const activePolicy = governanceBody.policies.find((policy: { policy_key: string }) => policy.policy_key === 'interactive-default')
+  const deniedLifecycle = await request.post(`/admin/v1/policies/${activePolicy.id}/lifecycle`, {
+    headers: { authorization: `Bearer ${operatorToken}`, 'x-request-id': crypto.randomUUID() },
+    data: { version: activePolicy.version, state: 'disabled' },
+  })
+  expect(deniedLifecycle.status()).toBe(403)
 
   const mobile = await browser.newContext({ viewport: { width: 375, height: 812 } })
   const mobilePage = await mobile.newPage()
@@ -178,6 +234,10 @@ test('real gateway serves all admin views on desktop and mobile', async ({ brows
   await expect(mobilePage.getByRole('heading', { name: 'Models & Providers' })).toBeVisible()
   expect(await mobilePage.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await mobilePage.screenshot({ path: '../.artifacts/w10-catalog-mobile.png', fullPage: true })
+  await mobilePage.getByRole('link', { name: 'Policies & Scheduler' }).click()
+  await expect(mobilePage.getByRole('heading', { name: 'Policies & Scheduler' })).toBeVisible()
+  expect(await mobilePage.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  await mobilePage.screenshot({ path: '../.artifacts/w11-policy-mobile.png', fullPage: true })
   await desktop.close()
   await viewer.close()
   await operator.close()

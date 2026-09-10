@@ -48,6 +48,8 @@ pub struct Config {
     pub credential_environment: String,
     pub credential_cache_capacity: usize,
     pub credential_cache_ttl_seconds: u64,
+    pub policy_cache_capacity: usize,
+    pub policy_cache_ttl_seconds: u64,
     pub admin_bootstrap_token: Option<String>,
     pub admin_bootstrap_tenant_id: Option<Uuid>,
     pub provider_allowed_tenant_ids: Vec<Uuid>,
@@ -91,6 +93,10 @@ pub enum ConfigError {
     InvalidCredentialCacheCapacity(String),
     #[error("invalid CREDENTIAL_CACHE_TTL_SECONDS: {0}")]
     InvalidCredentialCacheTtl(String),
+    #[error("invalid POLICY_CACHE_CAPACITY: {0}")]
+    InvalidPolicyCacheCapacity(String),
+    #[error("invalid POLICY_CACHE_TTL_SECONDS: {0}")]
+    InvalidPolicyCacheTtl(String),
     #[error("OPENAI_PROVIDER and ANTHROPIC_PROVIDER must not be empty")]
     InvalidProvider,
     #[error("invalid ledger spool capacity: {0}")]
@@ -236,6 +242,28 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let policy_cache_capacity = env::var("POLICY_CACHE_CAPACITY")
+            .unwrap_or_else(|_| "1024".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidPolicyCacheCapacity(error.to_string())
+            })?;
+        if policy_cache_capacity == 0 {
+            return Err(ConfigError::InvalidPolicyCacheCapacity(
+                "must be greater than zero".to_owned(),
+            ));
+        }
+        let policy_cache_ttl_seconds = env::var("POLICY_CACHE_TTL_SECONDS")
+            .unwrap_or_else(|_| "60".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidPolicyCacheTtl(error.to_string())
+            })?;
+        if policy_cache_ttl_seconds == 0 {
+            return Err(ConfigError::InvalidPolicyCacheTtl(
+                "must be greater than zero".to_owned(),
+            ));
+        }
         let admin_bootstrap_token = env::var("ADMIN_BOOTSTRAP_TOKEN")
             .ok()
             .map(|value| value.trim().to_owned())
@@ -342,6 +370,8 @@ impl Config {
             credential_environment,
             credential_cache_capacity,
             credential_cache_ttl_seconds,
+            policy_cache_capacity,
+            policy_cache_ttl_seconds,
             admin_bootstrap_token,
             admin_bootstrap_tenant_id,
             provider_allowed_tenant_ids,

@@ -10,6 +10,7 @@ use crate::{
     ledger::{Ledger, LedgerError},
     metrics::Instruments,
     model_registry::{GatewayOperation, ModelRegistry, ProviderProfile, ProviderProfiles},
+    policy::PolicyEngine,
 };
 use thiserror::Error;
 
@@ -26,6 +27,7 @@ pub struct AppState {
     /// pool exists and readiness decides whether it currently works.
     pub(crate) pool: Pool<Postgres>,
     pub(crate) models: ModelRegistry,
+    pub(crate) policies: PolicyEngine,
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
@@ -78,6 +80,11 @@ impl AppState {
                 Arc::<str>::from(config.anthropic_api_key.clone()),
             ),
         ])?;
+        let policies = PolicyEngine::with_cache(
+            pool.clone(),
+            config.policy_cache_capacity,
+            Duration::from_secs(config.policy_cache_ttl_seconds),
+        );
         let admin = AdminService::new(
             admin_pool,
             credentials.clone(),
@@ -90,7 +97,8 @@ impl AppState {
                 session_ttl: Duration::from_secs(config.admin_session_ttl_seconds),
             },
         )
-        .with_provider_profiles(profiles.clone());
+        .with_provider_profiles(profiles.clone())
+        .with_policy_engine(policies.clone());
         let ledger = Ledger::open(
             pool.clone(),
             config.ledger_spool_dir.clone(),
@@ -106,6 +114,7 @@ impl AppState {
             instruments: Instruments::new(),
             pool,
             models,
+            policies,
             credentials,
             admin,
             ledger,
