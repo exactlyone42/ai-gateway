@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 待合併 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `policy-engine`, `quota-ratelimit` |
 | 開始 | `2026-09-11T06:52:04+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T07:45:26+08:00` |
 | Token | 主執行為 Codex，Claude ledger exit 3；主代理無法取得精確值，四次 reviewers `758,396` |
 
 ## 目的
@@ -76,6 +76,8 @@
   誤逐、enqueue hard quota TOCTOU 與 recovery 二次 crash 非冪等，三個舊失敗狀態各補回歸測試。
 - `2026-09-11T07:41+08:00` focused re-review（161,913 tokens）通過，0 High／0 Medium；fresh DB
   `check.sh all` 重跑 Rust 150、schema 5、前端 2、關卡自測 29 全綠，0 ignored。
+- `2026-09-11T07:45+08:00` PR #41 required CI 綠後自動合入 `dev`，merge commit `4eca21d`；
+  卡 #40 由 `Closes #40` 隨 merge 關閉。
 
 ## 已確定不可行
 - 規格 §57 的 13 個 OTLP metric 名稱不在 repo；`docs/engineering-standards.md` 明禁自創同義詞，
@@ -102,6 +104,6 @@
 | Cache OTLP | 等 §57 正式名稱 | 自創暫時 metric | Metric 名稱是契約，避免永久雙名稱 |
 
 ## 下一步
-1. 等 focused fix review 與 PR CI 綠後合 `dev`，關閉卡 #40。
+1. 接手 W14 `canonical-layer`。
 2. W18 用兩個 runtime switch 跑 100-request 混合負載，回填 aging／保留容量的 TTFT 數字。
-3. 接手 W14 `canonical-layer`；§57 清單取得後回補 cache read/write OTLP 名稱。
+3. §57 清單取得後回補 cache read/write OTLP 名稱。
