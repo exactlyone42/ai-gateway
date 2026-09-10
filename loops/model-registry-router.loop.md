@@ -5,12 +5,12 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `workspace-foundation` |
 | 開始 | `2026-09-11T04:04+08:00` |
-| 結束 | — |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| 結束 | `2026-09-11T05:09:29+08:00` |
+| Token | 無法取得精確 token；Codex executor 無 usage export，Claude ledger 對本時窗拒絕回報 0 |
 
 ## 目的
 換模型是改設定，不是改程式；Client 可以要指定模型，也可以只要一個品質等級。
@@ -60,6 +60,8 @@
 - `2026-09-11T05:08+08:00` 完成 registry、deterministic router、profile tenant binding、protocol-scoped
   alias、selection ledger snapshot、Admin lifecycle/CAS/audit、標準模型清單與 Web 操作；diff 審查
   5 high／7 medium 全部修正或以實測裁定；本機完整關卡、真 Client、Playwright desktop/mobile 綠。
+- `2026-09-11T05:09:29+08:00` PR #37 合入 `dev`（merge `86395e3`）；head `0e52cf2` 的
+  `rust` 與 `sync` CI success。W10 收工，後續由 W11 policy-engine 接手。
 
 ## 已確定不可行
 - 由 gateway `/v1/models` 消除 Codex 0.153.0 custom-provider fallback warning：真 CLI 往返只
@@ -90,5 +92,4 @@
 | 停用 | commit 後開始 select 的請求立即生效 | 取消已選中的 in-flight request | 不把 W19 lifecycle 混進 Router |
 
 ## 下一步
-1. 提交並推送完整 diff，將 PR #37 轉 ready。
-2. CI success 後合入 `dev`、回填 merge SHA／結束時間／token ledger，再接 W11。
+1. W11 policy-engine：先查重並依現成 loop 接手，不另開重複卡／分支。
