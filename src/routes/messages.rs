@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     Extension, Json,
@@ -17,7 +17,8 @@ use crate::{
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::{REQUEST_ID_HEADER, RequestReceivedAt},
-    services::{anthropic, sse::MetadataParser},
+    routes::{BodyBytes, body_bytes},
+    services::{anthropic, sse::MetadataParser, streaming},
     state::AppState,
 };
 
@@ -46,8 +47,9 @@ pub async fn messages(
     Extension(received_at): Extension<RequestReceivedAt>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    body: Bytes,
+    body: BodyBytes,
 ) -> Result<Response, GatewayError> {
+    let body = body_bytes(body)?;
     proxy(
         state,
         principal,
@@ -66,8 +68,9 @@ pub async fn count_tokens(
     Extension(received_at): Extension<RequestReceivedAt>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    body: Bytes,
+    body: BodyBytes,
 ) -> Result<Response, GatewayError> {
+    let body = body_bytes(body)?;
     proxy(
         state,
         principal,
@@ -140,9 +143,9 @@ async fn proxy(
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
-                    selected_provider: Some(state.config.upstream_provider.clone()),
+                    selected_provider: Some(state.config.anthropic_provider.clone()),
                     attempts: vec![ProviderAttempt::failed(
-                        state.config.upstream_provider.clone(),
+                        state.config.anthropic_provider.clone(),
                         model,
                         provider_request_at,
                         completed_at,
@@ -163,7 +166,7 @@ async fn proxy(
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     let attempt = ProviderAttempt::begin(
-        state.config.upstream_provider.clone(),
+        state.config.anthropic_provider.clone(),
         model.clone(),
         provider_request_id,
         provider_request_at,
@@ -181,7 +184,7 @@ async fn proxy(
                     .finish(completion(
                         StatusCode::BAD_GATEWAY,
                         model,
-                        state.config.upstream_provider.clone(),
+                        state.config.anthropic_provider.clone(),
                         attempt,
                         failed_at,
                     ))
@@ -216,7 +219,7 @@ async fn proxy(
             .finish(completion(
                 status,
                 model,
-                state.config.upstream_provider.clone(),
+                state.config.anthropic_provider.clone(),
                 attempt,
                 completed_at,
             ))
@@ -224,152 +227,17 @@ async fn proxy(
         return build_response(status, &response_headers, Body::from(bytes));
     }
 
-    stream_response(
-        status,
-        response_headers,
+    let body = streaming::relay(
         upstream.response,
         reservation,
         attempt,
         model,
-        state.config.upstream_provider.clone(),
+        state.config.anthropic_provider.clone(),
+        MetadataParser::default(),
+        state.config.stream_event_max_bytes,
     )
-    .await
-}
-
-async fn stream_response(
-    status: StatusCode,
-    headers: HeaderMap,
-    response: reqwest::Response,
-    mut reservation: crate::ledger::Reservation,
-    attempt: ProviderAttempt,
-    model: String,
-    provider: String,
-) -> Result<Response, GatewayError> {
-    let checkpoint_at = Utc::now();
-    reservation
-        .checkpoint(RequestCompletion {
-            status: "cancelled".to_owned(),
-            selected_model: Some(model.clone()),
-            selected_provider: Some(provider.clone()),
-            attempts: vec![attempt.clone()],
-            completed_at: checkpoint_at,
-        })
-        .await?;
-
-    let stream = async_stream::stream! {
-        let mut upstream = response.bytes_stream();
-        let mut parser = MetadataParser::default();
-        let mut reservation = Some(reservation);
-        let mut attempt = attempt;
-        let mut first_byte = false;
-        while let Some(item) = upstream.next().await {
-            match item {
-                Ok(bytes) => {
-                    let provider_observed_at = Utc::now();
-                    let was_first = !first_byte;
-                    if was_first {
-                        first_byte = true;
-                        attempt.observe_first_byte(provider_observed_at);
-                    }
-                    let observation = parser.feed(&bytes);
-                    attempt.observe_response_id(observation.response_id);
-                    if observation.changed {
-                        attempt.observe_usage(observation.usage, provider_observed_at);
-                    }
-                    if observation.terminal {
-                        attempt.conclude("completed", None, provider_observed_at);
-                    }
-
-                    if was_first && let Some(held) = reservation.as_mut() {
-                        let first_checkpoint = held.checkpoint(RequestCompletion {
-                            status: "cancelled".to_owned(),
-                            ..completion(
-                                StatusCode::OK,
-                                model.clone(),
-                                provider.clone(),
-                                attempt.clone(),
-                                provider_observed_at,
-                            )
-                        }).await;
-                        if let Err(error) = first_checkpoint {
-                            yield Err(io::Error::other(error));
-                            return;
-                        }
-                        held.set_client_first_byte_at(Utc::now());
-                    }
-
-                    if was_first || observation.changed || observation.terminal {
-                        let next = completion(
-                            StatusCode::OK,
-                            model.clone(),
-                            provider.clone(),
-                            attempt.clone(),
-                            provider_observed_at,
-                        );
-                        let result = if observation.terminal {
-                            match reservation.take() {
-                                Some(held) => held.finish(next).await,
-                                None => Ok(()),
-                            }
-                        } else {
-                            match reservation.as_mut() {
-                                Some(held) => {
-                                    held.checkpoint(RequestCompletion {
-                                        status: "cancelled".to_owned(),
-                                        ..next
-                                    })
-                                    .await
-                                }
-                                None => Ok(()),
-                            }
-                        };
-                        if let Err(error) = result {
-                            yield Err(io::Error::other(error));
-                            return;
-                        }
-                    }
-
-                    yield Ok::<Bytes, io::Error>(bytes);
-                    if observation.terminal {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    let failed_at = Utc::now();
-                    attempt.conclude("failed", Some("upstream_body_error".to_owned()), failed_at);
-                    if let Some(held) = reservation.take() {
-                        let _ = held.finish(completion(
-                            StatusCode::BAD_GATEWAY,
-                            model.clone(),
-                            provider.clone(),
-                            attempt.clone(),
-                            failed_at,
-                        )).await;
-                    }
-                    yield Err(io::Error::other(error));
-                    return;
-                }
-            }
-        }
-
-        if let Some(held) = reservation.take() {
-            let failed_at = Utc::now();
-            attempt.conclude("failed", Some("incomplete_stream".to_owned()), failed_at);
-            let result = held.finish(completion(
-                StatusCode::BAD_GATEWAY,
-                model,
-                provider,
-                attempt,
-                failed_at,
-            )).await;
-            let cause = result
-                .err()
-                .map_or_else(|| "provider stream ended before message_stop".to_owned(), |error| error.to_string());
-            yield Err(io::Error::new(io::ErrorKind::UnexpectedEof, cause));
-        }
-    };
-
-    let mut response = build_response(status, &headers, Body::from_stream(stream))?;
+    .await?;
+    let mut response = build_response(status, &response_headers, body)?;
     response.extensions_mut().insert(StreamingResponse);
     Ok(response)
 }
@@ -471,8 +339,12 @@ fn ledger_request_id(headers: &HeaderMap) -> String {
 
 pub async fn models(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
+        "object": "list",
         "data": state.config.allowed_models.iter().map(|id| json!({
             "id": id,
+            "object": "model",
+            "created": 0,
+            "owned_by": "gateway",
             "type": "model",
             "display_name": id,
         })).collect::<Vec<_>>()

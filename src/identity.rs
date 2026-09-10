@@ -820,11 +820,15 @@ mod tests {
     async fn lifecycle_is_tenant_safe_and_revocation_beats_the_cache(pool: Pool<Postgres>) {
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
-            litellm_base_url: "http://127.0.0.1:1".to_owned(),
-            litellm_master_key: "upstream-key".to_owned(),
+            openai_base_url: "http://127.0.0.1:1".to_owned(),
+            openai_api_key: "upstream-key".to_owned(),
+            openai_provider: "openai-test".to_owned(),
+            openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
+            anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            stream_event_max_bytes: 32 * 1024 * 1024,
             bootstrap_client_key: Some("bootstrap-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -836,7 +840,6 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
-            upstream_provider: "configured-upstream".to_owned(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
@@ -1081,11 +1084,15 @@ mod tests {
             .unwrap();
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
-            litellm_base_url: "http://127.0.0.1:1".to_owned(),
-            litellm_master_key: "upstream-key".to_owned(),
+            openai_base_url: "http://127.0.0.1:1".to_owned(),
+            openai_api_key: "upstream-key".to_owned(),
+            openai_provider: "openai-test".to_owned(),
+            openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
+            anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            stream_event_max_bytes: 32 * 1024 * 1024,
             bootstrap_client_key: None,
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -1097,7 +1104,6 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
-            upstream_provider: "configured-upstream".to_owned(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
@@ -1156,11 +1162,15 @@ mod tests {
     async fn production_bootstrap_is_rejected_and_database_miss_fails_closed() {
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
-            litellm_base_url: "http://127.0.0.1:1".to_owned(),
-            litellm_master_key: "upstream-key".to_owned(),
+            openai_base_url: "http://127.0.0.1:1".to_owned(),
+            openai_api_key: "upstream-key".to_owned(),
+            openai_provider: "openai-test".to_owned(),
+            openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
+            anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            stream_event_max_bytes: 32 * 1024 * 1024,
             bootstrap_client_key: None,
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -1172,7 +1182,6 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
-            upstream_provider: "configured-upstream".to_owned(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()

@@ -34,13 +34,15 @@ capabilities can change and must be verified before declaring support.
 
 ## Current milestone
 
-The repository contains the first compilable Rust data-plane slice:
+The repository contains the native Anthropic and OpenAI data-plane slice:
 
 - `GET /healthz`
-- `POST /v1/chat/completions` (non-streaming, forwards to a configured upstream)
+- `POST /v1/messages` and `/v1/messages/count_tokens`
+- `POST /v1/responses` and `/v1/chat/completions`, including incremental SSE
+- `GET /v1/models` from the configured model allowlist
 - tenant-scoped virtual credentials with constant-time HMAC verification
-- model allowlist from configuration
-- request IDs and structured JSON logs
+- cancellation propagation, durable usage accounting, request IDs, traces,
+  metrics, and structured JSON logs
 
 An explicitly configured bootstrap key remains a dev-only compatibility path. Issued virtual
 credentials resolve through PostgreSQL to a user, device, client and agent.

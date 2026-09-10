@@ -52,3 +52,52 @@ other provider. Cross-provider normalization belongs to W14-W16.
 Sources: Anthropic Messages API and Claude Code LLM gateway protocol, verified
 2026-09-08 and linked with exact compatibility boundaries in
 `docs/feasibility.md`.
+
+## OpenAI Responses and Chat Completions
+
+The gateway exposes and forwards these endpoints directly to
+`OPENAI_BASE_URL`; canonical request conversion is not involved:
+
+- `POST /v1/responses`, used by Codex CLI.
+- `POST /v1/chat/completions`, used by other OpenAI-compatible clients.
+- `GET /v1/models` is served from `ALLOWED_MODELS` and does not call upstream.
+
+### Request and response contract
+
+- Preserve the original path, ordered query string, and JSON body bytes.
+- Forward `content-type`, `accept`, `openai-beta`, `originator`, `session_id`,
+  and `x-stainless-*` headers. Never forward client `authorization` or
+  `x-api-key`; inject only the server-side `OPENAI_API_KEY` bearer token.
+- Preserve upstream status and body bytes. Forward `content-type`,
+  `content-encoding`, `retry-after`, `request-id`, `x-request-id`, and
+  `openai-*` response headers.
+- Upstream 4xx/5xx preserve the provider status and body bytes; the provider
+  chooses that body's shape. Gateway-owned errors use a stable `error.code`.
+
+### Streaming and accounting contract
+
+- The shared relay frames one complete bounded SSE event without rewriting its
+  bytes. Provider observers emit `CanonicalStreamEvent` values for lifecycle,
+  response ID, usage, completion hints, and failures.
+- Responses requires an explicit `response.completed`. `response.failed`,
+  `response.incomplete`, or `error` fails the ledger and the response body.
+- Chat Completions accepts `[DONE]` after `finish_reason`, or clean EOF after
+  `finish_reason`; late usage between them is retained. EOF before a finish
+  reason is an error.
+- Malformed JSON, an event field without `data:`, or an event above
+  `STREAM_EVENT_MAX_BYTES` fails the stream. The default is 32 MiB and can be
+  raised for providers that place large tool results in one SSE event. Terminal
+  bytes are not released until the durable ledger finish succeeds.
+- Dropping the downstream body drops the owned upstream response body, closing
+  the provider connection. No claim is made that provider billing stops.
+- Estimated and provider-reported usage remain separate. Responses and Chat
+  token fields map to input, output, cached input, and reasoning ledger fields.
+
+Codex CLI 0.153.0 was exercised against this contract on 2026-09-11. It sent a
+streaming Responses request and consumed an explicit `response.completed`
+event. See `docs/client-compatibility.md` for the observed client fields and
+the model metadata fallback boundary.
+
+Sources: OpenAI Responses create and streaming event references, and the Codex
+configuration reference, verified 2026-09-11 and linked in
+`docs/client-compatibility.md` and `docs/feasibility.md`.

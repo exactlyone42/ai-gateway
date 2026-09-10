@@ -16,7 +16,7 @@
 | Client | 狀態 | 自訂端點方式 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
 | Claude Code CLI | **supported** | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2026-09-11 已通過 |
-| Codex CLI | **supported** | `~/.codex/config.toml` 的 `model_providers` | OpenAI Responses | 待做（W06） |
+| Codex CLI | **supported** | `~/.codex/config.toml` 的 `model_providers` | OpenAI Responses | 2026-09-11 已通過 |
 | Claude Desktop | **pending** | 只有 Claude apps gateway 的 `/user/bootstrap` 協定 | 該協定自有格式 | — |
 | VS Code（Copilot Chat） | **supported**（聊天／agent 面） | `chatLanguageModels.json` 的 Custom Endpoint | Chat Completions／Responses／**Anthropic Messages** 三選一 | 待做 |
 | Cursor | **partial**（證據等級低） | BYOK 只列五家；自訂 base URL 無官方文件 | — | — |
@@ -80,14 +80,14 @@
 | --- | --- |
 | client | Codex CLI |
 | version | codex-cli 0.153.0（本機 `codex --version`） |
-| verification_date | 2026-09-08 |
+| verification_date | 2026-09-11 |
 | custom_endpoint | `~/.codex/config.toml`：`model_provider = "<id>"` ＋ `[model_providers.<id>]`。內建 id `openai`／`ollama`／`lmstudio` 保留，不能覆寫 |
 | protocol | **OpenAI Responses。`wire_api` 只支援 `responses`，也是省略時的預設值。** `/v1/chat/completions` 對 Codex 沒有用 |
 | authentication | `env_key`（環境變數帶 key）；或 `auth`（指令產生 bearer token，可設 `refresh_interval_ms`）。另有 `experimental_bearer_token`（官方標為不建議） |
 | streaming | 支援。可調 `stream_idle_timeout_ms`、`stream_max_retries` |
-| tools / reasoning | `未查證`（Codex 沒有等同 Anthropic 那份的閘道相容契約文件） |
+| tools / reasoning | 實測請求帶 17 個 tool 定義、`reasoning.effort=low` 與 `include=["reasoning.encrypted_content"]`；閘道原樣轉送 body |
 | seat_subscription_behavior | `未查證`（OpenAI 側的官方原文待補） |
-| known_limitations | 沒有官方的閘道相容契約 → 「實際會送哪些欄位、哪些必須原樣轉送」只能靠實測。**不要照抄 Anthropic 那套假設。** |
+| known_limitations | ① 沒有官方的閘道相容契約。② Codex 0.153.0 啟動時會讀 `/v1/models` 的私有 `models[]` metadata；一般 OpenAI `data[]` 會觸發 fallback warning，但明確指定的模型仍可完成請求。完整模型能力 metadata 由 W10 註冊表提供，W06 不填假的 context window／reasoning 能力。③ 實測未送 session header；目前只能用 gateway request id 與 body 的 client metadata 關聯 |
 | official_source | <https://learn.chatgpt.com/docs/config-file/config-reference> |
 
 **設定範例**
@@ -103,6 +103,13 @@ wire_api = "responses"
 ```
 
 其它可用欄位：`http_headers`、`env_http_headers`、`query_params`、`requires_openai_auth`。
+
+**實測往返**：Codex CLI 0.153.0 以自訂 `model_provider` 指向本機 gateway，gateway 再連
+可控 Responses SSE mock；`codex exec` 最終輸出精確為 `W06_CODEX_OK`。capture 證明它先取
+`GET /v1/models`，再送 `POST /v1/responses`；推論請求為 `stream=true`、`store=false`、
+`input` 陣列、17 個工具，並帶 `originator: codex_exec`。gateway client key 沒送到 provider，
+provider 只收到 server-side bearer key。這證明 CLI 的 Responses 呼叫與 SSE 解析能走自架端點；
+不證明真 OpenAI 帳號、正式模型、訂閱或 API 計費已被使用。
 
 ## Claude Desktop
 
