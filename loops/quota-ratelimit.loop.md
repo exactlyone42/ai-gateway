@@ -5,12 +5,12 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `policy-engine`, `usage-ledger` |
 | 開始 | `2026-09-11T05:57:56+08:00` |
-| 結束 | — |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| 結束 | `2026-09-11T06:51:20+08:00`（54 分） |
+| Token | 主執行為 Codex，現有 Claude transcript ledger 無法取得精確值；獨立 reviewers `284,794` |
 
 ## 目的
 超量會被擋或被降級，而且擋的理由查得到、看得懂。
@@ -58,6 +58,7 @@
 - `2026-09-11T06:47+08:00` 全新 `apg_w12_final` 跑 `./scripts/check.sh all`：前端 2、Rust 133、
   schema 3+2、bans self-test 29/29 全綠。Playwright 1440px/390px 均無水平溢位，手機 quota
   limits 改為人類可讀逐行標籤；短暫 Vite 已停止。
+- `2026-09-11T06:51+08:00` PR #39 的 sync/Rust CI 全綠並合入 `dev`，merge `3060a8f`；W12 收工。
 
 ## 已確定不可行
 - quota reservation 與本機 durable ledger spool 無法放進同一個 PostgreSQL transaction；強行改成
@@ -87,5 +88,4 @@
 | 併發 | startup DB singleton lock＋process-local RAII lease | 需週期 heartbeat 的 DB lease | 強制單實例，取消/結束自動釋放，不對 DB 做事件迴圈 |
 
 ## 下一步
-1. 提交 PR #39，等待 CI 判定後合入 `dev`，關閉卡 #13。
-2. 接續 W13 `scheduler-admission`；佇列只消費 W12 admission 結果，不另建平行 quota counter。
+1. 接續 W13 `scheduler-admission`；佇列只消費 W12 admission 結果，不另建平行 quota counter。
