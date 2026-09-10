@@ -1,60 +1,46 @@
 # Client 相容性
 
-相容性只建立在**官方支援的設定介面**上。明確不做：TLS 中間人、憑證注入、DNS 欺騙、
-破解 Client、改執行檔、攔截訂閱憑證。某個 Client 沒有官方路徑就標 `unsupported`／`pending`，
-**不硬 hack**。
+相容性只建立在官方設定介面上。明確不做 TLS 中間人、憑證注入、DNS 欺騙、破解
+Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unknown`，不從 issue 或社群
+回報推導產品契約。
 
-要區分兩件事：
+必須分開兩件事：
 
-- **閘道支援這個模型** —— 我們的問題。
-- **Client UI 顯示這個模型** —— Client 的問題。前者成立、後者不成立時，仍算閘道支援。
+- **閘道支援模型**：閘道能接受該協定與模型名稱。
+- **Client 顯示模型**：Client 是否把模型放進 picker。前者成立不代表後者成立。
 
-查證日期一律寫出來。文件是契約，**實測才是行為**——每個 Client 的「實測往返」欄要單獨勾。
+查證日期：2026-09-11。文件證明支援邊界；「實測往返」才證明指定版本真的跑過。
 
-## 總表
+## 結論
 
-| Client | 狀態 | 自訂端點方式 | 協定 | 實測往返 |
+| Client | 狀態 | 自訂端點 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | **supported** | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2026-09-11 已通過 |
-| Codex CLI | **supported** | `~/.codex/config.toml` 的 `model_providers` | OpenAI Responses | 2026-09-11 已通過 |
-| Claude Desktop | **pending** | 只有 Claude apps gateway 的 `/user/bootstrap` 協定 | 該協定自有格式 | — |
-| VS Code（Copilot Chat） | **supported**（聊天／agent 面） | `chatLanguageModels.json` 的 Custom Endpoint | Chat Completions／Responses／**Anthropic Messages** 三選一 | 待做 |
-| Cursor | **partial**（證據等級低） | BYOK 只列五家；自訂 base URL 無官方文件 | — | — |
-| Codex Desktop／IDE | **unsupported**（證據等級低） | 無官方文件 | — | — |
-| 自建 Agent／自動化 Agent | **supported** | 自己設 base URL | 任一支援的協定 | 待做 |
-| 本機 LLM 前端 | **supported** | OpenAI 相容 base URL | Chat Completions | 待做 |
-
----
+| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.267 已通過 |
+| Codex CLI | supported | `model_providers` | OpenAI Responses | 0.153.0 已通過 |
+| Claude Desktop | pending | Claude apps gateway `/user/bootstrap` | apps gateway 私有協定 | 未做 |
+| VS Code Copilot Chat | supported | Custom Endpoint | Chat/Responses/Messages | 未安裝，未做 |
+| Cursor | partial | BYOK／OpenAI-compatible base URL override | exact wire unknown | 未安裝，未做 |
+| Codex Desktop／IDE | pending | Bedrock 模式讀共用 `~/.codex/config.toml` | self-hosted wire 未驗 | 未安裝，未做 |
 
 ## Claude Code CLI
 
 | 欄位 | 值 |
 | --- | --- |
 | client | Claude Code CLI |
-| version | 2.1.267（本機 `claude --version`） |
+| version | 2.1.267（本機） |
 | verification_date | 2026-09-11 |
-| custom_endpoint | `ANTHROPIC_BASE_URL`（shell 環境變數、`settings.json` 的 `env` 區塊、或 managed settings） |
-| protocol | Anthropic Messages。端點 `POST /v1/messages`、`POST /v1/messages/count_tokens`（可選）。推論實際打 `/v1/messages?beta=true`，**比對 path 不要比對整個 URL** |
-| authentication | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer <值>`；或 `ANTHROPIC_API_KEY` → `x-api-key`。兩個都給時兩個標頭都會送 |
-| streaming | **必須**。「if your gateway buffers complete responses before relaying them, Claude Code stalls」。且必須轉送 SSE `ping` 與註解行——靜默 300 秒 Client 會中止串流 |
-| tools | 支援。工具相關的 beta 欄位（`strict`、`defer_loading`）與其 beta 標頭**成對**，拆開轉送會噴 400 |
-| reasoning | 支援。Claude 4.6 以後會送 `thinking: {"type":"adaptive"}`，**沒有對應的 beta 標頭**；上游模型不吃就會 400 |
-| seat_subscription_behavior | 給了閘道憑證 → 訂閱**不被使用**，流量按 token 計費給憑證擁有者。只設 base URL 不給憑證 → 仍用開發者的 claude.ai 登入計費，且閘道**必須**轉送 `anthropic-beta` 裡的 OAuth capability，否則 401 |
-| known_limitations | ① Anthropic 明文不支援透過任何閘道把 Claude Code 導到非 Claude 模型。② fast mode 與 WebFetch 網域檢查直接打 `api.anthropic.com`，不走 `ANTHROPIC_BASE_URL`——封鎖對外出口時 fast mode 會報連線錯誤但推論正常。③ 指向非第一方主機時 MCP tool search 預設關閉（要開得設 `ENABLE_TOOL_SEARCH=true` 且閘道會轉送 `tool_reference` 區塊）。④ v2.1.196 起指向非 `api.anthropic.com` 時 Remote Control 停用 |
-| model discovery | `GET /v1/models?limit=1000`，3 秒逾時，**任何重導向都算失敗**（連 http→https 也算）。回 `data[]`，讀 `id`／`display_name`／`description`。**只保留 `id` 含 `claude` 或 `anthropic` 的項目**（不分大小寫；`vertex_ai/claude-...` 這種前綴也通得過）。Client 端要設 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，預設關閉 |
-| 送上門的歸屬標頭 | `x-claude-code-session-id`（session 關聯，不必解析 body）、`x-claude-code-agent-id`（子 Agent）、`x-claude-code-parent-agent-id`（巢狀）。**agent id 不是人的識別**，官方明文 |
+| custom_endpoint | `ANTHROPIC_BASE_URL`，可由 shell、`settings.json` 的 `env` 或 managed settings 設定 |
+| protocol | Anthropic Messages：`POST /v1/messages`；`POST /v1/messages/count_tokens` 可選 |
+| authentication | `ANTHROPIC_AUTH_TOKEN` 產生 bearer；`ANTHROPIC_API_KEY` 產生 `x-api-key` |
+| streaming | 必須增量轉送；SSE `ping`／comment 也算活動，預設靜默 300 秒會中止 |
+| tools | supported；工具 beta body 與 `anthropic-beta` 必須原樣成對轉送 |
+| reasoning | supported；Claude 4.6+ 可送 `thinking: {"type":"adaptive"}` |
+| seat_subscription_behavior | 有 gateway credential 時不使用 claude.ai 訂閱，按 token 計給上游憑證擁有者；只換 base URL 而沒換 credential 時仍使用登入訂閱 |
+| configuration_example | 見下方 `settings.json` |
+| known_limitations | 官方不支援經 gateway 導向非 Claude 模型；fast mode／WebFetch 網域檢查可能直連 `api.anthropic.com`；非第一方端點預設停用 MCP tool search 與 Remote Control |
 | official_source | <https://code.claude.com/docs/en/llm-gateway-protocol>、<https://code.claude.com/docs/en/llm-gateway>、<https://code.claude.com/docs/en/env-vars> |
 
-**實測往返**：Claude Code 2.1.267 以 `ANTHROPIC_BASE_URL` 與
-`ANTHROPIC_AUTH_TOKEN` 指向本機 gateway，gateway 再連可控 Anthropic SSE mock；
-`claude -p --model claude-test --max-turns 1` 最終輸出精確為
-`W05_CLAUDE_CODE_OK`。這證明 CLI 的 Messages 呼叫與 SSE 解析能走自架端點；
-不證明真 Anthropic 帳號、正式模型或計費已被實際使用。
-
-**設定範例**
-
 ```jsonc
-// ~/.claude/settings.json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://aigw.internal.example.com",
@@ -64,110 +50,165 @@
 }
 ```
 
-**閘道側必須原樣轉送的東西**（改了就壞，且有些壞法沒有錯誤訊息）：
+**實測證據**：2.1.267 指向本機 gateway，再到可控 Anthropic SSE mock；單次
+`claude -p --model claude-test --max-turns 1` 精確輸出 `W05_CLAUDE_CODE_OK`。這證明
+Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號、正式模型或計費。
 
-| 項目 | 改掉的後果 |
-| --- | --- |
-| `anthropic-beta`、`anthropic-version` 標頭 | 做白名單 → 下一個版本的新能力被剝掉就壞掉 |
-| 上游錯誤回應本體 | Client 的自動降級靠比對錯誤字串；包一層自己的 envelope 會斷掉復原路徑 |
-| `system` 陣列（attribution block 保持第一個、獨立區塊） | prompt cache key 改變，**不報錯，只是每輪都算未快取** |
-| `cache_control` 標記 | 同上：沒有錯誤，只是變貴 |
-| SSE `ping` 事件與註解行 | 長思考時被 300 秒靜默看門狗中止 |
+**Gateway contract**：推論可打 `/v1/messages?beta=true`，所以比對 path 而非完整 URL；
+`anthropic-beta`／`anthropic-version`、錯誤 body、`system` 陣列、`cache_control` 與 SSE raw
+bytes 都不得改寫。模型發現為 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
+只顯示 id 含 `claude` 或 `anthropic` 的模型。`x-claude-code-agent-id` 是 agent，不是人。
 
 ## Codex CLI
 
 | 欄位 | 值 |
 | --- | --- |
 | client | Codex CLI |
-| version | codex-cli 0.153.0（本機 `codex --version`） |
+| version | 0.153.0（本機） |
 | verification_date | 2026-09-11 |
-| custom_endpoint | `~/.codex/config.toml`：`model_provider = "<id>"` ＋ `[model_providers.<id>]`。內建 id `openai`／`ollama`／`lmstudio` 保留，不能覆寫 |
-| protocol | **OpenAI Responses。`wire_api` 只支援 `responses`，也是省略時的預設值。** `/v1/chat/completions` 對 Codex 沒有用 |
-| authentication | `env_key`（環境變數帶 key）；或 `auth`（指令產生 bearer token，可設 `refresh_interval_ms`）。另有 `experimental_bearer_token`（官方標為不建議） |
-| streaming | 支援。可調 `stream_idle_timeout_ms`、`stream_max_retries` |
-| tools / reasoning | 實測請求帶 17 個 tool 定義、`reasoning.effort=low` 與 `include=["reasoning.encrypted_content"]`；閘道原樣轉送 body |
-| seat_subscription_behavior | `未查證`（OpenAI 側的官方原文待補） |
-| known_limitations | ① 沒有官方的閘道相容契約。② Codex 0.153.0 啟動時會讀 `/v1/models` 的私有 `models[]` metadata；一般 OpenAI `data[]` 會觸發 fallback warning，但明確指定的模型仍可完成請求。完整模型能力 metadata 由 W10 註冊表提供，W06 不填假的 context window／reasoning 能力。③ 實測未送 session header；目前只能用 gateway request id 與 body 的 client metadata 關聯 |
-| official_source | <https://learn.chatgpt.com/docs/config-file/config-reference> |
-
-**設定範例**
+| custom_endpoint | `~/.codex/config.toml` 的 `model_provider` 與 `[model_providers.<id>]` |
+| protocol | OpenAI Responses；`wire_api` 唯一支援值為 `responses` |
+| authentication | gateway 用 `env_key` 或可定期更新 bearer 的 `auth` command，且保持 `requires_openai_auth = false`；`requires_openai_auth = true` 會改用 OpenAI 登入，見下方政策 |
+| streaming | supported；可設 `stream_idle_timeout_ms`、`stream_max_retries` |
+| tools | request serialization verified：隔離組態送出非空 typed tools 且含 `function`；tool-call／tool-result response 往返 unknown |
+| reasoning | request serialization verified：實測送出 `reasoning.effort` 與 `reasoning.encrypted_content` include；reasoning response 往返 unknown |
+| seat_subscription_behavior | OpenAI 路徑以 ChatGPT 登入時使用 ChatGPT plan；自己的 OpenAI API key 使用 API pricing。自訂 gateway credential 由 gateway／上游帳戶計費；官方文件沒有說明此模式是否仍影響 Client 端的 ChatGPT plan meter |
+| configuration_example | 見下方 `config.toml` |
+| known_limitations | 沒有 gateway compatibility contract；0.153.0 會讀私有 `models[]` metadata，一般 OpenAI `data[]` 只觸發 fallback warning，明確模型仍可用；完整能力 metadata 留給 W10 |
+| official_source | <https://learn.chatgpt.com/docs/config-file/config-reference>、<https://learn.chatgpt.com/docs/auth>、<https://help.openai.com/en/articles/20001275>、<https://help.openai.com/en/articles/9039756> |
 
 ```toml
-# ~/.codex/config.toml
+model = "company-default"
 model_provider = "aigw"
 
 [model_providers.aigw]
+name = "Company Gateway"
 base_url = "https://aigw.internal.example.com/v1"
-env_key  = "AIGW_API_KEY"
+env_key = "AIGW_API_KEY"
 wire_api = "responses"
+requires_openai_auth = false
 ```
 
-其它可用欄位：`http_headers`、`env_http_headers`、`query_params`、`requires_openai_auth`。
+**實測證據**：0.153.0 指向本機 gateway，再到可控 Responses SSE mock；`codex exec`
+精確輸出 `W06_CODEX_OK`。版本化 capture 顯示 `POST /v1/responses` request 為
+`stream=true`、`store=false`、非空 typed tools，並帶 reasoning effort／encrypted include；
+sentinel 掃過完整 headers、query 與 body，證明 gateway client key 未送到 provider。
+這證明 CLI 可用；不證明真 OpenAI 帳號、正式模型、訂閱或 API 計費。
 
-**實測往返**：Codex CLI 0.153.0 以自訂 `model_provider` 指向本機 gateway，gateway 再連
-可控 Responses SSE mock；`codex exec` 最終輸出精確為 `W06_CODEX_OK`。capture 證明它先取
-`GET /v1/models`，再送 `POST /v1/responses`；推論請求為 `stream=true`、`store=false`、
-`input` 陣列、17 個工具，並帶 `originator: codex_exec`。gateway client key 沒送到 provider，
-provider 只收到 server-side bearer key。這證明 CLI 的 Responses 呼叫與 SSE 解析能走自架端點；
-不證明真 OpenAI 帳號、正式模型、訂閱或 API 計費已被使用。
+可重播 harness、固定 SSE fixture 與去敏 capture 見 `docs/client-roundtrip-evidence.md`。
+
+Codex custom provider 的認證與帳務必須分開判斷：
+
+| Provider 認證模式 | 憑證／付款邊界 | 本專案政策 |
+| --- | --- | --- |
+| `env_key` 或 `auth` command，`requires_openai_auth = false` | gateway／上游契約決定；不使用 ChatGPT login token | supported |
+| `requires_openai_auth = true` ＋ ChatGPT login | OpenAI 登入與 plan 路徑 | unsupported：不得把個人／席次 token relay 給 gateway |
+| `requires_openai_auth = true` ＋ OpenAI API key | OpenAI API pricing | unsupported on custom gateway：改用專用 `env_key`，避免混淆 credential owner |
+| 無認證 | 沒有可歸屬的付款憑證 | unsupported in production |
+
+`requires_openai_auth` 會改變認證來源，不能由「custom endpoint」單獨推導付款方。
 
 ## Claude Desktop
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | **pending**（有官方路徑，但不是 `ANTHROPIC_BASE_URL`） |
-| verification_date | 2026-09-08 |
-| custom_endpoint | 走 Claude apps gateway 的 `/user/bootstrap` 設定端點，且該 gateway 的 policy 要開 `desktop` 鍵。開了之後 Cowork／Code 分頁會走閘道，Chat 分頁要另外啟用 |
-| 我們要做才支援的事 | 實作 Claude apps gateway 的協定（規格由跑起來的 gateway 在 `GET /protocol` 提供） |
-| 風險 | 官方明文「Breaking changes to the protocol are announced in advance, but indefinite backwards compatibility isn't guaranteed」 |
-| 處置 | 列 pending。要支援得先跑一個 Claude apps gateway 抓 `GET /protocol`，成本與維護風險另評。**不阻塞其它段落** |
+| client | Claude Desktop |
+| version | unknown（本機未安裝） |
+| verification_date | 2026-09-11 |
+| custom_endpoint | 不使用 `ANTHROPIC_BASE_URL`；由 Claude apps gateway 的 `/user/bootstrap` 提供設定，policy 需開 `desktop` |
+| protocol | Claude apps gateway protocol；規格由該 gateway 的 `GET /protocol` 提供 |
+| authentication | corporate IdP/OIDC 與 gateway short-lived token；自行實作所需 wire details unknown |
+| streaming | unknown（未取得 `/protocol` 規格） |
+| tools | Cowork／Code 可走 gateway；Chat 要另外 opt in；逐項工具契約 unknown |
+| reasoning | unknown |
+| seat_subscription_behavior | 官方 apps gateway 文件描述企業 IdP 與 provider credential；Desktop seat 與 provider 費用的逐項關係 unknown |
+| configuration_example | gateway policy 的 `desktop` 鍵；完整範例以官方 apps gateway 文件為準 |
+| known_limitations | 官方不保證 protocol 永久向後相容；本專案尚未部署 apps gateway 或取得 `/protocol` |
 | official_source | <https://code.claude.com/docs/en/claude-apps-gateway> |
 
-## VS Code（Copilot Chat）
+**證據邊界**：官方證明 Desktop 有 gateway 路徑，也證明不是單靠 Messages base URL；不證明
+第三方能穩定重作協定。因此狀態是 pending，不阻塞 CLI 路徑。
+
+## VS Code Copilot Chat
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | **supported**（聊天與 agent 面；程式碼補全不適用） |
-| verification_date | 2026-09-08（官方文件原文，自行覆核） |
-| custom_endpoint | `chatLanguageModels.json` 的 **Custom Endpoint** provider。UI：Chat: Manage Language Models → Add Models → Custom Endpoint |
-| protocol | **三選一，可按 provider 或按 model 指定**：`"chat-completions"`（預設）／`"responses"`／`"messages"` |
-| authentication | 設定檔的 `apiKey` |
-| 設定欄位 | provider 層：`vendor`／`apiKey`／`apiType`／`url`；model 層：`id`／`name`／`url`／`toolCalling`／`vision`／`maxInputTokens`／`maxOutputTokens` |
-| seat_subscription_behavior | 「BYOK models work without signing into a GitHub account and without a Copilot plan.」→ **不吃 Copilot 方案**，計費落在我們的 Provider 憑證 |
-| known_limitations | 只作用在聊天與工具類任務。官方原文：「Some features still require a GitHub account: semantic search, inline suggestions (code completions), and features that rely on embeddings.」另外組織管理者可以在 GitHub.com 的 Copilot 政策關掉「Bring Your Own Language Model Key in VS Code」 |
+| client | Visual Studio Code Copilot Chat／Agents |
+| version | unknown（本機未安裝；rolling official docs） |
+| verification_date | 2026-09-11 |
+| custom_endpoint | Language Models editor 的 Custom Endpoint；設定存於 `chatLanguageModels.json` |
+| protocol | provider/model 可選 `chat-completions`、`responses`、`messages` |
+| authentication | `apiKey`；可用 `requestHeaders` 與 `${apiKey}` 改成 gateway 自訂 header |
+| streaming | supported；model property `streaming` |
+| tools | supported when `toolCalling: true`；`editTools` 可宣告編輯工具格式 |
+| reasoning | `thinking`、`supportsReasoningEffort`、`reasoningEffortFormat` 可宣告 |
+| seat_subscription_behavior | BYOK model 不需 GitHub 登入或 Copilot plan；semantic search、inline completion、embedding 類功能仍需 GitHub 能力 |
+| configuration_example | 見下方 `chatLanguageModels.json` |
+| known_limitations | 只涵蓋 chat／agent，不涵蓋 inline completion；組織可停用 BYOK；未在本機實測 |
 | official_source | <https://code.visualstudio.com/docs/agent-customization/language-models> |
 
-**這件事的份量**：VS Code 可以**直接講 Anthropic Messages**。也就是 W05 做完，
-Claude Code 與 VS Code 兩個 Client 同時就通了，不必等 W06。
-**證明不了**：實際往返（未實測），以及 `apiType` 是否只有這三個值——
-官方頁面列了三個，我沒看到原始 JSON schema。
+```jsonc
+[
+  {
+    "name": "Company Gateway",
+    "vendor": "customendpoint",
+    "apiKey": "${input:aigwKey}",
+    "apiType": "messages",
+    "models": [{
+      "id": "${modelIdFromW10}",
+      "name": "Company Model",
+      "url": "https://aigw.internal.example.com/v1/messages"
+    }]
+  }
+]
+```
+
+**證據邊界**：官方文件明列三種 API、custom endpoint 與 capability 欄位，證明設定路徑
+存在；不證明本 gateway 的任一模型具有特定 token limit、tool 或 reasoning 能力。範例的模型
+ID 必須由 W10 registry 代入。本機沒有 `code` binary，所以不能宣稱指定版本已成功往返。
 
 ## Cursor
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | **partial**，而且是架構上最弱的一個 |
-| verification_date | 2026-09-08 |
-| 證據等級 | **低——子 Agent 轉述，我未自行覆核官方頁面。引用前請先驗。** |
-| BYOK | 官方只列五家：OpenAI／Anthropic／Google／Azure OpenAI／AWS Bedrock。設定在 Cursor Settings > Models |
-| 自訂 base URL | **查不到官方來源**。有社群提到的「Override OpenAI Base URL」，但沒有官方文件 → 記 `unknown`，不當成支援 |
-| known_limitations | ①「Custom API keys only work with chat models. Tab completion continues using Cursor's built-in models.」② 請求「routed through Cursor's servers for final prompt building」 |
-| **對我們的真正影響** | 第 ② 點是關鍵：如果請求要經過 Cursor 的伺服器，那我們的閘道就得**從 Cursor 的機房連得到**——等於要對外曝露。這跟「Docker port 綁 `127.0.0.1`」「閘道放私有網段」直接衝突。**在解掉這點以前，Cursor 不列入支援。** |
-| official_source | <https://cursor.com/help/models-and-usage/api-keys>（未自行覆核） |
+| client | Cursor IDE |
+| version | unknown（本機未安裝；rolling official docs） |
+| verification_date | 2026-09-11 |
+| custom_endpoint | 官方隱私文件承認 OpenAI-compatible base URL override／third-party gateway；精確設定 schema unknown |
+| protocol | OpenAI-compatible；實際 endpoint 與 request shape unknown |
+| authentication | BYOK 支援 OpenAI、Anthropic、Google、Azure OpenAI、AWS Bedrock；key 隨每次 request 經 Cursor backend，但官方稱不持久化 |
+| streaming | unknown |
+| tools | custom key 只適用 standard chat models；Tab 等特殊功能仍用 Cursor models |
+| reasoning | OpenAI BYOK 官方限定 standard non-reasoning chat models；其它 provider 細節 unknown |
+| seat_subscription_behavior | BYOK 是「at your own cost」；是否仍消耗 Cursor seat quota unknown，不能推測 |
+| configuration_example | Cursor Settings > Models > provider key；base URL override 的正式 schema unknown |
+| known_limitations | 所有 request 即使 BYOK 仍先到 Cursor backend 做 final prompt building；目前 `127.0.0.1`／private-only 部署預設不可達；enterprise private connectivity 是否涵蓋 custom LLM gateway unknown；BYOK 不適用 Cursor Zero Data Retention |
+| official_source | <https://prod.cursor.com/help/models-and-usage/api-keys>、<https://www.cursor.com/security>、<https://prod.cursor.com/docs/enterprise/privacy-and-data-governance>、<https://prod.cursor.com/docs/cloud-agent/private-connectivity> |
 
-## Codex Desktop／IDE 擴充
+**證據邊界**：官方來源證明 BYOK、base URL override 與第三方 gateway 確實存在，也明說
+request 仍經 Cursor 基礎設施；不證明目前 wire protocol 可通過本 gateway。狀態因此是 partial，
+而不是 supported。部署若只綁 `127.0.0.1` 或 private-only，預設不可達；Cursor 的 enterprise
+private connectivity 是否能連 custom LLM gateway 沒有官方證據，維持 `unknown`。
+
+## Codex Desktop／IDE
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | **unsupported** |
-| verification_date | 2026-09-08 |
-| 證據等級 | **低**。依據是 vendor repo 的 issue，不是官方文件：`openai/codex#15364`「Support custom provider in app」被 OpenAI 成員於 2026-05-10 以「upvote 不足」關閉；另有 #4558／#6963／#14133 回報「擴充／Desktop 忽略 `config.toml`」仍開著 |
-| 邊界 | **issue 關閉是「駁回一個請求」，不是「描述現行行為」**；issue 內文是使用者回報，不是官方聲明。「查不到文件」比「文件明文否認」弱。也未在本機實測 |
-| 處置 | 記 unsupported，不阻塞。Codex **CLI** 可用，那條路已經通 |
+| client | Codex Desktop app／VS Code extension |
+| version | 本機 unknown；官方 Bedrock 路徑要求 app／extension `26.429.30905` 以上 |
+| verification_date | 2026-09-11 |
+| custom_endpoint | 官方 Bedrock 設定明寫兩者讀 `~/.codex/config.toml` 與 `~/.codex/.env`；任意 self-hosted `model_providers` 是否等價套用 unknown |
+| protocol | Bedrock provider 使用 Responses；自架 gateway 的實際 wire 未驗 |
+| authentication | Bedrock 可用 bearer 或 AWS credential chain；任意自架 provider 應使用 `env_key`／`auth` 且停用 `requires_openai_auth`，實際 UI 行為 unknown |
+| streaming | unknown for self-hosted provider |
+| tools | Bedrock 模式已知缺 image generation、voice、cloud plugin store／agents；self-hosted 細節 unknown |
+| reasoning | supported model-dependent for documented Bedrock models；self-hosted metadata behavior unknown |
+| seat_subscription_behavior | OpenAI 路徑以 ChatGPT 登入時使用 plan、以 OpenAI API key 時使用 API pricing；Bedrock 由 AWS 帳戶計費；任意自架 provider 的 Client 端 plan meter 行為 unknown |
+| configuration_example | 官方只證實 Bedrock；自架 gateway 暫沿用 CLI 範例但不得宣稱已支援 |
+| known_limitations | 需重啟 app／extension 才重讀 config；目前沒有官方證據證明任意 custom provider 在 UI client 完整工作 |
+| official_source | <https://help.openai.com/en/articles/20001253-configure-codex-with-amazon-bedrock>、<https://learn.chatgpt.com/docs/config-file/config-reference>、<https://learn.chatgpt.com/docs/auth>、<https://help.openai.com/en/articles/20001275> |
 
-**通則：不要因為某個 Client 的 model picker 不顯示自訂模型就寫「閘道不支援」** —— 那是 UI 的事。
-
-## 自建 Agent、自動化 Agent、本機 LLM 前端
-
-**supported**。自己控制程式碼的一律可以設 base URL 與金鑰，選任一支援的協定即可。
-這也是最容易先跑通的實測對象，建議 W05 用它做第一次端到端驗證。
+**證據邊界**：官方 Bedrock 文件推翻「Desktop／IDE 完全忽略 config」的舊結論，也給出
+`26.429.30905` 的最低版本；但它只證明 Bedrock，不能外推任意 gateway，也不能證明自架
+provider 的 Client 端 plan meter 行為。因此由 unsupported 改為 pending，待安裝後做一次和
+CLI 相同的本機 Responses 往返。

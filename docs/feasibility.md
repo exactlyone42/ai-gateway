@@ -5,13 +5,14 @@
 **結論：做得出來。** 核心路徑（Claude Code、Codex CLI、**VS Code**）都可行，
 而且 Claude Code 那條還有**官方明文規範的相容契約**可以照著實作，不需要任何非官方手段。
 
-三個 Client 支援（Claude Code、Codex CLI、VS Code）、一個 pending（Claude Desktop）、
-一個受阻於架構而非協定（Cursor）、一個不支援（Codex Desktop／IDE）。**都不阻塞整體架構。**
+三個 Client 支援（Claude Code、Codex CLI、VS Code）、兩個 pending（Claude Desktop、
+Codex Desktop／IDE 的任意自架 provider）、一個受阻於架構而非協定（Cursor）。
+**都不阻塞整體架構。**
 
-**額外收穫**：VS Code 的 Custom Endpoint 可以直接講 Anthropic Messages
-→ W05 做完就同時通 Claude Code 與 VS Code 兩個 Client。
+**額外收穫**：VS Code 的 Custom Endpoint 可以直接講 Anthropic Messages。
+W05 已完成 gateway 端契約與 Claude Code 實測；VS Code 仍只有官方文件證據，尚未本機往返。
 
-查證日期：**2026-09-08**。Claude Code 本機版本 `2.1.263`，Codex CLI 本機版本 `0.153.0`。
+查證日期：**2026-09-11**。Claude Code 本機版本 `2.1.267`，Codex CLI 本機版本 `0.153.0`。
 
 > 每條結論都標了「這證明什麼、證明不了什麼」。沒有官方來源的一律寫 `未查證`，不寫推測。
 
@@ -51,7 +52,7 @@ W15 必須把這件事寫成明確的風險，不能當成一般功能宣傳。
 
 | 項目 | 值 |
 | --- | --- |
-| 版本 | 2.1.263（本機實測版本） |
+| 版本 | 2.1.267（本機實測版本） |
 | 自訂端點 | `ANTHROPIC_BASE_URL` |
 | 協定 | Anthropic Messages |
 | 認證 | `ANTHROPIC_AUTH_TOKEN`（自動加 `Bearer ` 前綴）或 `ANTHROPIC_API_KEY`（走 `x-api-key`） |
@@ -104,9 +105,9 @@ W15 必須把這件事寫成明確的風險，不能當成一般功能宣傳。
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 才會查，且**只保留 `id` 含 `claude` 或
 `anthropic` 的項目**（不分大小寫）。
 
-**這證明**：閘道端完全做得到，且每個實作細節都有明文。
-**證明不了**：本機還沒有真的把 Claude Code 指向自架閘道跑過一次——
-文件是契約，實測才是行為。W05 的完成判準含這條實測。
+**這證明**：閘道端完全做得到，且每個實作細節都有明文。W05 另以 Claude Code 2.1.267
+指向本機 gateway 與可控 SSE mock，精確輸出 `W05_CLAUDE_CODE_OK`。
+**證明不了**：真 Anthropic 帳號、正式模型或正式計費已驗證。
 
 來源：
 - <https://code.claude.com/docs/en/llm-gateway-protocol>
@@ -136,10 +137,11 @@ W15 必須把這件事寫成明確的風險，不能當成一般功能宣傳。
 所以 W06 要先做 `/v1/responses`，`/v1/chat/completions` 排在後面。
 
 **這證明**：Codex 可以指向自架端點，且支援用外部指令輪替 bearer token（對短效憑證是好事）。
-**證明不了**：Responses API 的哪些欄位 Codex 實際會送、哪些必須原樣轉送——
-Codex 沒有等同於 Anthropic 那份的閘道相容契約文件。這是 W06 的已知風險，要靠實測補。
+W06 已以 Codex CLI 0.153.0 實測：送 `POST /v1/responses`，包含串流、非空 typed tools
+與 reasoning 欄位，最後精確輸出 `W06_CODEX_OK`。
+**證明不了**：任意版本都維持相同私有模型 metadata 契約；這個剩餘缺口已移交 W10。
 
-### Claude Desktop — **partial：只透過 Claude apps gateway 協定支援**
+### Claude Desktop — **pending：只透過 Claude apps gateway 協定有官方路徑**
 
 Claude Desktop **不吃** `ANTHROPIC_BASE_URL`。它走的是 Claude apps gateway 的
 `/user/bootstrap` 設定端點，且要對應的 policy 開 `desktop` 鍵：
@@ -168,23 +170,27 @@ compatibility isn't guaranteed」。
 > 「BYOK models work without signing into a GitHub account and without a Copilot plan.」
 > — <https://code.visualstudio.com/docs/agent-customization/language-models>
 
-**這件事的份量**：VS Code 可以直接講 Anthropic Messages → **W05 做完就同時通兩個 Client**。
+**這件事的份量**：VS Code 可以直接講 Anthropic Messages，W05 已提供相容的 gateway 端路徑；
+但本機沒有 `code` binary，不能把 Claude Code 的實測算成 VS Code 已實測。
 **限制**：只作用在聊天與工具類任務；程式碼補全、語意搜尋、embeddings 仍需 GitHub 帳號。
 組織管理者可以在 GitHub.com 關掉 BYOK 政策。
 
 ### Cursor — **partial，而且架構上最弱**
 
-證據等級低（子 Agent 轉述，未自行覆核）。BYOK 只列五家 Provider，自訂 base URL 查不到官方來源。
+2026-09-11 已自行覆核 Cursor 的 API key、security、privacy 官方頁。BYOK 列五家 Provider，
+隱私文件也承認 OpenAI-compatible base URL override／third-party gateway；精確 wire 仍是 unknown。
 
-**真正的問題不是協定**：官方說請求會「routed through Cursor's servers for final prompt building」。
-如果請求要經過 Cursor 的伺服器，我們的閘道就得**從 Cursor 的機房連得到**——等於要對外曝露，
-跟「閘道放私有網段、port 綁 `127.0.0.1`」直接衝突。**這點解不掉，Cursor 就不列入支援。**
+**真正的問題不是協定**：官方說所有請求仍經 Cursor backend 做 final prompt building。
+因此 `127.0.0.1` 或 private-only 的預設部署無法直接被 Cursor backend 連入。Cursor 另有
+enterprise private connectivity，但官方目前只說明 source-control／package 類系統，沒有說它能
+連 custom LLM gateway；可受支援的私連路徑維持 `unknown`。在證明以前 Cursor 不列入支援。
 
-### Codex Desktop／IDE 擴充 — **unsupported**
+### Codex Desktop／IDE 擴充 — **pending for arbitrary self-hosted providers**
 
-證據等級低：依據是 vendor repo 的 issue（`openai/codex#15364` 被 OpenAI 成員以「upvote 不足」
-關閉，另有三張「Desktop／擴充忽略 config.toml」仍開著），**不是官方文件**。
-issue 關閉是駁回請求，不等於描述現行行為。Codex **CLI** 那條路已經通，不阻塞。
+OpenAI 的 Bedrock 官方文件明列 Codex CLI、Desktop app、VS Code extension 三者都支援該 provider，
+且 app／extension 讀 `~/.codex/config.toml` 與 `~/.codex/.env`；app／extension 最低版本為
+`26.429.30905`。這推翻舊的「完全忽略 config」結論；但文件只證明 Bedrock，不能外推任意
+自架 gateway。未安裝實測前維持 pending，不阻塞 CLI。
 
 ---
 
@@ -216,8 +222,23 @@ issue 關閉是駁回請求，不等於描述現行行為。Codex **CLI** 那條
    這種模式閘道必須轉送 `anthropic-beta` 裡的 OAuth capability，**否則 401**。
 3. 我們**不做**第 2 種模式的「把席次轉成 API credit」——那從來不成立，官方規則就是分開計費。
 
-**這證明**：規格 §7 的邊界主張正確，且有官方文字支撐。
-**證明不了**：OpenAI／ChatGPT 側的等價聲明（子 Agent 查證中）。
+OpenAI 側也已於 2026-09-11 覆核：官方寫明 ChatGPT 與 API 是兩套 billing system；
+Codex 以 ChatGPT 登入使用 ChatGPT plan，改用自己的 OpenAI API key 則走 API pricing。
+這兩份文件沒有說明任意自架 provider 是否仍影響 Client 端 ChatGPT plan meter，因此該互動標
+`unknown`；gateway 只接受自己的 credential，不轉送 ChatGPT 登入 token。
+
+Codex custom provider 還有一個獨立開關：`requires_openai_auth = true` 會改用 OpenAI
+認證，而不是 `env_key`。本專案只支援 `requires_openai_auth = false` 搭配 gateway
+`env_key`／`auth` command；ChatGPT login token relay、custom provider 上混用 OpenAI API key、
+以及 production 無認證三種模式都不支援。
+
+**這證明**：規格 §7 的邊界主張對兩家都成立，且有官方文字支撐。
+**證明不了**：第三方 gateway 的費用是否由 Client 額外加價，或是否仍計入 Client 的方案用量；
+那要看各 Client 自己的文件與方案。
+
+OpenAI 來源：<https://help.openai.com/en/articles/20001275>、
+<https://help.openai.com/en/articles/9039756>、<https://learn.chatgpt.com/docs/auth>、
+<https://learn.chatgpt.com/docs/config-file/config-reference>。
 
 ---
 
@@ -302,8 +323,8 @@ gateway.yaml` 就能跑。
 | 2 | Codex CLI 走自架閘道 | **不是**。官方支援，但只有 `responses` 一種 wire 協定 |
 | 3 | Claude Desktop | **不是**（不阻塞）。要走 Claude apps gateway 協定，列 pending |
 | 4 | VS Code | **不是**。官方支援 Custom Endpoint，且可講 Anthropic Messages |
-| 4b | Cursor | **不是**（不阻塞）。卡在「請求經過 Cursor 伺服器」＝閘道要對外曝露，不是協定問題 |
-| 4c | Codex Desktop／IDE | **不是**（不阻塞）。無官方支援，記 unsupported；Codex CLI 那條已通 |
+| 4b | Cursor | **不是**（不阻塞）。目前 private-only 部署預設不可達；enterprise private connectivity 是否涵蓋 custom LLM gateway 為 unknown |
+| 4c | Codex Desktop／IDE | **不是**（不阻塞）。Bedrock 有官方支援；任意自架 provider 待實測，記 pending |
 | 5 | 跨 Provider 給 Claude Code 用非 Claude 模型 | **不是 blocker，但是風險**。Anthropic 明文不支援，W15 要標註 |
 | 6 | 訂閱席次轉 API credit | **不做**。官方規則就是分開計費，本專案從一開始就不碰 |
 | 7 | 取消後上游是否停止計費 | **不是 blocker**。閘道盡力關連線，不宣稱 Provider 行為 |
