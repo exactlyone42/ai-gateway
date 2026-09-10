@@ -1,6 +1,8 @@
-use std::{collections::HashSet, env, net::SocketAddr};
+use std::{collections::HashSet, env, net::SocketAddr, path::PathBuf};
 
 use thiserror::Error;
+
+use crate::ledger::MIN_ENTRY_MAX_BYTES;
 
 #[derive(Clone)]
 pub struct Config {
@@ -30,6 +32,12 @@ pub struct Config {
     pub credential_environment: String,
     pub credential_cache_capacity: usize,
     pub credential_cache_ttl_seconds: u64,
+    /// Logical provider name written to each attempt. W10 replaces this
+    /// single-upstream setting with the model registry.
+    pub upstream_provider: String,
+    pub ledger_spool_dir: PathBuf,
+    pub ledger_spool_max_bytes: u64,
+    pub ledger_spool_entry_max_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -58,6 +66,10 @@ pub enum ConfigError {
     InvalidCredentialCacheCapacity(String),
     #[error("invalid CREDENTIAL_CACHE_TTL_SECONDS: {0}")]
     InvalidCredentialCacheTtl(String),
+    #[error("UPSTREAM_PROVIDER must not be empty")]
+    InvalidUpstreamProvider,
+    #[error("invalid ledger spool capacity: {0}")]
+    InvalidLedgerSpoolCapacity(String),
 }
 
 impl Config {
@@ -135,6 +147,35 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let upstream_provider = env::var("UPSTREAM_PROVIDER")
+            .unwrap_or_else(|_| "configured-upstream".to_owned())
+            .trim()
+            .to_owned();
+        if upstream_provider.is_empty() {
+            return Err(ConfigError::InvalidUpstreamProvider);
+        }
+        let ledger_spool_dir = PathBuf::from(
+            env::var("LEDGER_SPOOL_DIR").unwrap_or_else(|_| "var/ledger-spool".to_owned()),
+        );
+        let ledger_spool_max_bytes = ledger_capacity("LEDGER_SPOOL_MAX_BYTES", 64 * 1024 * 1024)?;
+        let ledger_spool_entry_max_bytes =
+            ledger_capacity("LEDGER_SPOOL_ENTRY_MAX_BYTES", 32 * 1024)?;
+        if ledger_spool_entry_max_bytes < MIN_ENTRY_MAX_BYTES {
+            return Err(ConfigError::InvalidLedgerSpoolCapacity(format!(
+                "LEDGER_SPOOL_ENTRY_MAX_BYTES must be at least {MIN_ENTRY_MAX_BYTES}"
+            )));
+        }
+        let reserved_bytes = ledger_spool_entry_max_bytes.checked_mul(2).ok_or_else(|| {
+            ConfigError::InvalidLedgerSpoolCapacity(
+                "LEDGER_SPOOL_ENTRY_MAX_BYTES is too large".to_owned(),
+            )
+        })?;
+        if ledger_spool_max_bytes < reserved_bytes {
+            return Err(ConfigError::InvalidLedgerSpoolCapacity(
+                "LEDGER_SPOOL_MAX_BYTES must reserve two LEDGER_SPOOL_ENTRY_MAX_BYTES files"
+                    .to_owned(),
+            ));
+        }
 
         Ok(Self {
             listen_address,
@@ -151,6 +192,10 @@ impl Config {
             credential_environment,
             credential_cache_capacity,
             credential_cache_ttl_seconds,
+            upstream_provider,
+            ledger_spool_dir,
+            ledger_spool_max_bytes,
+            ledger_spool_entry_max_bytes,
         })
     }
 }
@@ -212,6 +257,19 @@ fn retiring_hash_keys(
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
     env::var(name).map_err(|_| ConfigError::Missing(name))
+}
+
+fn ledger_capacity(name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    let value = env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|error| ConfigError::InvalidLedgerSpoolCapacity(error.to_string()))?;
+    if value == 0 {
+        return Err(ConfigError::InvalidLedgerSpoolCapacity(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

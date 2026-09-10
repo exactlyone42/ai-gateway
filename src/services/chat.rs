@@ -11,6 +11,8 @@ pub struct UpstreamReply {
     pub status: StatusCode,
     pub content_type: Option<HeaderValue>,
     pub body: Bytes,
+    pub provider_request_id: Option<String>,
+    pub provider_response_id: Option<String>,
 }
 
 /// Applies model policy, then forwards the completion request upstream.
@@ -40,11 +42,27 @@ async fn forward(state: &AppState, body: &Value) -> Result<UpstreamReply, Gatewa
         .await?;
     let status = response.status();
     let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let provider_request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = response.bytes().await?;
+    let provider_response_id = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
 
     Ok(UpstreamReply {
         status,
         content_type,
-        body: response.bytes().await?,
+        body,
+        provider_request_id,
+        provider_response_id,
     })
 }
 

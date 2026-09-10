@@ -16,7 +16,9 @@ accounts and model aliases. A client key is valid in exactly one environment.
 ## Usage ledger migration
 
 `20260910220000_usage_ledger.sql` is expand-only: it adds ledger tables, indexes,
-constraints, and append-only triggers without changing existing identity tables.
+constraints, append-only triggers, and identity deletion guards. Identity rows
+must be revoked or deactivated instead of deleted so delayed ledger envelopes
+cannot lose their foreign-key targets.
 Deploy the migration before a binary that writes ledger envelopes.
 
 Rollback the binary first and leave the ledger schema in place. Dropping these
@@ -24,6 +26,28 @@ tables is not an operational rollback because it destroys billing evidence. A
 later corrective migration must be forward-only, preserve existing rows, and
 backfill in one set-based SQL statement. Before any destructive replacement,
 take and verify a PostgreSQL backup and document the restore command.
+
+## Usage ledger spool
+
+Every accepted inference reserves two fixed-size files in `LEDGER_SPOOL_DIR`
+before the provider is called. `LEDGER_SPOOL_MAX_BYTES` is a hard logical and
+physical ceiling; when it is full, the gateway rejects the new request before
+it can incur provider cost. One file preserves the interrupted state and the
+other is a preallocated completion workspace, so finishing never needs new disk
+space after provider cost. The default is 64 MiB with 32 KiB per file, allowing
+1,024 reserved requests.
+
+An envelope contains metadata only and is fsynced before a response is
+considered accounted for. The container mounts the directory from the
+`ledger-spool` named volume. Do not place it on ephemeral container storage.
+This is a single-instance recovery mechanism, not a replicated ledger; back up
+the volume together with PostgreSQL before moving hosts.
+
+Each flush sends every currently ready envelope in one PostgreSQL function
+call. After the first database failure, the process leaves all envelopes on
+disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
+gateway once; startup applies migrations and performs one batched recovery
+before accepting traffic.
 
 ## Alerts
 

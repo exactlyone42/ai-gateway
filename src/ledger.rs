@@ -1,0 +1,1195 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs::{self, File, OpenOptions},
+    io::{Seek as _, SeekFrom, Write as _},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sqlx::{Pool, Postgres, types::Json};
+use thiserror::Error;
+use tokio::sync::{Notify, Semaphore};
+use uuid::Uuid;
+
+use crate::identity::PrincipalContext;
+
+const SCHEMA_VERSION: u8 = 1;
+pub const MIN_ENTRY_MAX_BYTES: u64 = 32 * 1024;
+
+#[derive(Debug, Error)]
+pub enum LedgerError {
+    #[error("ledger spool configuration is invalid")]
+    InvalidCapacity,
+    #[error("ledger spool is full")]
+    SpoolFull,
+    #[error("ledger record exceeds the reserved entry size")]
+    RecordTooLarge,
+    #[error("ledger spool is unavailable")]
+    Io(#[source] std::io::Error),
+    #[error("ledger record is invalid")]
+    Json(#[source] serde_json::Error),
+    #[error("ledger worker is unavailable")]
+    Worker(#[source] tokio::task::JoinError),
+    #[error("ledger flush gate is closed")]
+    FlushGateClosed,
+    #[error("usage database is unavailable")]
+    Database(#[source] sqlx::Error),
+}
+
+#[derive(Clone)]
+pub struct Ledger {
+    inner: Arc<LedgerInner>,
+}
+
+struct LedgerInner {
+    pool: Pool<Postgres>,
+    spool: Arc<Spool>,
+    database_writes_enabled: AtomicBool,
+    flush_pending: AtomicBool,
+    flush_worker_scheduled: AtomicBool,
+    flush_idle: Notify,
+    flush_gate: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+pub struct RequestStart {
+    pub request_id: String,
+    pub session_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub requested_model: Option<String>,
+    pub workload_class: Option<String>,
+    pub urgency: Option<String>,
+    pub quality: Option<String>,
+    pub budget_class: Option<String>,
+    pub estimated_tokens: Option<i64>,
+    pub principal: PrincipalContext,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct RequestCompletion {
+    pub status: String,
+    pub selected_model: Option<String>,
+    pub selected_provider: Option<String>,
+    pub attempts: Vec<ProviderAttempt>,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ProviderAttempt {
+    id: Uuid,
+    provider: String,
+    model: String,
+    provider_request_id: Option<String>,
+    provider_response_id: Option<String>,
+    started_at: DateTime<Utc>,
+    first_token_at: Option<DateTime<Utc>>,
+    completed_at: DateTime<Utc>,
+    status: String,
+    error_type: Option<String>,
+    estimated_usage: TokenUsage,
+    actual_usage: TokenUsage,
+}
+
+pub struct CompletedAttempt {
+    pub provider: String,
+    pub model: String,
+    pub provider_request_id: Option<String>,
+    pub provider_response_id: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub status: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+pub struct Reservation {
+    ledger: Ledger,
+    id: Option<Uuid>,
+    envelope: RequestEnvelope,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct RequestEnvelope {
+    schema_version: u8,
+    request: RequestRecord,
+    attempts: Vec<AttemptRecord>,
+    usage_records: Vec<UsageRecord>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct RequestRecord {
+    id: Uuid,
+    tenant_id: Uuid,
+    request_id: String,
+    user_id: Option<Uuid>,
+    device_id: Option<Uuid>,
+    client_id: Option<Uuid>,
+    agent_id: Option<Uuid>,
+    credential_id: Option<Uuid>,
+    session_id: Option<String>,
+    trace_id: Option<String>,
+    workload_class: Option<String>,
+    urgency: Option<String>,
+    quality: Option<String>,
+    budget_class: Option<String>,
+    requested_model: Option<String>,
+    selected_model: Option<String>,
+    selected_provider: Option<String>,
+    estimated_tokens: Option<i64>,
+    queue_duration_ms: i64,
+    status: String,
+    created_at: DateTime<Utc>,
+    started_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct AttemptRecord {
+    id: Uuid,
+    tenant_id: Uuid,
+    gateway_request_id: Uuid,
+    provider: String,
+    model: String,
+    provider_request_id: Option<String>,
+    provider_response_id: Option<String>,
+    attempt_number: i32,
+    started_at: DateTime<Utc>,
+    first_token_at: Option<DateTime<Utc>>,
+    completed_at: DateTime<Utc>,
+    status: String,
+    error_type: Option<String>,
+    estimated_usage: TokenUsage,
+    actual_usage: TokenUsage,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct UsageRecord {
+    id: Uuid,
+    tenant_id: Uuid,
+    gateway_request_id: Uuid,
+    provider_attempt_id: Uuid,
+    source: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_input_tokens: i64,
+    cache_write_input_tokens: i64,
+    reasoning_tokens: i64,
+    cost_microusd: Option<i64>,
+    recorded_at: DateTime<Utc>,
+}
+
+struct Spool {
+    directory: PathBuf,
+    entry_max_bytes: u64,
+    state: Mutex<SpoolState>,
+}
+
+struct SpoolState {
+    slots_used: usize,
+    slots_max: usize,
+}
+
+impl Ledger {
+    pub fn open(
+        pool: Pool<Postgres>,
+        directory: PathBuf,
+        max_bytes: u64,
+        entry_max_bytes: u64,
+    ) -> Result<Self, LedgerError> {
+        let spool = Arc::new(Spool::open(directory, max_bytes, entry_max_bytes)?);
+        Ok(Self {
+            inner: Arc::new(LedgerInner {
+                pool,
+                spool,
+                database_writes_enabled: AtomicBool::new(true),
+                flush_pending: AtomicBool::new(false),
+                flush_worker_scheduled: AtomicBool::new(false),
+                flush_idle: Notify::new(),
+                flush_gate: Arc::new(Semaphore::new(1)),
+            }),
+        })
+    }
+
+    pub async fn reserve(&self, start: RequestStart) -> Result<Reservation, LedgerError> {
+        let envelope = RequestEnvelope::started(start);
+        let id = envelope.request.id;
+        let spool = Arc::clone(&self.inner.spool);
+        let stored = envelope.clone();
+        tokio::task::spawn_blocking(move || spool.reserve(id, &stored))
+            .await
+            .map_err(LedgerError::Worker)??;
+        Ok(Reservation {
+            ledger: self.clone(),
+            id: Some(id),
+            envelope,
+        })
+    }
+
+    pub async fn flush_startup(&self) -> Result<usize, LedgerError> {
+        let _permit = Arc::clone(&self.inner.flush_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| LedgerError::FlushGateClosed)?;
+        self.flush_once().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.inner.flush_idle.notified();
+            if !self.inner.flush_worker_scheduled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn flush_once(&self) -> Result<usize, LedgerError> {
+        let spool = Arc::clone(&self.inner.spool);
+        let ready = tokio::task::spawn_blocking(move || spool.ready())
+            .await
+            .map_err(LedgerError::Worker)??;
+        if ready.is_empty() {
+            return Ok(0);
+        }
+
+        let paths = ready
+            .iter()
+            .map(|entry| entry.0.clone())
+            .collect::<Vec<_>>();
+        let envelopes = ready.into_iter().map(|entry| entry.1).collect::<Vec<_>>();
+        sqlx::query("SELECT ingest_usage_envelopes($1)")
+            .bind(Json(envelopes))
+            .execute(&self.inner.pool)
+            .await
+            .map_err(LedgerError::Database)?;
+
+        let flushed = paths.len();
+        let spool = Arc::clone(&self.inner.spool);
+        tokio::task::spawn_blocking(move || spool.remove(&paths))
+            .await
+            .map_err(LedgerError::Worker)??;
+        Ok(flushed)
+    }
+
+    fn schedule_flush(&self, runtime: &tokio::runtime::Handle) {
+        if !self.inner.database_writes_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        self.inner.flush_pending.store(true, Ordering::Release);
+        if self
+            .inner
+            .flush_worker_scheduled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let ledger = self.clone();
+        let runtime = runtime.clone();
+        let task_runtime = runtime.clone();
+        runtime.spawn(async move {
+            let permit = Arc::clone(&ledger.inner.flush_gate).acquire_owned().await;
+            if let Ok(permit) = permit {
+                let should_flush = ledger.inner.flush_pending.swap(false, Ordering::AcqRel)
+                    && ledger.inner.database_writes_enabled.load(Ordering::Acquire);
+                if should_flush && let Err(error) = ledger.flush_once().await {
+                    ledger
+                        .inner
+                        .database_writes_enabled
+                        .store(false, Ordering::Release);
+                    tracing::error!(
+                        error.type = "ledger_flush_failed",
+                        exception.message = %error,
+                        "usage remains in the durable spool; restart after database recovery"
+                    );
+                }
+                drop(permit);
+            } else {
+                tracing::error!(
+                    error.type = "ledger_flush_gate_closed",
+                    "usage remains in the durable spool"
+                );
+            }
+
+            ledger
+                .inner
+                .flush_worker_scheduled
+                .store(false, Ordering::Release);
+            ledger.inner.flush_idle.notify_waiters();
+            if ledger.inner.flush_pending.load(Ordering::Acquire)
+                && ledger.inner.database_writes_enabled.load(Ordering::Acquire)
+            {
+                ledger.schedule_flush(&task_runtime);
+            }
+        });
+    }
+}
+
+impl Reservation {
+    pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
+        self.envelope.complete(completion);
+        self.ledger.inner.spool.encode(&self.envelope)?;
+        // Transfer ownership before the cancellation point. If this future is
+        // dropped while the blocking write runs, Drop must not race it by
+        // publishing the older interrupted envelope.
+        let id = self.id.take().ok_or(LedgerError::InvalidCapacity)?;
+        let spool = Arc::clone(&self.ledger.inner.spool);
+        let envelope = self.envelope.clone();
+        let ledger = self.ledger.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let result = spool.finish(id, &envelope);
+            if result.is_ok() {
+                ledger.schedule_flush(&runtime);
+            }
+            result
+        })
+        .await
+        .map_err(LedgerError::Worker)??;
+        Ok(())
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        let ledger = self.ledger.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let flush_handle = handle.clone();
+                handle.spawn_blocking(move || match ledger.inner.spool.mark_ready(id) {
+                    Ok(()) => {
+                        ledger.schedule_flush(&flush_handle);
+                    }
+                    Err(error) => tracing::error!(
+                        error.type = "ledger_interrupted_request_not_finalized",
+                        exception.message = %error,
+                        "an interrupted request remains reserved in the spool"
+                    ),
+                });
+            }
+            Err(error) => tracing::error!(
+                error.type = "ledger_runtime_unavailable",
+                exception.message = %error,
+                "an interrupted request remains reserved until restart"
+            ),
+        }
+    }
+}
+
+impl ProviderAttempt {
+    pub fn completed(attempt: CompletedAttempt, response_body: &[u8]) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            provider: bounded_text(attempt.provider),
+            model: bounded_text(attempt.model),
+            provider_request_id: bounded(attempt.provider_request_id),
+            provider_response_id: bounded(attempt.provider_response_id),
+            started_at: attempt.started_at,
+            first_token_at: Some(attempt.completed_at),
+            completed_at: attempt.completed_at,
+            status: bounded_text(attempt.status),
+            error_type: bounded(attempt.error_type),
+            estimated_usage: TokenUsage::default(),
+            actual_usage: TokenUsage::from_response(response_body),
+        }
+    }
+
+    pub fn failed(
+        provider: String,
+        model: String,
+        started_at: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+        error_type: String,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            provider: bounded_text(provider),
+            model: bounded_text(model),
+            provider_request_id: None,
+            provider_response_id: None,
+            started_at,
+            first_token_at: None,
+            completed_at,
+            status: "failed".to_owned(),
+            error_type: Some(bounded_text(error_type)),
+            estimated_usage: TokenUsage::default(),
+            actual_usage: TokenUsage::default(),
+        }
+    }
+}
+
+impl TokenUsage {
+    fn from_response(body: &[u8]) -> Self {
+        let Ok(value) = serde_json::from_slice::<Value>(body) else {
+            return Self::default();
+        };
+        let usage = &value["usage"];
+        Self {
+            input_tokens: first_u64(usage, &["input_tokens", "prompt_tokens"]),
+            output_tokens: first_u64(usage, &["output_tokens", "completion_tokens"]),
+            cached_input_tokens: first_u64(
+                usage,
+                &["cache_read_input_tokens", "cached_input_tokens"],
+            )
+            .max(value_at(usage, &["prompt_tokens_details", "cached_tokens"])),
+            cache_write_input_tokens: first_u64(
+                usage,
+                &["cache_creation_input_tokens", "cache_write_input_tokens"],
+            ),
+            reasoning_tokens: first_u64(usage, &["reasoning_tokens"]).max(value_at(
+                usage,
+                &["output_tokens_details", "reasoning_tokens"],
+            )),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.cache_write_input_tokens == 0
+            && self.reasoning_tokens == 0
+    }
+}
+
+impl RequestEnvelope {
+    fn started(start: RequestStart) -> Self {
+        let request_id = Uuid::new_v4();
+        let credential_id =
+            (start.principal.credential_id != Uuid::nil()).then_some(start.principal.credential_id);
+        Self {
+            schema_version: SCHEMA_VERSION,
+            request: RequestRecord {
+                id: request_id,
+                tenant_id: start.principal.tenant_id,
+                request_id: nonempty_bounded(start.request_id),
+                user_id: start.principal.user_id,
+                device_id: start.principal.device_id,
+                client_id: start.principal.client_id,
+                agent_id: start.principal.agent_id,
+                credential_id,
+                session_id: bounded(start.session_id),
+                trace_id: bounded(start.trace_id),
+                workload_class: bounded(start.workload_class),
+                urgency: bounded(start.urgency),
+                quality: bounded(start.quality),
+                budget_class: bounded(start.budget_class),
+                requested_model: bounded(start.requested_model),
+                selected_model: None,
+                selected_provider: None,
+                estimated_tokens: start.estimated_tokens,
+                queue_duration_ms: 0,
+                status: "interrupted".to_owned(),
+                created_at: start.created_at,
+                started_at: start.created_at,
+                completed_at: None,
+            },
+            attempts: Vec::new(),
+            usage_records: Vec::new(),
+        }
+    }
+
+    fn complete(&mut self, completion: RequestCompletion) {
+        self.request.status = bounded_text(completion.status);
+        self.request.selected_model = bounded(completion.selected_model);
+        self.request.selected_provider = bounded(completion.selected_provider);
+        self.request.completed_at = Some(completion.completed_at);
+        self.attempts = completion
+            .attempts
+            .into_iter()
+            .enumerate()
+            .map(|(index, attempt)| AttemptRecord {
+                id: attempt.id,
+                tenant_id: self.request.tenant_id,
+                gateway_request_id: self.request.id,
+                provider: attempt.provider,
+                model: attempt.model,
+                provider_request_id: attempt.provider_request_id,
+                provider_response_id: attempt.provider_response_id,
+                attempt_number: i32::try_from(index + 1).unwrap_or(i32::MAX),
+                started_at: attempt.started_at,
+                first_token_at: attempt.first_token_at,
+                completed_at: attempt.completed_at,
+                status: attempt.status,
+                error_type: attempt.error_type,
+                estimated_usage: attempt.estimated_usage,
+                actual_usage: attempt.actual_usage,
+            })
+            .collect();
+
+        for attempt in &self.attempts {
+            if !attempt.estimated_usage.is_empty() {
+                self.usage_records.push(UsageRecord::from_usage(
+                    &self.request,
+                    attempt,
+                    "estimated",
+                    &attempt.estimated_usage,
+                ));
+            }
+            if !attempt.actual_usage.is_empty() {
+                self.usage_records.push(UsageRecord::from_usage(
+                    &self.request,
+                    attempt,
+                    "provider_reported",
+                    &attempt.actual_usage,
+                ));
+            }
+        }
+    }
+}
+
+impl UsageRecord {
+    fn from_usage(
+        request: &RequestRecord,
+        attempt: &AttemptRecord,
+        source: &str,
+        usage: &TokenUsage,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            tenant_id: request.tenant_id,
+            gateway_request_id: request.id,
+            provider_attempt_id: attempt.id,
+            source: source.to_owned(),
+            input_tokens: to_i64(usage.input_tokens),
+            output_tokens: to_i64(usage.output_tokens),
+            cached_input_tokens: to_i64(usage.cached_input_tokens),
+            cache_write_input_tokens: to_i64(usage.cache_write_input_tokens),
+            reasoning_tokens: to_i64(usage.reasoning_tokens),
+            cost_microusd: None,
+            recorded_at: attempt.completed_at,
+        }
+    }
+}
+
+impl Spool {
+    fn open(directory: PathBuf, max_bytes: u64, entry_max_bytes: u64) -> Result<Self, LedgerError> {
+        let slot_bytes = entry_max_bytes
+            .checked_mul(2)
+            .ok_or(LedgerError::InvalidCapacity)?;
+        if entry_max_bytes < MIN_ENTRY_MAX_BYTES || max_bytes < slot_bytes {
+            return Err(LedgerError::InvalidCapacity);
+        }
+        fs::create_dir_all(&directory).map_err(LedgerError::Io)?;
+        let mut states: HashMap<String, HashSet<String>> = HashMap::new();
+        for entry in fs::read_dir(&directory).map_err(LedgerError::Io)? {
+            let path = entry.map_err(LedgerError::Io)?.path();
+            let extension = path.extension().and_then(|value| value.to_str());
+            match extension {
+                Some("tmp") => fs::remove_file(path).map_err(LedgerError::Io)?,
+                Some(extension @ ("reserved" | "working" | "ready")) => {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .ok_or(LedgerError::InvalidCapacity)?;
+                    states
+                        .entry(stem.to_owned())
+                        .or_default()
+                        .insert(extension.to_owned());
+                }
+                _ => {}
+            }
+        }
+
+        let mut ids = HashSet::new();
+        for (stem, extensions) in states {
+            let ready = directory.join(format!("{stem}.ready"));
+            let reserved = directory.join(format!("{stem}.reserved"));
+            let working = directory.join(format!("{stem}.working"));
+            if extensions.contains("ready") {
+                remove_if_present(&reserved)?;
+                remove_if_present(&working)?;
+                ids.insert(stem);
+            } else if extensions.contains("reserved") {
+                remove_if_present(&working)?;
+                fs::rename(&reserved, &ready).map_err(LedgerError::Io)?;
+                ids.insert(stem);
+            } else {
+                remove_if_present(&working)?;
+            }
+        }
+        File::open(&directory)
+            .and_then(|value| value.sync_all())
+            .map_err(LedgerError::Io)?;
+
+        // One accepted request reserves both its interrupted record and a
+        // preallocated completion workspace. Completed entries use less disk,
+        // but retaining the conservative slot count guarantees the next
+        // request can always finish without allocating after provider cost.
+        let slots_max =
+            usize::try_from(max_bytes / slot_bytes).map_err(|_| LedgerError::InvalidCapacity)?;
+        if ids.len() > slots_max {
+            return Err(LedgerError::SpoolFull);
+        }
+        Ok(Self {
+            directory,
+            entry_max_bytes,
+            state: Mutex::new(SpoolState {
+                slots_used: ids.len(),
+                slots_max,
+            }),
+        })
+    }
+
+    fn reserve(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        if state.slots_used >= state.slots_max {
+            return Err(LedgerError::SpoolFull);
+        }
+        let mut bytes = self.encode(envelope)?;
+        bytes.resize(
+            usize::try_from(self.entry_max_bytes).map_err(|_| LedgerError::InvalidCapacity)?,
+            0,
+        );
+        let target = self.path(id, "reserved");
+        self.atomic_replace(&target, &bytes)?;
+        let working = self.path(id, "working");
+        if let Err(error) = self.create_preallocated(&working) {
+            remove_if_present(&target)?;
+            remove_if_present(&working)?;
+            self.sync_directory()?;
+            return Err(error);
+        }
+        self.sync_directory()?;
+        state.slots_used += 1;
+        Ok(())
+    }
+
+    fn finish(&self, id: Uuid, envelope: &RequestEnvelope) -> Result<(), LedgerError> {
+        let mut bytes = self.encode(envelope)?;
+        bytes.resize(
+            usize::try_from(self.entry_max_bytes).map_err(|_| LedgerError::InvalidCapacity)?,
+            0,
+        );
+        let reserved = self.path(id, "reserved");
+        let working = self.path(id, "working");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&working)
+            .map_err(LedgerError::Io)?;
+        file.seek(SeekFrom::Start(0)).map_err(LedgerError::Io)?;
+        file.write_all(&bytes).map_err(LedgerError::Io)?;
+        file.sync_all().map_err(LedgerError::Io)?;
+        drop(file);
+        fs::rename(&working, self.path(id, "ready")).map_err(LedgerError::Io)?;
+        remove_if_present(&reserved)?;
+        self.sync_directory()
+    }
+
+    fn mark_ready(&self, id: Uuid) -> Result<(), LedgerError> {
+        remove_if_present(&self.path(id, "working"))?;
+        fs::rename(self.path(id, "reserved"), self.path(id, "ready")).map_err(LedgerError::Io)?;
+        self.sync_directory()
+    }
+
+    fn ready(&self) -> Result<Vec<(PathBuf, RequestEnvelope)>, LedgerError> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&self.directory).map_err(LedgerError::Io)? {
+            let path = entry.map_err(LedgerError::Io)?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("ready") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::read(&path).map_err(LedgerError::Io)?;
+                let end = bytes
+                    .iter()
+                    .rposition(|byte| *byte != 0)
+                    .map_or(0, |index| index + 1);
+                let envelope: RequestEnvelope =
+                    serde_json::from_slice(&bytes[..end]).map_err(LedgerError::Json)?;
+                if envelope.schema_version != SCHEMA_VERSION {
+                    return Err(LedgerError::InvalidCapacity);
+                }
+                Ok((path, envelope))
+            })
+            .collect()
+    }
+
+    fn remove(&self, paths: &[PathBuf]) -> Result<(), LedgerError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        for path in paths {
+            fs::remove_file(path).map_err(LedgerError::Io)?;
+            state.slots_used = state.slots_used.saturating_sub(1);
+        }
+        self.sync_directory()
+    }
+
+    fn encode(&self, envelope: &RequestEnvelope) -> Result<Vec<u8>, LedgerError> {
+        let bytes = serde_json::to_vec(envelope).map_err(LedgerError::Json)?;
+        if u64::try_from(bytes.len()).map_or(true, |length| length > self.entry_max_bytes) {
+            return Err(LedgerError::RecordTooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn atomic_replace(&self, target: &Path, bytes: &[u8]) -> Result<(), LedgerError> {
+        let temporary = self.path(Uuid::new_v4(), "tmp");
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(LedgerError::Io)?;
+            file.write_all(bytes).map_err(LedgerError::Io)?;
+            file.sync_all().map_err(LedgerError::Io)?;
+            drop(file);
+            fs::rename(&temporary, target).map_err(LedgerError::Io)?;
+            self.sync_directory()
+        })();
+        if result.is_err() {
+            let _ = remove_if_present(&temporary);
+        }
+        result
+    }
+
+    fn create_preallocated(&self, target: &Path) -> Result<(), LedgerError> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(target)
+            .map_err(LedgerError::Io)?;
+        let bytes = vec![
+            0;
+            usize::try_from(self.entry_max_bytes)
+                .map_err(|_| LedgerError::InvalidCapacity)?
+        ];
+        file.write_all(&bytes).map_err(LedgerError::Io)?;
+        file.sync_all().map_err(LedgerError::Io)
+    }
+
+    fn sync_directory(&self) -> Result<(), LedgerError> {
+        File::open(&self.directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(LedgerError::Io)
+    }
+
+    fn path(&self, id: Uuid, extension: &str) -> PathBuf {
+        self.directory
+            .join(format!("{}.{}", id.simple(), extension))
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), LedgerError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LedgerError::Io(error)),
+    }
+}
+
+fn first_u64(value: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| value.get(key).and_then(Value::as_u64))
+        .unwrap_or_default()
+}
+
+fn value_at(value: &Value, path: &[&str]) -> u64 {
+    path.iter()
+        .try_fold(value, |current, key| current.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn bounded(value: Option<String>) -> Option<String> {
+    value.map(bounded_text)
+}
+
+fn bounded_text(value: String) -> String {
+    if value.len() <= 512 {
+        return value;
+    }
+    let mut boundary = 512;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_owned()
+}
+
+fn nonempty_bounded(value: String) -> String {
+    let value = bounded_text(value.trim().to_owned());
+    if value.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        value
+    }
+}
+
+fn to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::{Pool, Postgres, Row as _};
+
+    use super::*;
+    use crate::db;
+
+    #[test]
+    fn spool_reserves_real_space_and_rejects_the_next_request() {
+        let directory = test_directory("capacity");
+        let entry_bytes = MIN_ENTRY_MAX_BYTES;
+        let spool = Spool::open(directory.clone(), entry_bytes * 2, entry_bytes).unwrap();
+        let first = RequestEnvelope::started(request_start("first"));
+        spool.reserve(first.request.id, &first).unwrap();
+
+        let reserved = spool.path(first.request.id, "reserved");
+        assert_eq!(fs::metadata(reserved).unwrap().len(), entry_bytes);
+        let working = spool.path(first.request.id, "working");
+        assert_eq!(fs::metadata(&working).unwrap().len(), entry_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            assert!(fs::metadata(&working).unwrap().blocks() * 512 >= entry_bytes);
+        }
+        let second = RequestEnvelope::started(request_start("second"));
+        assert!(matches!(
+            spool.reserve(second.request.id, &second),
+            Err(LedgerError::SpoolFull)
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_recovers_each_side_of_the_completion_rename() {
+        let interrupted_directory = test_directory("interrupted-workspace");
+        let interrupted = Spool::open(
+            interrupted_directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let first = RequestEnvelope::started(request_start("interrupted"));
+        interrupted.reserve(first.request.id, &first).unwrap();
+        fs::write(interrupted.path(first.request.id, "working"), b"partial").unwrap();
+        drop(interrupted);
+
+        let reopened = Spool::open(
+            interrupted_directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "interrupted");
+        assert!(!reopened.path(first.request.id, "working").exists());
+        fs::remove_dir_all(interrupted_directory).unwrap();
+
+        let completed_directory = test_directory("completed-before-cleanup");
+        let completed = Spool::open(
+            completed_directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut second = RequestEnvelope::started(request_start("completed"));
+        completed.reserve(second.request.id, &second).unwrap();
+        second.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: Some("company-default".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        });
+        let mut bytes = completed.encode(&second).unwrap();
+        bytes.resize(MIN_ENTRY_MAX_BYTES as usize, 0);
+        fs::write(completed.path(second.request.id, "working"), bytes).unwrap();
+        fs::rename(
+            completed.path(second.request.id, "working"),
+            completed.path(second.request.id, "ready"),
+        )
+        .unwrap();
+        drop(completed);
+
+        let reopened = Spool::open(
+            completed_directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "completed");
+        assert!(!reopened.path(second.request.id, "reserved").exists());
+        fs::remove_dir_all(completed_directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn failed_database_flush_stays_durable_and_recovers_once(pool: Pool<Postgres>) {
+        let directory = test_directory("recovery");
+        let spool = Spool::open(directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("recovery-request"));
+        let request_id = envelope.request.id;
+        spool.reserve(request_id, &envelope).unwrap();
+        let now = Utc::now();
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: Some("company-default".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: vec![ProviderAttempt::completed(
+                CompletedAttempt {
+                    provider: "test-provider".to_owned(),
+                    model: "company-default".to_owned(),
+                    provider_request_id: Some("provider-request".to_owned()),
+                    provider_response_id: Some("provider-response".to_owned()),
+                    started_at: now,
+                    completed_at: now,
+                    status: "completed".to_owned(),
+                    error_type: None,
+                },
+                br#"{"prompt":"sentinel-prompt","usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"cache_creation_input_tokens":2,"output_tokens_details":{"reasoning_tokens":1}}}"#,
+            )],
+            completed_at: now,
+        });
+        spool.finish(request_id, &envelope).unwrap();
+        let ready = fs::read_to_string(spool.path(request_id, "ready")).unwrap();
+        assert!(!ready.contains("sentinel-prompt"));
+
+        let dead_pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 1).unwrap();
+        let unavailable =
+            Ledger::open(dead_pool, directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+        unavailable.schedule_flush(&tokio::runtime::Handle::current());
+        unavailable.wait_for_idle().await;
+        assert_eq!(ready_count(&directory), 1);
+        assert!(
+            !unavailable
+                .inner
+                .database_writes_enabled
+                .load(Ordering::Acquire)
+        );
+
+        let mut second = RequestEnvelope::started(request_start("second-after-outage"));
+        let second_id = second.request.id;
+        unavailable.inner.spool.reserve(second_id, &second).unwrap();
+        second.complete(RequestCompletion {
+            status: "failed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        });
+        unavailable.inner.spool.finish(second_id, &second).unwrap();
+        unavailable.schedule_flush(&tokio::runtime::Handle::current());
+        unavailable.wait_for_idle().await;
+        assert_eq!(ready_count(&directory), 2);
+        assert!(
+            !unavailable
+                .inner
+                .database_writes_enabled
+                .load(Ordering::Acquire)
+        );
+
+        let recovered =
+            Ledger::open(pool.clone(), directory.clone(), 128 * 1024, 32 * 1024).unwrap();
+        assert_eq!(recovered.flush_startup().await.unwrap(), 2);
+        assert_eq!(ready_count(&directory), 0);
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                (SELECT count(*) FROM gateway_requests) AS requests,
+                (SELECT count(*) FROM provider_attempts) AS attempts,
+                (SELECT count(*) FROM usage_records) AS usage,
+                (SELECT cached_input_tokens FROM usage_records) AS cached,
+                (SELECT cache_write_input_tokens FROM usage_records) AS cache_write,
+                (SELECT reasoning_tokens FROM usage_records) AS reasoning
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<i64, _>("requests"), 2);
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert_eq!(row.get::<i64, _>("usage"), 1);
+        assert_eq!(row.get::<i64, _>("cached"), 4);
+        assert_eq!(row.get::<i64, _>("cache_write"), 2);
+        assert_eq!(row.get::<i64, _>("reasoning"), 1);
+
+        recovered
+            .inner
+            .spool
+            .reserve(request_id, &envelope)
+            .unwrap();
+        recovered.inner.spool.finish(request_id, &envelope).unwrap();
+        assert_eq!(recovered.flush_startup().await.unwrap(), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "replaying the same envelope duplicated usage"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn a_pending_completion_is_included_after_the_flush_gate_opens(pool: Pool<Postgres>) {
+        let directory = test_directory("pending-batch");
+        let ledger = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 4,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let held_gate = Arc::clone(&ledger.inner.flush_gate)
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        let first = RequestEnvelope::started(request_start("first-pending"));
+        ledger
+            .inner
+            .spool
+            .reserve(first.request.id, &first)
+            .unwrap();
+        ledger.inner.spool.finish(first.request.id, &first).unwrap();
+        ledger.schedule_flush(&tokio::runtime::Handle::current());
+
+        let second = RequestEnvelope::started(request_start("second-pending"));
+        ledger
+            .inner
+            .spool
+            .reserve(second.request.id, &second)
+            .unwrap();
+        ledger
+            .inner
+            .spool
+            .finish(second.request.id, &second)
+            .unwrap();
+        ledger.schedule_flush(&tokio::runtime::Handle::current());
+
+        drop(held_gate);
+        ledger.wait_for_idle().await;
+        assert_eq!(ready_count(&directory), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gateway_requests")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_minimum_slot_fits_the_largest_current_single_attempt_envelope() {
+        let directory = test_directory("minimum-envelope");
+        assert!(matches!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES,
+                MIN_ENTRY_MAX_BYTES / 2
+            ),
+            Err(LedgerError::InvalidCapacity)
+        ));
+
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 2,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let long = "x".repeat(2048);
+        let mut envelope = RequestEnvelope::started(RequestStart {
+            request_id: long.clone(),
+            session_id: Some(long.clone()),
+            trace_id: Some(long.clone()),
+            requested_model: Some(long.clone()),
+            workload_class: Some(long.clone()),
+            urgency: Some(long.clone()),
+            quality: Some(long.clone()),
+            budget_class: Some(long.clone()),
+            estimated_tokens: Some(i64::MAX),
+            principal: PrincipalContext::bootstrap(),
+            created_at: Utc::now(),
+        });
+        let now = Utc::now();
+        envelope.complete(RequestCompletion {
+            status: long.clone(),
+            selected_model: Some(long.clone()),
+            selected_provider: Some(long.clone()),
+            attempts: vec![ProviderAttempt::completed(
+                CompletedAttempt {
+                    provider: long.clone(),
+                    model: long.clone(),
+                    provider_request_id: Some(long.clone()),
+                    provider_response_id: Some(long.clone()),
+                    started_at: now,
+                    completed_at: now,
+                    status: long.clone(),
+                    error_type: Some(long),
+                },
+                br#"{"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+            )],
+            completed_at: now,
+        });
+        assert!(spool.encode(&envelope).unwrap().len() < MIN_ENTRY_MAX_BYTES as usize);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn request_start(request_id: &str) -> RequestStart {
+        RequestStart {
+            request_id: request_id.to_owned(),
+            session_id: Some("session".to_owned()),
+            trace_id: Some("trace".to_owned()),
+            requested_model: Some("company-default".to_owned()),
+            workload_class: None,
+            urgency: None,
+            quality: None,
+            budget_class: None,
+            estimated_tokens: None,
+            principal: PrincipalContext::bootstrap(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn ready_count(directory: &Path) -> usize {
+        fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("ready")
+            })
+            .count()
+    }
+
+    fn test_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agent-pool-gateway-ledger-{name}-{}",
+            Uuid::new_v4()
+        ))
+    }
+}

@@ -55,10 +55,16 @@ services:
       CREDENTIAL_CACHE_CAPACITY: ${CREDENTIAL_CACHE_CAPACITY:-1024}
       CREDENTIAL_CACHE_TTL_SECONDS: ${CREDENTIAL_CACHE_TTL_SECONDS:-60}
       ALLOWED_MODELS: ${ALLOWED_MODELS:-company-default}
+      UPSTREAM_PROVIDER: ${UPSTREAM_PROVIDER:-configured-upstream}
+      LEDGER_SPOOL_DIR: /var/lib/agent-pool-gateway/ledger-spool
+      LEDGER_SPOOL_MAX_BYTES: ${LEDGER_SPOOL_MAX_BYTES:-67108864}
+      LEDGER_SPOOL_ENTRY_MAX_BYTES: ${LEDGER_SPOOL_ENTRY_MAX_BYTES:-32768}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-info,opentelemetry_sdk=warn,opentelemetry_otlp=warn}
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - ledger-spool:/var/lib/agent-pool-gateway/ledger-spool
     healthcheck:
       # Readiness, not liveness: "the stack is up" should mean the gateway can
       # actually reach its database.
@@ -69,3 +75,4 @@ services:
 
 volumes:
   postgres-data:
+  ledger-spool:

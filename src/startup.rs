@@ -20,7 +20,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     db::migrate(&pool).await?;
     info!("database schema is up to date");
 
-    let state = Arc::new(AppState::new(config, pool));
+    let state = Arc::new(AppState::new(config, pool)?);
+    let recovered = state.ledger.flush_startup().await?;
+    if recovered > 0 {
+        info!(
+            ledger.envelopes = recovered,
+            "recovered usage from the durable spool"
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "agent pool gateway started");

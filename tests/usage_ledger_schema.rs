@@ -31,6 +31,21 @@ async fn ledger_schema_is_tenant_safe_idempotent_and_append_only(pool: PgPool) {
 
     let truncate = sqlx::query("TRUNCATE usage_records").execute(&pool).await;
     assert!(truncate.is_err(), "append-only rows accepted a truncate");
+
+    sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'retained')")
+        .bind(Uuid::from_u128(8))
+        .bind(TENANT)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let delete_identity = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(Uuid::from_u128(8))
+        .execute(&pool)
+        .await;
+    assert!(
+        delete_identity.is_err(),
+        "an identity could disappear before its delayed ledger flush"
+    );
 }
 
 #[sqlx::test]

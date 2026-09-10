@@ -26,11 +26,11 @@ CREATE TABLE gateway_requests (
     credential_id UUID,
     session_id TEXT,
     trace_id TEXT,
-    workload_class TEXT NOT NULL,
-    urgency TEXT NOT NULL,
-    quality TEXT NOT NULL,
-    budget_class TEXT NOT NULL,
-    requested_model TEXT NOT NULL,
+    workload_class TEXT,
+    urgency TEXT,
+    quality TEXT,
+    budget_class TEXT,
+    requested_model TEXT,
     selected_model TEXT,
     selected_provider TEXT,
     estimated_tokens BIGINT CHECK (estimated_tokens IS NULL OR estimated_tokens >= 0),
@@ -126,6 +126,24 @@ CREATE TABLE audit_logs (
 CREATE INDEX audit_logs_occurred_at_idx
     ON audit_logs (tenant_id, occurred_at DESC);
 
+CREATE FUNCTION reject_identity_deletion() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% is retained for ledger referential integrity; revoke or deactivate it instead', TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER users_no_delete BEFORE DELETE ON users
+    FOR EACH ROW EXECUTE FUNCTION reject_identity_deletion();
+CREATE TRIGGER devices_no_delete BEFORE DELETE ON devices
+    FOR EACH ROW EXECUTE FUNCTION reject_identity_deletion();
+CREATE TRIGGER clients_no_delete BEFORE DELETE ON clients
+    FOR EACH ROW EXECUTE FUNCTION reject_identity_deletion();
+CREATE TRIGGER agents_no_delete BEFORE DELETE ON agents
+    FOR EACH ROW EXECUTE FUNCTION reject_identity_deletion();
+CREATE TRIGGER credentials_no_delete BEFORE DELETE ON credentials
+    FOR EACH ROW EXECUTE FUNCTION reject_identity_deletion();
+
 CREATE FUNCTION reject_ledger_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -158,3 +176,80 @@ CREATE TRIGGER usage_records_no_truncate
 CREATE TRIGGER audit_logs_no_truncate
     BEFORE TRUNCATE ON audit_logs
     FOR EACH STATEMENT EXECUTE FUNCTION reject_ledger_mutation();
+
+CREATE FUNCTION ingest_usage_envelopes(payload JSONB) RETURNS VOID
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF jsonb_typeof(payload) <> 'array' THEN
+        RAISE EXCEPTION 'usage envelope payload must be an array';
+    END IF;
+
+    INSERT INTO gateway_requests (
+        id, tenant_id, request_id, user_id, device_id, client_id, agent_id,
+        credential_id, session_id, trace_id, workload_class, urgency, quality,
+        budget_class, requested_model, selected_model, selected_provider,
+        estimated_tokens, queue_duration, status, created_at, started_at, completed_at
+    )
+    SELECT
+        r.id, r.tenant_id, r.request_id, r.user_id, r.device_id, r.client_id,
+        r.agent_id, r.credential_id, r.session_id, r.trace_id, r.workload_class,
+        r.urgency, r.quality, r.budget_class, r.requested_model,
+        r.selected_model, r.selected_provider, r.estimated_tokens,
+        r.queue_duration_ms * INTERVAL '1 millisecond', r.status,
+        r.created_at, r.started_at, r.completed_at
+    FROM jsonb_array_elements(payload) AS envelope
+    CROSS JOIN LATERAL jsonb_to_record(envelope->'request') AS r(
+        id UUID, tenant_id UUID, request_id TEXT, user_id UUID, device_id UUID,
+        client_id UUID, agent_id UUID, credential_id UUID, session_id TEXT,
+        trace_id TEXT, workload_class TEXT, urgency TEXT, quality TEXT,
+        budget_class TEXT, requested_model TEXT, selected_model TEXT,
+        selected_provider TEXT, estimated_tokens BIGINT, queue_duration_ms BIGINT,
+        status TEXT, created_at TIMESTAMPTZ, started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+    )
+    ON CONFLICT DO NOTHING;
+
+    INSERT INTO provider_attempts (
+        id, tenant_id, gateway_request_id, provider, model,
+        provider_request_id, provider_response_id, attempt_number, started_at,
+        first_token_at, completed_at, status, error_type,
+        estimated_usage, actual_usage
+    )
+    SELECT
+        a.id, a.tenant_id, a.gateway_request_id, a.provider, a.model,
+        a.provider_request_id, a.provider_response_id, a.attempt_number,
+        a.started_at, a.first_token_at, a.completed_at, a.status, a.error_type,
+        a.estimated_usage, a.actual_usage
+    FROM jsonb_array_elements(payload) AS envelope
+    CROSS JOIN LATERAL jsonb_array_elements(envelope->'attempts') AS attempt
+    CROSS JOIN LATERAL jsonb_to_record(attempt) AS a(
+        id UUID, tenant_id UUID, gateway_request_id UUID, provider TEXT,
+        model TEXT, provider_request_id TEXT, provider_response_id TEXT,
+        attempt_number INTEGER, started_at TIMESTAMPTZ,
+        first_token_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, status TEXT,
+        error_type TEXT, estimated_usage JSONB, actual_usage JSONB
+    )
+    ON CONFLICT DO NOTHING;
+
+    INSERT INTO usage_records (
+        id, tenant_id, gateway_request_id, provider_attempt_id, source,
+        input_tokens, output_tokens, cached_input_tokens,
+        cache_write_input_tokens, reasoning_tokens, cost_microusd, recorded_at
+    )
+    SELECT
+        u.id, u.tenant_id, u.gateway_request_id, u.provider_attempt_id, u.source,
+        u.input_tokens, u.output_tokens, u.cached_input_tokens,
+        u.cache_write_input_tokens, u.reasoning_tokens, u.cost_microusd,
+        u.recorded_at
+    FROM jsonb_array_elements(payload) AS envelope
+    CROSS JOIN LATERAL jsonb_array_elements(envelope->'usage_records') AS usage
+    CROSS JOIN LATERAL jsonb_to_record(usage) AS u(
+        id UUID, tenant_id UUID, gateway_request_id UUID,
+        provider_attempt_id UUID, source TEXT, input_tokens BIGINT,
+        output_tokens BIGINT, cached_input_tokens BIGINT,
+        cache_write_input_tokens BIGINT, reasoning_tokens BIGINT,
+        cost_microusd BIGINT, recorded_at TIMESTAMPTZ
+    )
+    ON CONFLICT DO NOTHING;
+END;
+$$;
