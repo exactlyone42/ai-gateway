@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod error;
 pub mod identity;
+pub mod ledger;
 mod logging;
 mod metrics;
 mod middleware;

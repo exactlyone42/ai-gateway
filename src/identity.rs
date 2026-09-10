@@ -833,8 +833,15 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            upstream_provider: "configured-upstream".to_owned(),
+            ledger_spool_dir: std::env::temp_dir().join(format!(
+                "agent-pool-gateway-identity-test-{}",
+                Uuid::new_v4()
+            )),
+            ledger_spool_max_bytes: 1024 * 1024,
+            ledger_spool_entry_max_bytes: 32 * 1024,
         };
-        let state = Arc::new(AppState::new(config, pool.clone()));
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
         let tenant_id = Uuid::new_v4();
         let principal = state
             .credentials
@@ -1084,8 +1091,15 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            upstream_provider: "configured-upstream".to_owned(),
+            ledger_spool_dir: std::env::temp_dir().join(format!(
+                "agent-pool-gateway-identity-test-{}",
+                Uuid::new_v4()
+            )),
+            ledger_spool_max_bytes: 1024 * 1024,
+            ledger_spool_entry_max_bytes: 32 * 1024,
         };
-        let state = Arc::new(AppState::new(config, bounded_pool));
+        let state = Arc::new(AppState::new(config, bounded_pool).unwrap());
         let tenant_id = Uuid::new_v4();
         let principal = state
             .credentials
@@ -1149,9 +1163,16 @@ mod tests {
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            upstream_provider: "configured-upstream".to_owned(),
+            ledger_spool_dir: std::env::temp_dir().join(format!(
+                "agent-pool-gateway-identity-test-{}",
+                Uuid::new_v4()
+            )),
+            ledger_spool_max_bytes: 1024 * 1024,
+            ledger_spool_entry_max_bytes: 32 * 1024,
         };
         let pool = crate::db::pool(&config.database_url, config.database_max_connections).unwrap();
-        let state = Arc::new(AppState::new(config, pool));
+        let state = Arc::new(AppState::new(config, pool).unwrap());
         assert_eq!(
             authenticated_request(&state, "bootstrap-key").await,
             StatusCode::UNAUTHORIZED,

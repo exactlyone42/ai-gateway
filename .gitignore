@@ -1,4 +1,5 @@
 /target
+/var/
 .env
 *.db
 *.db-shm

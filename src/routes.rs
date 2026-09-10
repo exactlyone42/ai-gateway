@@ -49,16 +49,32 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use axum::{
-        body::Body,
+        Json, Router,
+        body::{Body, to_bytes},
         http::{Request, StatusCode},
+        routing::post,
     };
+    use serde_json::json;
+    use sqlx::{PgPool, Row as _};
     use tower::ServiceExt as _;
 
     use super::router;
-    use crate::{config::Config, db, logging, state::AppState};
+    use chrono::Utc;
+
+    use crate::{
+        config::Config,
+        db,
+        identity::PrincipalContext,
+        ledger::{Ledger, RequestCompletion, RequestStart},
+        logging,
+        state::AppState,
+    };
 
     fn test_config() -> Config {
         Config {
@@ -79,6 +95,13 @@ mod tests {
             credential_environment: "dev".to_owned(),
             credential_cache_capacity: 8,
             credential_cache_ttl_seconds: 60,
+            upstream_provider: "configured-upstream".to_owned(),
+            ledger_spool_dir: std::env::temp_dir().join(format!(
+                "agent-pool-gateway-route-test-{}",
+                uuid::Uuid::new_v4()
+            )),
+            ledger_spool_max_bytes: 1024 * 1024,
+            ledger_spool_entry_max_bytes: 32 * 1024,
         }
     }
 
@@ -87,7 +110,7 @@ mod tests {
         let config = test_config();
         let pool = db::pool(&config.database_url, config.database_max_connections)
             .expect("the test connection string is valid");
-        Arc::new(AppState::new(config, pool))
+        Arc::new(AppState::new(config, pool).unwrap())
     }
 
     /// The one failure this guards against is silent: if the access log stops
@@ -283,5 +306,304 @@ mod tests {
                 .is_empty(),
             "no cause on a 502: {access}"
         );
+    }
+
+    #[sqlx::test]
+    async fn a_successful_request_persists_request_attempt_and_usage(pool: PgPool) {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    [("x-request-id", "provider-request")],
+                    Json(json!({
+                        "id": "provider-response",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 3,
+                            "prompt_tokens_details": {"cached_tokens": 4},
+                            "cache_creation_input_tokens": 2,
+                            "output_tokens_details": {"reasoning_tokens": 1}
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let mut config = test_config();
+        config.litellm_base_url = format!("http://{address}");
+        config.upstream_provider = "test-provider".to_owned();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .header("x-session-id", "session-one")
+                    .body(Body::from(
+                        r#"{"model":"company-default","messages":[{"role":"user","content":"sentinel-prompt"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        state.ledger.flush_startup().await.unwrap();
+
+        let row = sqlx::query(
+            r#"
+            SELECT gr.request_id, gr.session_id, gr.requested_model,
+                   gr.selected_provider, pa.provider_request_id,
+                   pa.provider_response_id, ur.input_tokens, ur.output_tokens,
+                   ur.cached_input_tokens, ur.cache_write_input_tokens,
+                   ur.reasoning_tokens
+            FROM gateway_requests gr
+            JOIN provider_attempts pa
+              ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
+            JOIN usage_records ur
+              ON (ur.tenant_id, ur.gateway_request_id, ur.provider_attempt_id) =
+                 (pa.tenant_id, pa.gateway_request_id, pa.id)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!row.get::<String, _>("request_id").is_empty());
+        assert_eq!(row.get::<String, _>("session_id"), "session-one");
+        assert_eq!(row.get::<String, _>("requested_model"), "company-default");
+        assert_eq!(row.get::<String, _>("selected_provider"), "test-provider");
+        assert_eq!(
+            row.get::<String, _>("provider_request_id"),
+            "provider-request"
+        );
+        assert_eq!(
+            row.get::<String, _>("provider_response_id"),
+            "provider-response"
+        );
+        assert_eq!(row.get::<i64, _>("input_tokens"), 10);
+        assert_eq!(row.get::<i64, _>("output_tokens"), 3);
+        assert_eq!(row.get::<i64, _>("cached_input_tokens"), 4);
+        assert_eq!(row.get::<i64, _>("cache_write_input_tokens"), 2);
+        assert_eq!(row.get::<i64, _>("reasoning_tokens"), 1);
+        upstream_task.abort();
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn a_database_outage_does_not_change_the_upstream_response_and_recovers(pool: PgPool) {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "provider-response-during-outage",
+                    "choices": [{"message": {"content": "sentinel-response"}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let mut config = test_config();
+        config.litellm_base_url = format!("http://{address}");
+        config.upstream_provider = "test-provider".to_owned();
+        let spool_dir = config.ledger_spool_dir.clone();
+        let dead_pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 1).unwrap();
+        let unavailable_state = Arc::new(AppState::new(config, dead_pool).unwrap());
+        let response = router(unavailable_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","messages":[{"role":"user","content":"sentinel-prompt"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let response_json: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(
+            response_json["choices"][0]["message"]["content"],
+            "sentinel-response"
+        );
+        unavailable_state.ledger.wait_for_idle().await;
+        assert_eq!(spool_files(&spool_dir), 1, "usage was not left durable");
+        let spooled = read_spool(&spool_dir);
+        assert!(!spooled.contains("sentinel-prompt"));
+        assert!(!spooled.contains("sentinel-response"));
+
+        let recovered =
+            Ledger::open(pool.clone(), spool_dir.clone(), 1024 * 1024, 32 * 1024).unwrap();
+        assert_eq!(recovered.flush_startup().await.unwrap(), 1);
+        assert_eq!(spool_files(&spool_dir), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_full_spool_rejects_before_calling_the_upstream() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_server = Arc::clone(&called);
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let called = Arc::clone(&called_by_server);
+                async move {
+                    called.store(true, Ordering::Release);
+                    Json(json!({"choices": []}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let mut config = test_config();
+        config.litellm_base_url = format!("http://{address}");
+        config.ledger_spool_max_bytes = 64 * 1024;
+        config.ledger_spool_entry_max_bytes = 32 * 1024;
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let held = state
+            .ledger
+            .reserve(RequestStart {
+                request_id: "held-slot".to_owned(),
+                session_id: None,
+                trace_id: None,
+                requested_model: Some("company-default".to_owned()),
+                workload_class: None,
+                urgency: None,
+                quality: None,
+                budget_class: None,
+                estimated_tokens: None,
+                principal: PrincipalContext::bootstrap(),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"company-default"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!called.load(Ordering::Acquire), "the upstream was called");
+
+        held.finish(RequestCompletion {
+            status: "interrupted".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+        state.ledger.wait_for_idle().await;
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_is_rejected_before_the_upstream_until_w05_accounts_for_it() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_server = Arc::clone(&called);
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let called = Arc::clone(&called_by_server);
+                async move {
+                    called.store(true, Ordering::Release);
+                    Json(json!({"choices": []}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let mut config = test_config();
+        config.litellm_base_url = format!("http://{address}");
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"company-default","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(!called.load(Ordering::Acquire), "the upstream was called");
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    fn spool_files(directory: &std::path::Path) -> usize {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                matches!(
+                    entry.path().extension().and_then(|value| value.to_str()),
+                    Some("ready" | "reserved")
+                )
+            })
+            .count()
+    }
+
+    fn read_spool(directory: &std::path::Path) -> String {
+        let path = std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("ready" | "reserved")
+                )
+            })
+            .unwrap();
+        String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned()
     }
 }
