@@ -5,12 +5,12 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P1 |
 | 前置 | `identity-credential`, `model-registry-router` |
 | 開始 | `2026-09-11T05:11:00+08:00` |
-| 結束 | — |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| 結束 | `2026-09-11T05:56:48+08:00`（46 分） |
+| Token | 主執行為 Codex，現有 Claude transcript ledger 無法取得精確值；獨立 reviewer `274,428` |
 
 ## 目的
 同一把金鑰的請求，效力政策是可預測、可解釋、可稽核的——查得到「為什麼這次只給 standard」。
@@ -61,6 +61,8 @@
   replacement audit、queue precedence、bounded cache、可辨識 target、併發啟用、route/service 分層與測試。
 - `2026-09-11T05:49+08:00` 真實舊版 DB 升級與新 gateway Playwright 重驗通過；另修正平行測試中
   tracing subscriber 跨執行緒遺失造成的偶發失敗。
+- `2026-09-11T05:56+08:00` 功能 commit `912bc79` 經 PR #38 的 Rust／sync CI 全綠，合入
+  `dev` merge `e7bcc4c`；完整守門 exit 0，W11 交付。
 
 ## 已確定不可行
 - `claude -p --model opus` 被組織層停用訂閱存取，單次失敗後改用獨立 `codex exec`，不重試。
@@ -89,6 +91,9 @@
   並以 capacity 壓力證明 cache 有界且 tenant key 不互串。
 - Playwright 真實 gateway 1/1：policy 建立、停用、重啟、封存，viewer 建立 403、operator lifecycle
   403；`.artifacts/w11-policy-{desktop,mobile}.png` 經人工檢視，375px 無溢位或重疊，target 可辨識。
+- PR #38：commit `912bc79`，Rust CI 2m46s 與 board sync 10s 均 success；merge `e7bcc4c`。
+- `token-ledger.sh` 掃描 19 份 Claude transcript 後以 exit 3 拒絕回報 0；本次主執行是 Codex，
+  runtime 未提供精確 session token，故不偽造估算；獨立 reviewer 回報 274,428 tokens。
 
 ## 來源
 - 規格 §23（分類）、§24（deadline）、§25（來源政策）、§26（合併）、§54（政策後台）。
@@ -102,6 +107,5 @@
 | 拒絕紀錄 | provider 前先 durable reserve/finish，attempts 為空 | 只回 403 不留決策 | 能證明拒絕原因與未打上游 |
 
 ## 下一步
-1. 重跑 `./scripts/check.sh all`，確認完整守門 exit 0。
-2. commit／push，等 PR #38 CI 綠後合入 `dev`。
-3. 回填工時與 token，關閉 W11，接 W12。
+1. W11 已結束，不再排 tick。
+2. 接續 `loops/quota-ratelimit.loop.md`（W12）。
