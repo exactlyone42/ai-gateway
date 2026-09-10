@@ -25,7 +25,7 @@
 | [identity-credential](./identity-credential.loop.md) | W03 | 已交付 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
 | [usage-ledger](./usage-ledger.loop.md) | W04 | 已交付 | P0 | 每一筆請求與用量都落在 PostgreSQL，DB 短暫不可用也不會無聲遺失 |
 | [anthropic-native](./anthropic-native.loop.md) | W05 | 已交付 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
-| [openai-native](./openai-native.loop.md) | W06 | 進行中 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
+| [openai-native](./openai-native.loop.md) | W06 | 已交付 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
 | [observability-otel](./observability-otel.loop.md) | W07 | 已交付（部分移交） | P1 | 任何一次請求都查得到卡在哪一步、花多久、誰發的 |
 | [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 未開始 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
 | [admin-web](./admin-web.loop.md) | W09 | 未開始 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
@@ -43,6 +43,7 @@
 ## 現在該做哪一個
 
 看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`，其餘掛在旁邊可並行。W02 已交付，下一刀是 W03 或 W04。
+`W02 → W03/W04 → W05 → W06 → W14`；W02–W06 已交付，W01 正在收尾。W01 合併後先做
+W08，接著依前置條件逐段推進 W09–W19，並回收 W07 的移交判準。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。

@@ -19,21 +19,24 @@
 | --- | --- | --- |
 | `fmt` | `cargo fmt --all` | 想直接改格式時 |
 | `fmt-check` | `cargo fmt --all --check` | 每次 |
-| `gate` | fmt-check ＋ clippy ＋ loop 檔紀律 ＋ Rust 禁用構件 | **迭代中只跑這個** |
+| `gate` | fmt-check ＋ clippy ＋ loop 檔紀律 ＋ Rust 禁用構件 ＋ Client 相容性結構 | **迭代中只跑這個** |
 | `loops` | loop 檔八段落、主體 200 行、必須進索引 | 改 loop 檔後 |
 | `bans` | 生產路徑禁用構件、`mod.rs`、硬編模型名、後端名稱、高基數 label、camelCase | 每次 |
 | `deadfiles` | 沒有任何 `mod` 走得到的 `.rs`（＝cargo 根本沒編譯它） | 每次 |
+| `clients` | 六個 Client 的 13 欄結構、重播產物存在性與去敏 capture schema | 改相容性文件／產物後 |
 | `secrets` | **起服務跑一輪，掃它印出來的每一行**：金鑰／prompt／PII 都不得出現 | PR 前（`all` 會跑） |
-| `selftest` | **證明上面那些關卡真的抓得到東西**（27 條斷言，含正對照） | 改 `check.sh` 後 |
+| `selftest` | **證明 Rust bans／deadfiles 關卡真的抓得到東西**（29 條斷言，含正對照） | 改上述兩關後 |
 | `all` / `pre-push` | 上面全部 ＋ `clippy --all-targets` ＋ `cargo test` ＋ `secrets` ＋ `selftest` | **PR 前、合併前** |
 
 ### 關卡自己也要被驗
 
 `./scripts/check-selftest.sh` 對每一條 ban 規則跑兩種 fixture：**該紅的必須紅、該綠的必須綠**，
-並且宣告 `EXPECTED_ASSERTS=27`——**跑到的斷言數不等於宣告數就直接失敗**。
+並且宣告 `EXPECTED_ASSERTS=29`——**跑到的斷言數不等於宣告數就直接失敗**。
 理由：半途中斷卻印出「0 failed」是最典型的假綠。
 
 加規則時要同時加兩條斷言並更新數字。**改了 `bans` 沒改 self-test，self-test 會紅。**
+`clients` 是獨立的文件／產物 gate：它只證明結構與 capture allowlist，不證明外部 URL 的內容；
+來源逐欄正確性由 review 驗收，陰性對照記在 `loops/client-compatibility.loop.md`。
 
 實測（2026-09-08）：把 `bans` 的 panic 規則改回較寬的版本 → self-test 紅 3 條；
 只弱化 dead-file 規則 → 紅 1 條，而且是對的那一條，鏡像正對照仍綠。

@@ -31,12 +31,15 @@
       必須被拒絕或改路由，**不得**把工具定義默默拿掉送上游。
 
 ## 已知
-- 現況模型白名單來自環境變數 `ALLOWED_MODELS`（`src/config.rs:36`），
-  只是字串比對（`src/services/chat.rs:49`），沒有能力、成本、品質等級的概念。
+- 現況模型白名單來自環境變數 `ALLOWED_MODELS`（`src/config.rs`），
+  只在 provider service 做字串比對，沒有能力、成本、品質等級的概念。
 - 規格 §20：實際模型名稱會變，所以註冊表必須動態可設定。
 - 規格 §34：第一版優先「明確的確定性路由」，之後才加自動路由。**第一版不做 ML Router。**
 
-- W07 移交（2026-09-09）：span 樹缺 `router.select` 與 `token.estimate` 兩個節點（規格 §58），以及 `gen_ai.request.model`／`gen_ai.system` 兩個日誌欄位。這一段有程式碼後補上，作法照 `src/services/chat.rs` 的 `#[tracing::instrument(name = ..., skip_all)]`。
+- W07 移交（2026-09-09）：span 樹缺 `router.select` 與 `token.estimate` 兩個節點（規格 §58），以及 `gen_ai.request.model`／`gen_ai.system` 兩個日誌欄位。這一段有程式碼後補上，作法沿用 provider service 的 `#[tracing::instrument(name = ..., skip_all)]`。
+- W06 移交（2026-09-11）：Codex CLI 0.153.0 啟動時會讀 `/v1/models` 的私有 `models[]`
+  metadata；一般 OpenAI `data[]` 可讓明確指定模型工作，但會有 fallback warning。W10 必須從
+  真實欄位產生 context window／reasoning／能力 metadata，不得用猜值消除 warning。
 
 ## 已做
 - （待填）

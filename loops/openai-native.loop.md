@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已完成 |
 | 優先度 | P0 |
 | 前置 | `anthropic-native` |
 | 開始 | 2026-09-11T00:21+08:00 |
-| 結束 | — |
+| 結束 | 2026-09-11T01:21+08:00 |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -81,6 +81,8 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
   沒有以 reviewer 建議取代實測，13 點均完成程式、測試或契約修正。
 - 2026-09-11T01:12+08:00：串流與 ledger 收尾：一個 upstream chunk 全部觀察並持久化後才
   yield；final checkpoint 先 durable 再 publish，rename 失敗可在重啟恢復；兩個 provider 分別落帳。
+- 2026-09-11T01:21+08:00：PR #32 合入 `dev`（merge `609e651a`）；`rust` CI 與兩個
+  board sync check 全部 SUCCESS。Codex 私有 model metadata 缺口移交 W10。
 
 ## 已確定不可行
 - 用 Chat Completions 支援 Codex：`wire_api` 目前只接受 Responses。
@@ -116,5 +118,4 @@ Codex 與任何 OpenAI 相容 Client 指向閘道就能正常工作，串流／�
 | 共用抽象 | relay 管生命週期；observer 管協定狀態 | relay 直接辨識各家 event 名 | 避免表面共用、內部仍按 provider 分支 |
 
 ## 下一步
-1. 提交、推分支、開 PR，自動合 `dev` 並確認 PR SHA CI。
-2. 將 Codex 完整 `models[]` 能力 metadata 移交 W10 的模型註冊表。
+1. W10 從真正模型註冊表提供 Codex `models[]` 能力 metadata，不在 W06 猜值。

@@ -6,6 +6,7 @@
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
+#   ./scripts/check.sh clients     # client compatibility document contract
 #   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
@@ -279,17 +280,23 @@ deadfiles() {
   return "$failed"
 }
 
+clients() {
+  step "client compatibility"
+  ./scripts/check-client-compatibility.sh
+}
+
 case "${1:-gate}" in
   fmt)       fmt ;;
   fmt-check) fmt_check ;;
-  gate)      fmt_check; clippy_fast; loops; bans; deadfiles ;;
+  gate)      fmt_check; clippy_fast; loops; bans; deadfiles; clients ;;
   loops)     loops ;;
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
+  clients)   clients ;;
   secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
   all|pre-push)
-    fmt_check; clippy_full; test_all; loops; bans; deadfiles
+    fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh
     ;;
