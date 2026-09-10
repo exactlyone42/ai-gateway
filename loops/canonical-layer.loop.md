@@ -1,14 +1,14 @@
 # LOOP: canonical-layer
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開（開工時建）｜分支 `feature/canonical-layer`｜段落 `W14`
+> 卡 [#42](https://github.com/DnaBoss/agent-pool-gateway/issues/42)｜分支 `feature/canonical-layer`｜段落 `W14`
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P2 |
 | 前置 | `anthropic-native`, `openai-native` |
-| 開始 | — |
+| 開始 | `2026-09-11T07:46:15+08:00` |
 | 結束 | — |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
@@ -32,6 +32,13 @@
 - 規格 §16 明確禁止 N×M 轉換；§18 明確禁止 silent drop。
 - 前置的 W05／W06 必須先有可靠的 contract test，否則這段沒有安全網——
   所以 W05／W06 的完成判準裡就要求 contract test。
+- 查重：2026-09-11 開工時只有本 loop；沒有同名遠端分支、open PR、同題 issue 或其他
+  worktree owner。建立唯一卡 #42 與 `feature/canonical-layer`。
+- Reviewer 使用獨立 `codex exec`；型別／依賴方向定案前與完整 diff 各審一次，高／中風險須修正
+  或用既有規格及逐位元實測裁定。
+- 每輪跑相關 contract tests；PR 前跑 `./scripts/check.sh all`、loops 與 `git diff --check`。
+  記錄已做、證據、不可行、trade-off、下一步；完成後 AI 可自行合入 `dev`。
+- 外部依賴先自行打通；只做安全性、必要依賴與 W14 目標，不順手加入跨 Provider 功能。
 
 ## 已做
 - （待填）
@@ -50,6 +57,7 @@
 | --- | --- | --- | --- |
 
 ## 下一步
-1. 先確認 W05／W06 的 contract test 覆蓋足夠當安全網（不夠就先補）。
-2. 型別定義 ＋ 兩側 Adapter。
-3. 黃金測試對照 ＋ 陰性對照。
+1. 盤點 W05／W06 的真實 request／response／SSE 路徑與 contract tests，列出不可改的 byte contract。
+2. 將 canonical 型別與 adapter 依賴方向送獨立 reviewer，先修計畫缺口。
+3. 型別定義＋兩側 Adapter，保持同協定直通行為逐位元不變。
+4. 黃金測試對照＋丟欄位陰性對照，完整 diff review 後跑全關卡。
