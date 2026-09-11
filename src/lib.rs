@@ -1,5 +1,7 @@
+mod adapters;
 mod admin;
 mod auth;
+pub mod canonical;
 mod config;
 mod db;
 mod error;

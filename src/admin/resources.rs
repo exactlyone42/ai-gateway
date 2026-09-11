@@ -1820,7 +1820,7 @@ mod tests {
     use crate::{
         admin::{AdminContext, AdminError, AdminRole, AdminService, AdminServiceConfig},
         identity::{CredentialService, IdentityError},
-        model_registry::{GatewayOperation, ProviderProfile, ProviderProfiles},
+        model_registry::{GatewayOperation, ProviderDialect, ProviderProfile, ProviderProfiles},
     };
 
     fn service(pool: PgPool) -> AdminService {
@@ -1853,6 +1853,7 @@ mod tests {
             "env://PROVIDER_ONE_KEY",
             "provider-one",
             "https://provider.example",
+            ProviderDialect::OpenAi,
             vec![GatewayOperation::OpenAiResponses],
             vec![tenant_id],
             Arc::<str>::from("server-secret"),

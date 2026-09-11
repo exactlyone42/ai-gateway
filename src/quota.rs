@@ -834,7 +834,9 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
-    use crate::model_registry::{GatewayOperation, ModelSelector, ProviderProfile};
+    use crate::model_registry::{
+        GatewayOperation, ModelSelector, ProviderDialect, ProviderProfile,
+    };
 
     fn principal(tenant_id: Uuid) -> PrincipalContext {
         PrincipalContext {
@@ -875,6 +877,7 @@ mod tests {
                 "env://QUOTA_TEST_KEY",
                 "quota-provider",
                 "https://quota.invalid",
+                ProviderDialect::OpenAi,
                 vec![GatewayOperation::OpenAiResponses],
                 vec![tenant_id],
                 Arc::<str>::from("secret"),

@@ -5,18 +5,12 @@ use chrono::Utc;
 use futures_util::StreamExt as _;
 use thiserror::Error;
 
-use crate::ledger::{ProviderAttempt, RequestCompletion, Reservation, TokenUsage};
+use crate::{
+    canonical::CanonicalStreamEvent,
+    ledger::{ProviderAttempt, RequestCompletion, Reservation},
+};
 
 const DEFAULT_EVENT_MAX_BYTES: usize = 32 * 1024 * 1024;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CanonicalStreamEvent {
-    ResponseStarted(String),
-    Usage(TokenUsage),
-    CompletionHint,
-    Completed,
-    Failed(&'static str),
-}
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -281,10 +275,10 @@ fn mark_client_first_byte(reservation: &mut Option<Reservation>, first_client_by
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum TerminalOutcome {
     Completed,
-    Failed(&'static str),
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -307,14 +301,26 @@ fn apply_events(
                 state.changed = true;
             }
             CanonicalStreamEvent::Usage(usage) => {
-                attempt.observe_usage(usage, at);
+                attempt.observe_usage(usage.into(), at);
                 state.changed = true;
             }
             CanonicalStreamEvent::CompletionHint => state.hint = true,
-            CanonicalStreamEvent::Completed => state.terminal = Some(TerminalOutcome::Completed),
-            CanonicalStreamEvent::Failed(error_type) => {
-                state.terminal = Some(TerminalOutcome::Failed(error_type));
+            CanonicalStreamEvent::ResponseCompleted => {
+                state.terminal = Some(TerminalOutcome::Completed);
             }
+            CanonicalStreamEvent::Error(error) => {
+                state.terminal = Some(TerminalOutcome::Failed(error.error_type));
+            }
+            CanonicalStreamEvent::MessageStarted { .. }
+            | CanonicalStreamEvent::ContentBlockStarted { .. }
+            | CanonicalStreamEvent::TextDelta { .. }
+            | CanonicalStreamEvent::ReasoningDelta { .. }
+            | CanonicalStreamEvent::ToolCallStarted { .. }
+            | CanonicalStreamEvent::ToolArgumentsDelta { .. }
+            | CanonicalStreamEvent::ToolCallCompleted { .. }
+            | CanonicalStreamEvent::ContentBlockCompleted { .. }
+            | CanonicalStreamEvent::MessageCompleted
+            | CanonicalStreamEvent::OutputCompleted { .. } => {}
         }
     }
     state
@@ -349,7 +355,7 @@ async fn finish_terminal(
     let at = Utc::now();
     let (request_status, attempt_status, error_type) = match outcome {
         TerminalOutcome::Completed => ("completed", "completed", None),
-        TerminalOutcome::Failed(kind) => ("failed", "failed", Some(kind.to_owned())),
+        TerminalOutcome::Failed(kind) => ("failed", "failed", Some(kind)),
     };
     attempt.conclude(attempt_status, error_type, at);
     if let Some(held) = reservation.take() {
@@ -377,7 +383,7 @@ async fn finish_failed(
         attempt,
         model,
         provider,
-        TerminalOutcome::Failed(error_type),
+        TerminalOutcome::Failed(error_type.to_owned()),
     )
     .await
     {
@@ -458,7 +464,13 @@ fn logical_lines(bytes: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventDecoder, ProtocolError, event_data};
+    use chrono::Utc;
+
+    use super::{EventDecoder, ProtocolError, TerminalOutcome, apply_events, event_data};
+    use crate::{
+        canonical::{CanonicalContent, CanonicalError, CanonicalStreamEvent, ProviderOptions},
+        ledger::{ProviderAttempt, TokenUsage},
+    };
 
     #[test]
     fn frames_split_crlf_and_cr_only_without_rewriting_bytes() {
@@ -497,6 +509,50 @@ mod tests {
         assert!(matches!(
             decoder.feed(b"data: 123\n\n"),
             Err(ProtocolError::EventTooLarge)
+        ));
+    }
+
+    #[test]
+    fn rich_stream_lifecycle_has_one_terminal_state_machine() {
+        let mut attempt = ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            TokenUsage::default(),
+        );
+        let state = apply_events(
+            &mut attempt,
+            vec![
+                CanonicalStreamEvent::ContentBlockStarted {
+                    index: 0,
+                    content: CanonicalContent::Text {
+                        text: "sentinel".to_owned(),
+                        provider_options: ProviderOptions::new(),
+                    },
+                },
+                CanonicalStreamEvent::ContentBlockCompleted { index: 0 },
+                CanonicalStreamEvent::MessageCompleted,
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 0,
+                    finish_reason: "stop".to_owned(),
+                },
+                CanonicalStreamEvent::ResponseCompleted,
+            ],
+            Utc::now(),
+        );
+        assert!(matches!(state.terminal, Some(TerminalOutcome::Completed)));
+
+        let failed = apply_events(
+            &mut attempt,
+            vec![CanonicalStreamEvent::Error(CanonicalError::provider(
+                "provider_stream_error",
+            ))],
+            Utc::now(),
+        );
+        assert!(matches!(
+            failed.terminal,
+            Some(TerminalOutcome::Failed(ref kind)) if kind == "provider_stream_error"
         ));
     }
 }

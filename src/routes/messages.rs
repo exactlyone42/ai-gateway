@@ -12,19 +12,19 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use crate::{
+    adapters::{ProviderRequestInput, prepare_for_provider, protocol, provider},
+    canonical::{PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::{REQUEST_ID_HEADER, RequestReceivedAt},
-    model_registry::{
-        CapabilityRequirements, GatewayOperation, ModelSelector, parse_request, rewrite_model,
-    },
+    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector},
     policy::value_text,
     routes::{BodyBytes, body_bytes},
     services::{
-        anthropic, request_policy, request_policy::RejectionContext, request_quota,
-        sse::MetadataParser, streaming,
+        request_policy, request_policy::RejectionContext, request_quota, sse::MetadataParser,
+        streaming,
     },
     state::AppState,
 };
@@ -106,14 +106,13 @@ async fn proxy(
     body: Bytes,
     operation: Operation,
 ) -> Result<Response, GatewayError> {
-    let mut metadata = parse_request(&body).map_err(GatewayError::InvalidRequest)?;
     let gateway_operation = operation.gateway();
-    let selector = ModelSelector::parse(
-        metadata
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )?;
+    let body_len = body.len();
+    let decoded =
+        protocol::decode(gateway_operation, body).map_err(GatewayError::InvalidRequest)?;
+    let selector = ModelSelector::parse(decoded.requested_model())?;
+    let session_id = header_text(&headers, "x-claude-code-session-id")
+        .or_else(|| header_text(&headers, "x-session-id"));
     let prepared = request_policy::prepare(
         &state,
         &headers,
@@ -122,25 +121,23 @@ async fn proxy(
             principal: principal.clone(),
             received_at,
             request_id: ledger_request_id(&headers),
-            session_id: header_text(&headers, "x-claude-code-session-id")
-                .or_else(|| header_text(&headers, "x-session-id")),
+            session_id: session_id.clone(),
             operation: operation.name(),
             client_agent_id: header_text(&headers, "x-claude-code-agent-id"),
             parent_agent_id: header_text(&headers, "x-claude-code-parent-agent-id"),
             estimated_tokens: matches!(operation, Operation::Messages)
-                .then(|| i64::try_from(estimate_input_tokens(body.len())).unwrap_or(i64::MAX)),
+                .then(|| i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
         },
     )
     .await?;
-    let requested_model = prepared.requested_model.clone();
     let policy = &prepared.policy;
-    let required = CapabilityRequirements::from_request(gateway_operation, &metadata);
+    let required = CapabilityRequirements::from_request(gateway_operation, decoded.document());
     let prepared_quota = request_quota::admit(
         &state,
         &prepared,
         gateway_operation,
-        &metadata,
-        body.len(),
+        decoded.document(),
+        body_len,
         required,
     )
     .await?;
@@ -156,26 +153,46 @@ async fn proxy(
     let provider = selection.provider_key.clone();
     let profile = selection.profile.clone();
     let selection_snapshot = selection.ledger_snapshot();
-    let body = Bytes::from(rewrite_model(&body, &mut metadata, &provider_model)?);
-    let is_stream = matches!(operation, Operation::Messages) && required.streaming;
     let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
+    let canonical = decoded.enrich(RequestEnrichment {
+        gateway_request_id,
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
+        principal: PrincipalRef::from(&principal),
+        requested_model: prepared.requested_model.clone(),
+        requested_quality: None,
+        workload_class: value_text(&policy.workload_class),
+        urgency: value_text(&policy.urgency),
+        budget_class: value_text(&policy.budget_class),
+        deadline: policy.deadline_at,
+    });
+    let upstream_request = prepare_for_provider(
+        &canonical,
+        &profile,
+        &provider_model,
+        ProviderRequestInput {
+            source_path_and_query: path_and_query,
+            client_headers: &headers,
+            idempotency_key: None,
+        },
+    )?;
+    let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
     let mut reservation = state
         .ledger
         .reserve_with_quota(
             RequestStart {
                 request_id: ledger_request_id(&headers),
-                session_id: header_text(&headers, "x-claude-code-session-id")
-                    .or_else(|| header_text(&headers, "x-session-id")),
-                trace_id,
-                requested_model: Some(requested_model),
-                workload_class: Some(value_text(&policy.workload_class)),
-                urgency: Some(value_text(&policy.urgency)),
+                session_id: canonical.session_id.clone(),
+                trace_id: canonical.trace_id.clone(),
+                requested_model: Some(canonical.requested_model.clone()),
+                workload_class: Some(canonical.workload_class.clone()),
+                urgency: Some(canonical.urgency.clone()),
                 quality: Some(value_text(&policy.quality)),
-                budget_class: Some(value_text(&policy.budget_class)),
+                budget_class: Some(canonical.budget_class.clone()),
                 estimated_tokens: ledger_estimated
                     .as_ref()
                     .map(request_quota::estimated_tokens),
@@ -202,18 +219,17 @@ async fn proxy(
             policy,
             selection: &selection,
             quota: concurrency,
-            body: &metadata,
+            body: canonical.source_document(),
             received_at,
         },
     )
     .await?;
     let provider_request_at = Utc::now();
-    let upstream = match anthropic::forward(
-        &state,
-        path_and_query,
-        &headers,
-        body,
-        &profile,
+    let upstream = match provider::send(
+        &state.client,
+        &profile.base_url,
+        upstream_request,
+        &profile.provider_key,
         &provider_model,
     )
     .await
@@ -243,8 +259,8 @@ async fn proxy(
         }
     };
 
-    let status = upstream.response.status();
-    let response_headers = upstream.response.headers().clone();
+    let status = upstream.status();
+    let response_headers = upstream.headers().clone();
     let provider_request_id = response_headers
         .get("request-id")
         .or_else(|| response_headers.get("x-request-id"))
@@ -261,7 +277,7 @@ async fn proxy(
 
     if !status.is_success() || !is_stream {
         let mut attempt = attempt;
-        let bytes = match collect_body(upstream.response, &mut attempt).await {
+        let bytes = match collect_body(upstream, &mut attempt).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 let failed_at = Utc::now();
@@ -314,7 +330,7 @@ async fn proxy(
     }
 
     let body = streaming::relay(
-        upstream.response,
+        upstream,
         reservation,
         attempt,
         model,

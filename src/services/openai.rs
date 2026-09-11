@@ -11,21 +11,20 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use crate::{
+    adapters::{ProviderRequestInput, prepare_for_provider, protocol, provider},
+    canonical::{CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
-    model_registry::{
-        CapabilityRequirements, GatewayOperation, ModelSelector, ProviderProfile, parse_request,
-        rewrite_model,
-    },
+    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector},
     policy::value_text,
     quota::QuotaAdmission,
     services::{
         request_policy::{self, RejectionContext},
         request_quota,
-        streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data, relay},
+        streaming::{ProtocolError, StreamObserver, event_data, relay},
     },
     state::AppState,
 };
@@ -97,19 +96,22 @@ struct BufferedContext {
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
-    let mut metadata = parse_request(&request.body).map_err(GatewayError::InvalidRequest)?;
+    let operation = request.operation.gateway();
+    let body_len = request.body.len();
+    let decoded =
+        protocol::decode(operation, request.body).map_err(GatewayError::InvalidRequest)?;
     if request.operation == Operation::Responses
-        && metadata.get("background").and_then(Value::as_bool) == Some(true)
+        && decoded
+            .document()
+            .get("background")
+            .and_then(Value::as_bool)
+            == Some(true)
     {
         return Err(GatewayError::UnsupportedRequest);
     }
-    let operation = request.operation.gateway();
-    let selector = ModelSelector::parse(
-        metadata
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )?;
+    let selector = ModelSelector::parse(decoded.requested_model())?;
+    let session_id = header_text(&request.headers, "x-codex-session-id")
+        .or_else(|| header_text(&request.headers, "x-session-id"));
     let prepared = request_policy::prepare(
         state,
         &request.headers,
@@ -118,28 +120,26 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             principal: request.principal.clone(),
             received_at: request.received_at,
             request_id: ledger_request_id(&request.headers),
-            session_id: header_text(&request.headers, "x-codex-session-id")
-                .or_else(|| header_text(&request.headers, "x-session-id")),
+            session_id: session_id.clone(),
             operation: request.operation.name(),
             client_agent_id: None,
             parent_agent_id: None,
             estimated_tokens: Some(
-                i64::try_from(estimate_input_tokens(request.body.len())).unwrap_or(i64::MAX),
+                i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX),
             ),
         },
     )
     .await?;
-    let requested_model = prepared.requested_model.clone();
     let policy = &prepared.policy;
-    let required = CapabilityRequirements::from_request(operation, &metadata);
-    let observer = request.operation.observer(&metadata)?;
+    let required = CapabilityRequirements::from_request(operation, decoded.document());
+    let observer = request.operation.observer(decoded.document())?;
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
     let prepared_quota = request_quota::admit(
         state,
         &prepared,
         operation,
-        &metadata,
-        request.body.len(),
+        decoded.document(),
+        body_len,
         required,
     )
     .await?;
@@ -155,29 +155,45 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let provider = selection.provider_key.clone();
     let profile = selection.profile.clone();
     let selection_snapshot = selection.ledger_snapshot();
-    let body = Bytes::from(rewrite_model(
-        &request.body,
-        &mut metadata,
-        &provider_model,
-    )?);
-    let is_stream = required.streaming;
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
+    let canonical = decoded.enrich(RequestEnrichment {
+        gateway_request_id,
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
+        principal: PrincipalRef::from(&request.principal),
+        requested_model: prepared.requested_model.clone(),
+        requested_quality: None,
+        workload_class: value_text(&policy.workload_class),
+        urgency: value_text(&policy.urgency),
+        budget_class: value_text(&policy.budget_class),
+        deadline: policy.deadline_at,
+    });
+    let upstream_request = prepare_for_provider(
+        &canonical,
+        &profile,
+        &provider_model,
+        ProviderRequestInput {
+            source_path_and_query: &request.path_and_query,
+            client_headers: &request.headers,
+            idempotency_key,
+        },
+    )?;
+    let is_stream = canonical.stream;
     let mut reservation = state
         .ledger
         .reserve_with_quota(
             RequestStart {
                 request_id: ledger_request_id(&request.headers),
-                session_id: header_text(&request.headers, "x-codex-session-id")
-                    .or_else(|| header_text(&request.headers, "x-session-id")),
-                trace_id,
-                requested_model: Some(requested_model),
-                workload_class: Some(value_text(&policy.workload_class)),
-                urgency: Some(value_text(&policy.urgency)),
+                session_id: canonical.session_id.clone(),
+                trace_id: canonical.trace_id.clone(),
+                requested_model: Some(canonical.requested_model.clone()),
+                workload_class: Some(canonical.workload_class.clone()),
+                urgency: Some(canonical.urgency.clone()),
                 quality: Some(value_text(&policy.quality)),
-                budget_class: Some(value_text(&policy.budget_class)),
+                budget_class: Some(canonical.budget_class.clone()),
                 estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
                 selection: selection_snapshot.clone(),
                 policy: Some(policy.ledger_snapshot()),
@@ -210,19 +226,17 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             policy,
             selection: &selection,
             quota: concurrency,
-            body: &metadata,
+            body: canonical.source_document(),
             received_at: request.received_at,
         },
     )
     .await?;
     let provider_request_at = Utc::now();
-    let upstream = match forward(
-        state,
-        &request.path_and_query,
-        &request.headers,
-        body,
-        idempotency_key,
-        &profile,
+    let upstream = match provider::send(
+        &state.client,
+        &profile.base_url,
+        upstream_request,
+        &profile.provider_key,
         &provider_model,
     )
     .await
@@ -304,42 +318,6 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         operation: request.operation,
     })
     .await
-}
-
-#[tracing::instrument(
-    name = "provider.attempt",
-    skip_all,
-    fields(gen_ai.system = %profile.provider_key, gen_ai.request.model = %provider_model_id)
-)]
-async fn forward(
-    state: &AppState,
-    path_and_query: &str,
-    client_headers: &HeaderMap,
-    body: Bytes,
-    idempotency_key: Option<HeaderValue>,
-    profile: &ProviderProfile,
-    provider_model_id: &str,
-) -> Result<reqwest::Response, GatewayError> {
-    let mut headers = provider_headers(client_headers);
-    if let Some(value) = idempotency_key {
-        headers.insert(HeaderName::from_static("idempotency-key"), value);
-    }
-    logging::inject_context(&mut headers);
-    let authorization = HeaderValue::from_str(&format!(
-        "Bearer {}",
-        profile
-            .bearer_secret()
-            .ok_or(GatewayError::InvalidConfiguration)?
-    ))
-    .map_err(|_| GatewayError::InvalidConfiguration)?;
-    headers.insert(header::AUTHORIZATION, authorization);
-    Ok(state
-        .client
-        .post(format!("{}{}", profile.base_url, path_and_query))
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?)
 }
 
 async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError> {
@@ -481,23 +459,6 @@ fn estimate_input_tokens(bytes: usize) -> u64 {
     u64::try_from(bytes.div_ceil(4)).unwrap_or(u64::MAX)
 }
 
-fn provider_headers(client: &HeaderMap) -> HeaderMap {
-    let mut outgoing = HeaderMap::new();
-    for (name, value) in client {
-        let text = name.as_str();
-        let allowed = name == header::CONTENT_TYPE
-            || name == header::ACCEPT
-            || text == "openai-beta"
-            || text == "originator"
-            || text == "session_id"
-            || text.starts_with("x-stainless-");
-        if allowed && name != header::AUTHORIZATION && text != "x-api-key" {
-            outgoing.append(name.clone(), value.clone());
-        }
-    }
-    outgoing
-}
-
 fn response_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut outgoing = HeaderMap::new();
     for (name, value) in upstream {
@@ -575,14 +536,16 @@ impl StreamObserver for ResponsesObserver {
         }
         let mut events = response_metadata(&value, &mut self.response_id, &mut self.usage);
         match kind {
-            "response.completed" => events.push(CanonicalStreamEvent::Completed),
-            "response.failed" => {
-                events.push(CanonicalStreamEvent::Failed("provider_response_failed"))
-            }
-            "response.incomplete" => {
-                events.push(CanonicalStreamEvent::Failed("provider_response_incomplete"))
-            }
-            "error" => events.push(CanonicalStreamEvent::Failed("provider_stream_error")),
+            "response.completed" => events.push(CanonicalStreamEvent::ResponseCompleted),
+            "response.failed" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_response_failed"),
+            )),
+            "response.incomplete" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_response_incomplete"),
+            )),
+            "error" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_stream_error"),
+            )),
             _ => {}
         }
         Ok(events)
@@ -623,7 +586,7 @@ impl StreamObserver for ChatObserver {
         }
         if data.bytes == b"[DONE]" {
             return if self.all_finished() {
-                Ok(vec![CanonicalStreamEvent::Completed])
+                Ok(vec![CanonicalStreamEvent::ResponseCompleted])
             } else {
                 Err(ProtocolError::Invalid(
                     "Chat stream ended before a finish_reason",
@@ -642,10 +605,12 @@ impl StreamObserver for ChatObserver {
         if let Some(usage) = value.get("usage").filter(|usage| usage.is_object())
             && merge_usage(&mut self.usage, usage)
         {
-            events.push(CanonicalStreamEvent::Usage(self.usage.clone()));
+            events.push(CanonicalStreamEvent::Usage(self.usage.clone().into()));
         }
         if value.get("error").is_some_and(|error| !error.is_null()) {
-            events.push(CanonicalStreamEvent::Failed("provider_stream_error"));
+            events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_stream_error"),
+            ));
         } else {
             let was_finished = self.all_finished();
             for choice in value
@@ -654,12 +619,17 @@ impl StreamObserver for ChatObserver {
                 .into_iter()
                 .flatten()
             {
-                if choice
-                    .get("finish_reason")
-                    .is_some_and(|reason| !reason.is_null())
-                    && let Some(index) = choice.get("index").and_then(Value::as_u64)
+                if let (Some(reason), Some(index)) = (
+                    choice.get("finish_reason").and_then(Value::as_str),
+                    choice.get("index").and_then(Value::as_u64),
+                ) && self.finished_choices.insert(index)
                 {
-                    self.finished_choices.insert(index);
+                    events.push(CanonicalStreamEvent::OutputCompleted {
+                        index: u32::try_from(index).map_err(|_| {
+                            ProtocolError::Invalid("Chat choice index exceeds canonical range")
+                        })?,
+                        finish_reason: reason.to_owned(),
+                    });
                 }
             }
             if !was_finished && self.all_finished() {
@@ -671,7 +641,7 @@ impl StreamObserver for ChatObserver {
 
     fn finish(&mut self) -> Result<Vec<CanonicalStreamEvent>, ProtocolError> {
         self.all_finished()
-            .then(|| vec![CanonicalStreamEvent::Completed])
+            .then(|| vec![CanonicalStreamEvent::ResponseCompleted])
             .ok_or(ProtocolError::Invalid(
                 "Chat stream ended before a finish_reason",
             ))
@@ -711,7 +681,7 @@ fn response_metadata(
         if let Some(next) = response.get("usage").filter(|next| next.is_object())
             && merge_usage(usage, next)
         {
-            events.push(CanonicalStreamEvent::Usage(usage.clone()));
+            events.push(CanonicalStreamEvent::Usage(usage.clone().into()));
         }
     }
     events
@@ -754,7 +724,7 @@ fn set_if_present(value: &Value, key: &str, target: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::{ChatObserver, ResponsesObserver};
-    use crate::services::streaming::{CanonicalStreamEvent, StreamObserver};
+    use crate::{canonical::CanonicalStreamEvent, services::streaming::StreamObserver};
 
     #[test]
     fn responses_requires_an_explicit_terminal_event() {
@@ -763,7 +733,11 @@ mod tests {
             .observe(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
             .unwrap();
         assert!(events.contains(&CanonicalStreamEvent::ResponseStarted("resp_1".to_owned())));
-        assert!(events.contains(&CanonicalStreamEvent::Completed));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
+        );
         assert!(ResponsesObserver::default().finish().is_err());
     }
 
@@ -773,6 +747,10 @@ mod tests {
         let finish = observer
             .observe(b"data: {\"id\":\"chat_1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n")
             .unwrap();
+        assert!(finish.contains(&CanonicalStreamEvent::OutputCompleted {
+            index: 0,
+            finish_reason: "stop".to_owned(),
+        }));
         assert!(finish.contains(&CanonicalStreamEvent::CompletionHint));
         let usage = observer
             .observe(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n")
@@ -786,7 +764,8 @@ mod tests {
             observer
                 .finish()
                 .unwrap()
-                .contains(&CanonicalStreamEvent::Completed)
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
         );
 
         let mut with_done = ChatObserver::new(1);
@@ -797,7 +776,8 @@ mod tests {
             with_done
                 .observe(b"data: [DONE]\n\n")
                 .unwrap()
-                .contains(&CanonicalStreamEvent::Completed)
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
         );
     }
 
@@ -807,14 +787,32 @@ mod tests {
         let first = observer
             .observe(b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n")
             .unwrap();
-        assert!(!first.contains(&CanonicalStreamEvent::CompletionHint));
+        assert_eq!(
+            first,
+            vec![CanonicalStreamEvent::OutputCompleted {
+                index: 0,
+                finish_reason: "stop".to_owned(),
+            }]
+        );
         assert!(observer.finish().is_err());
 
         let second = observer
             .observe(b"data: {\"choices\":[{\"index\":1,\"finish_reason\":\"length\"}]}\n\n")
             .unwrap();
-        assert!(second.contains(&CanonicalStreamEvent::CompletionHint));
-        assert!(observer.finish().is_ok());
+        assert_eq!(
+            second,
+            vec![
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 1,
+                    finish_reason: "length".to_owned(),
+                },
+                CanonicalStreamEvent::CompletionHint,
+            ]
+        );
+        assert_eq!(
+            observer.finish().unwrap(),
+            vec![CanonicalStreamEvent::ResponseCompleted]
+        );
     }
 
     #[test]
