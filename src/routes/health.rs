@@ -19,6 +19,12 @@ pub async fn live() -> impl IntoResponse {
 /// This is the endpoint a load balancer polls to decide whether to send
 /// requests here, so it does check the dependencies a request needs.
 pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.lifecycle.is_draining() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready", "process": "draining"})),
+        );
+    }
     match db::is_reachable(&state.pool).await {
         Ok(()) => (
             StatusCode::OK,

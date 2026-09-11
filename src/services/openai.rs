@@ -221,6 +221,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             quota_snapshot,
         )
         .await?;
+    reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(request.operation.name(), None, None);
     if policy.is_expired(Utc::now()) {
         reservation.annotate_policy(policy.rejection_snapshot("deadline_expired"));
@@ -254,6 +255,17 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         provider_request_at,
         routing_claim,
     )?);
+    let mut attempt = ProviderAttempt::begin(
+        provider.clone(),
+        provider_model.clone(),
+        None,
+        provider_request_at,
+        estimated,
+    )
+    .with_selection(selection_snapshot);
+    reservation
+        .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
+        .await?;
     let upstream = match provider::send(
         &state.client,
         &profile.base_url,
@@ -266,21 +278,13 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         Ok(response) => response,
         Err(error) => {
             let completed_at = Utc::now();
+            attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
             reservation
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
                     selected_provider: Some(provider.clone()),
-                    attempts: vec![
-                        ProviderAttempt::failed(
-                            provider,
-                            provider_model,
-                            provider_request_at,
-                            completed_at,
-                            error.kind().to_owned(),
-                        )
-                        .with_selection(selection_snapshot.clone()),
-                    ],
+                    attempts: vec![attempt],
                     completed_at,
                 })
                 .await?;
@@ -296,14 +300,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         .or_else(|| upstream.headers().get("request-id"))
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
-    let attempt = ProviderAttempt::begin(
-        provider.clone(),
-        provider_model,
-        provider_request_id,
-        provider_request_at,
-        estimated,
-    )
-    .with_selection(selection_snapshot);
+    attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
         .get(header::CONTENT_TYPE)

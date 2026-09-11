@@ -8,8 +8,44 @@ use axum::{
     body::{Body, Bytes},
     extract::{MatchedPath, Request, State},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse as _, Response},
 };
+
+/// Rejects oversized headers and new data-plane work once draining begins.
+/// Health endpoints stay reachable on the same listener until active work is
+/// gone or the hard drain deadline closes every connection.
+pub async fn process_gate(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let header_bytes = request
+        .headers()
+        .iter()
+        .fold(0usize, |total, (name, value)| {
+            total
+                .saturating_add(name.as_str().len())
+                .saturating_add(value.as_bytes().len())
+                .saturating_add(4)
+        });
+    if header_bytes > state.config.request_header_max_bytes {
+        return GatewayError::PayloadTooLarge.into_response();
+    }
+
+    if matches!(request.uri().path(), "/health" | "/healthz" | "/ready") {
+        return next.run(request).await;
+    }
+    let Some(active) = state.lifecycle.admit() else {
+        return GatewayError::ProcessDraining.into_response();
+    };
+    let response = next.run(request).await;
+    let (parts, body) = response.into_parts();
+    let body = LifecycleBody {
+        inner: Box::pin(body.into_data_stream()),
+        _active: active,
+    };
+    Response::from_parts(parts, Body::from_stream(body))
+}
 use chrono::{DateTime, Utc};
 use futures_util::Stream;
 
@@ -20,6 +56,7 @@ use crate::{
     auth,
     error::{ErrorType, GatewayError},
     identity::PrincipalContext,
+    lifecycle::ActiveRequest,
     logging,
     metrics::RequestScope,
     routes::StreamingResponse,
@@ -158,6 +195,19 @@ async fn record(state: Arc<AppState>, mut request: Request, next: Next) -> Respo
         let duration = scope.complete(status.as_u16(), &error_type);
         context.emit(duration, &error_type, &cause);
         response
+    }
+}
+
+struct LifecycleBody {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    _active: ActiveRequest,
+}
+
+impl Stream for LifecycleBody {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
     }
 }
 

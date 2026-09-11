@@ -31,6 +31,8 @@ pub enum GatewayError {
     QueueExpired,
     #[error("scheduler is shutting down")]
     SchedulerClosed,
+    #[error("gateway is draining for shutdown")]
+    ProcessDraining,
     #[error("no provider is currently available")]
     ProviderUnavailable,
     #[error("model cannot satisfy required capability: {0}")]
@@ -91,6 +93,7 @@ impl GatewayError {
             Self::QueueFull => "scheduler_queue_full",
             Self::QueueExpired => "scheduler_queue_expired",
             Self::SchedulerClosed => "scheduler_closed",
+            Self::ProcessDraining => "process_draining",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
@@ -124,6 +127,7 @@ impl GatewayError {
             | Self::QueueFull
             | Self::QueueExpired
             | Self::SchedulerClosed
+            | Self::ProcessDraining
             | Self::ProviderUnavailable
             | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
@@ -158,7 +162,7 @@ impl IntoResponse for GatewayError {
             Self::QuotaExceeded | Self::QuotaDeferred => StatusCode::TOO_MANY_REQUESTS,
             Self::QueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::QueueExpired => StatusCode::REQUEST_TIMEOUT,
-            Self::SchedulerClosed => StatusCode::SERVICE_UNAVAILABLE,
+            Self::SchedulerClosed | Self::ProcessDraining => StatusCode::SERVICE_UNAVAILABLE,
             Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
@@ -182,7 +186,10 @@ impl IntoResponse for GatewayError {
         )
             .into_response();
         response.extensions_mut().insert(failure);
-        if matches!(self, Self::QueueFull | Self::SchedulerClosed) {
+        if matches!(
+            self,
+            Self::QueueFull | Self::SchedulerClosed | Self::ProcessDraining
+        ) {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),

@@ -5,30 +5,30 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 完成 |
 | 優先度 | P0 |
 | 前置 | `anthropic-native`（要有真的長命串流才驗得出來） |
 | 開始 | `2026-09-11T12:21:54+08:00` |
-| 結束 | — |
-| Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
+| 結束 | `2026-09-11T12:50:31+08:00`（28 分 37 秒） |
+| Token | 無法取得精確值：Claude transcript ledger 在本時窗找不到 Codex usage，拒絕回報 0 |
 
 ## 目的
 部署一次不會砍掉全公司正在跑的 Claude Code session，也不會讓行程永遠退不掉。
 
 ## 完成判準
-- [ ] **有上限的排空**：收到 SIGTERM 後 data-plane admission 關閉但 listener 留著回答 health；
+- [x] **有上限的排空**：收到 SIGTERM 後 data-plane admission 關閉但 listener 留著回答 health；
       既有串流繼續，active 歸零即退出，超過 `drain_timeout` 才由 connection handle 強制關閉。
-- [ ] 排空期間 `/ready` 回非 200（讓負載平衡器移走），`/health` 仍 200（讓編排器別重啟它）。
-- [ ] 被強制關閉的串流要留下記錄（哪些請求、進行到哪、用量估算），不是無聲消失。
-- [ ] Request body 與 application header bytes 有大小上限，超過回 413；transport parser 另有較高的
+- [x] 排空期間 `/ready` 回非 200（讓負載平衡器移走），`/health` 仍 200（讓編排器別重啟它）。
+- [x] 被強制關閉的串流要留下記錄（哪些請求、進行到哪、用量估算），不是無聲消失。
+- [x] Request body 與 application header bytes 有大小上限，超過回 413；transport parser 另有較高的
       固定 buffer/count 上限，超過時依 HTTP 規格回 431，兩層都用 raw TCP 驗證。
-- [ ] 所有上游呼叫有逾時；沒有任何一條路徑可以永久掛著。
+- [x] 所有上游呼叫有逾時；沒有任何一條路徑可以永久掛著。
 - [x] 多實例語意已由 W12 定案：第一版單實例，PostgreSQL advisory lock 在 bind 前阻擋第二行程；
       多實例前必須改成跨實例 durable counters，不能把記憶體上限乘上實例數。
 - [x] 配額日／月邊界已由 W12 定義為 UTC，跨日跨月測試已在完整 gate 通過。
-- [ ] **陰性對照 1**：起一條不主動結束的串流 → 觸發與 SIGTERM 相同的 controller；期限前仍可
+- [x] **陰性對照 1**：起一條不主動結束的串流 → 觸發與 SIGTERM 相同的 controller；期限前仍可
       收後續 event，排空後的新 TCP 連線得到 `/ready` 503、`/health` 200。直接關連線時本測試要紅。
-- [ ] **陰性對照 2**：把 `drain_timeout` 設成 0 → 行程必須立刻退出且留下被砍串流的記錄。
+- [x] **陰性對照 2**：把 `drain_timeout` 設成 0 → 行程必須立刻退出且留下被砍串流的記錄。
 
 ## 已知
 - W07 已補 SIGTERM 與 telemetry flush，但仍直接交給 axum 無上限 graceful shutdown；Axum 0.8
@@ -51,6 +51,13 @@
   issue／PR／remote branch／worktree owner，建立唯一卡 #52 與本分支。
 - 2026-09-11：計畫 reviewer Codex session `01a08eaf-ef05-7671-8c1d-953f002db9db`
   （76,575 tokens）提出六個 high、一個 medium；全部採納進上方設計。
+- 2026-09-11：加入 process lifecycle/active body lease、bounded graceful/hard shutdown、scheduler close、
+  connect/header/finalizer limits，以及 provider pre-call durable checkpoint。
+- 2026-09-11：補 raw TCP 413/431、既有 SSE 排空、8 MiB non-stream transport flush、下游完全不讀的
+  backpressure、provider headers 前中止、零秒強制中止與 legacy spool recovery 測試。
+- 2026-09-11：diff reviewer sessions `01a08ec0-4654-7142-b0a9-213fe4c62f7e`、
+  `01a08ec7-76be-7800-9609-4347040d38de` 找到兩個 high、一個 medium；全修後 reviewer 確認無剩餘
+  high/medium。操作契約同步到 operations/architecture/request-policy/identity/provider-protocols。
 
 ## 已確定不可行
 - **靠 axum 的預設 graceful shutdown**：它等 in-flight 結束，而長命 SSE 沒有「結束」，
@@ -60,7 +67,24 @@
 - **取消時用 partial actual 對帳 quota**：output 尚未完整，會低估；取消保留原估算 reservation。
 
 ## 證據
-- （待填）
+- 真 binary SIGTERM smoke：啟動 log 後送一次 SIGTERM，5 秒 timeout 內 `exit 0`，留下
+  `gateway is draining` JSON log；未輪詢或重試服務。
+- `drain_keeps_health_reachable_and_existing_stream_running`：排空期同一 listener 上 `/ready` 503、
+  `/health` 200、新 data plane 503；原 SSE 收完後續 event 才退出。
+- `forced_shutdown_closes_a_backpressured_stream_and_records_it`：raw TCP client 完全不讀，無限 SSE
+  仍在期限內斷線；spool 有 request/provider ID、`shutdown_timeout`、估算與 partial usage，quota actual null。
+- `forced_shutdown_before_provider_headers_keeps_the_attempt_checkpoint`：provider 已收到請求但未回 headers，
+  強制退出後 spool 仍有 provider attempt 與估算。
+- raw TCP 9 KiB application header 回 413；17 KiB transport header 回 431。Request body 既有雙端點
+  413 測試仍通過；共用 provider client 同時設 connect/read-idle timeout。
+- 陰性對照 1：signal 當下注入 `handle.shutdown()`，既有 drain 測試因 health 連線 `ConnectionRefused`
+  變紅；還原後綠。陰性對照 2：移除 force token cancellation，零秒測試因缺少
+  `error_type=shutdown_timeout` 變紅；還原後綠。
+- 最終 `./scripts/check.sh all` exit 0：frontend 2/2、Rust 226/226、schema 5/5、bans 29/29，
+  0 skipped；loop、dead-file、client compatibility、log secret gates 全綠。
+- Reviewer：計畫 `01a08eaf-ef05-7671-8c1d-953f002db9db`；diff
+  `01a08ec0-4654-7142-b0a9-213fe4c62f7e`；修正複審
+  `01a08ec7-76be-7800-9609-4347040d38de`，最後無 high/medium。
 
 ## 來源
 - 規格 §63（故障隔離）、§64（背壓）、§65（安全：body 上限、逾時）。
@@ -75,6 +99,6 @@
 | Interrupted quota | partial usage 留證據，quota 保留估算 | 用不完整 actual 下修 | 不低估尚未收到的 output/cost |
 
 ## 下一步
-1. 加 lifecycle/admission/active guard，改用可強制關連線的 server handle 與 bounded runtime shutdown。
-2. 送 provider 前 checkpoint attempt；forced Drop 標 `shutdown_timeout`，等待 finalizer completion。
-3. 補 connect/header bounds、兩個 process lifecycle 對照與 raw TCP header 邊界。
+1. 推 PR #53；CI 綠後合入 `dev` 並關閉 #52。
+2. 部署設定的 termination grace 必須高於 `DRAIN_TIMEOUT_MS + 3 * SHUTDOWN_FINALIZE_TIMEOUT_MS + 1s`
+   再加營運餘裕；本輪不部署 production。
