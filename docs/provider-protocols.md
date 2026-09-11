@@ -106,6 +106,11 @@ wire sidecar preserves the same-dialect request bytes:
   bytes are not released until the durable ledger finish succeeds.
 - Dropping the downstream body drops the owned upstream response body, closing
   the provider connection. No claim is made that provider billing stops.
+- `PROVIDER_IDLE_TIMEOUT_MS` limits time between successful upstream reads and
+  defaults to 120 seconds. Each successful read resets the timeout, so an
+  active long-running stream is not capped by total lifetime. An idle timeout
+  closes the attempt and returns the gateway's upstream failure response; it
+  never retries the same logical request.
 - Estimated and provider-reported usage remain separate. Responses and Chat
   token fields map to input, output, cached input, and reasoning ledger fields.
 
