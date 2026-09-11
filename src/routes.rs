@@ -149,6 +149,7 @@ mod tests {
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
+            provider_idle_timeout: Duration::from_secs(120),
             bootstrap_client_key: Some("client-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -502,6 +503,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_idle_timeout_calls_the_upstream_once_and_returns_502() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_by_server = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let calls = Arc::clone(&calls_by_server);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Json(json!({"id": "too-late", "status": "completed", "output": []}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.provider_idle_timeout = Duration::from_millis(20);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        state.ledger.wait_for_idle().await;
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
     #[sqlx::test]
     async fn a_successful_request_persists_request_attempt_and_usage(pool: PgPool) {
         let upstream = Router::new().route(
@@ -606,7 +655,7 @@ mod tests {
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
                     (
-                        StatusCode::SERVICE_UNAVAILABLE,
+                        StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({"error": {"type": "overloaded"}})),
                     )
                 }
@@ -723,7 +772,7 @@ mod tests {
         let first = openai::execute(&state, request("route-first"))
             .await
             .unwrap();
-        assert_eq!(first.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(first.status, StatusCode::INTERNAL_SERVER_ERROR);
         let second = openai::execute(&state, request("route-second"))
             .await
             .unwrap();

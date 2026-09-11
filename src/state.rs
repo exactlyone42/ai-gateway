@@ -170,7 +170,10 @@ impl AppState {
             config.ledger_spool_entry_max_bytes,
         )?;
         let models = ModelRegistry::new(pool.clone(), profiles, config.allowed_models.clone());
-        let client = Client::builder().redirect(Policy::none()).build()?;
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .read_timeout(config.provider_idle_timeout)
+            .build()?;
         Ok(Self {
             config,
             client,

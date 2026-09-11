@@ -51,6 +51,9 @@ pub struct Config {
     pub extra_provider_profiles: Vec<ExtraProviderProfile>,
     /// Maximum bytes in one decoded SSE event and in the held terminal tail.
     pub stream_event_max_bytes: usize,
+    /// Maximum silence between provider response reads. This does not cap the
+    /// total lifetime of an active stream.
+    pub provider_idle_timeout: Duration,
     pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
@@ -137,6 +140,8 @@ pub enum ConfigError {
     InvalidOpenAiRequestLimit(String),
     #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
     InvalidStreamEventLimit(String),
+    #[error("invalid PROVIDER_IDLE_TIMEOUT_MS: {0}")]
+    InvalidProviderIdleTimeout(String),
     #[error("ADMIN_BOOTSTRAP_TOKEN and ADMIN_BOOTSTRAP_TENANT_ID must be configured together")]
     IncompleteAdminBootstrap,
     #[error("ADMIN_BOOTSTRAP_TOKEN must contain at least 32 bytes")]
@@ -206,6 +211,16 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let provider_idle_timeout_ms = env::var("PROVIDER_IDLE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "120000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidProviderIdleTimeout(error.to_string()))?;
+        if provider_idle_timeout_ms == 0 || provider_idle_timeout_ms > 600_000 {
+            return Err(ConfigError::InvalidProviderIdleTimeout(
+                "must be between 1 and 600000".to_owned(),
+            ));
+        }
+        let provider_idle_timeout = Duration::from_millis(provider_idle_timeout_ms);
         let allowed_models = env::var("ALLOWED_MODELS")
             .unwrap_or_else(|_| "company-default".to_owned())
             .split(',')
@@ -396,6 +411,7 @@ impl Config {
             anthropic_request_max_bytes,
             extra_provider_profiles,
             stream_event_max_bytes,
+            provider_idle_timeout,
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,
