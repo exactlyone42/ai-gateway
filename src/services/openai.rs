@@ -22,7 +22,7 @@ use crate::{
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
-    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector},
+    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, ProviderKind},
     policy::value_text,
     quota::QuotaAdmission,
     services::{
@@ -96,6 +96,7 @@ struct BufferedContext {
     attempt: ProviderAttempt,
     model: String,
     provider: String,
+    provider_kind: ProviderKind,
     operation: Operation,
     translation: ValidatedTranslationPlan,
     gateway_request_id: uuid::Uuid,
@@ -376,6 +377,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         attempt,
         model,
         provider,
+        provider_kind: profile.kind,
         operation: request.operation,
         translation,
         gateway_request_id,
@@ -394,6 +396,7 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         mut attempt,
         model,
         provider,
+        provider_kind,
         operation,
         translation,
         gateway_request_id,
@@ -459,7 +462,24 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
             .map(ToOwned::to_owned)
     }));
     if status.is_success() {
-        attempt.observe_usage(TokenUsage::from_response(&body), completed_at);
+        let usage = match provider::usage_for(provider_kind, &body) {
+            Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
+            Err(error) => {
+                attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                reservation.set_client_first_byte_at(completed_at);
+                reservation
+                    .finish(RequestCompletion {
+                        status: "failed".to_owned(),
+                        selected_model: Some(model),
+                        selected_provider: Some(provider),
+                        attempts: vec![attempt],
+                        completed_at,
+                    })
+                    .await?;
+                return Err(error);
+            }
+        };
+        attempt.observe_usage(usage, completed_at);
     }
     let client_response = if translation.translated {
         if !status.is_success() {
@@ -695,7 +715,7 @@ impl StreamObserver for ResponsesObserver {
                 "Responses stream ended with [DONE] instead of a terminal response event",
             ));
         }
-        let mut events = response_metadata(&value, &mut self.response_id, &mut self.usage);
+        let mut events = response_metadata(&value, &mut self.response_id, &mut self.usage)?;
         match kind {
             "response.completed" => events.push(CanonicalStreamEvent::ResponseCompleted),
             "response.failed" => events.push(CanonicalStreamEvent::Error(
@@ -764,9 +784,9 @@ impl StreamObserver for ChatObserver {
             events.push(CanonicalStreamEvent::ResponseStarted(id.to_owned()));
         }
         if let Some(usage) = value.get("usage").filter(|usage| usage.is_object())
-            && merge_usage(&mut self.usage, usage)
+            && let Some(usage) = merge_usage(&mut self.usage, usage)?
         {
-            events.push(CanonicalStreamEvent::Usage(self.usage.clone().into()));
+            events.push(CanonicalStreamEvent::Usage(usage));
         }
         if value.get("error").is_some_and(|error| !error.is_null()) {
             events.push(CanonicalStreamEvent::Error(
@@ -830,7 +850,7 @@ fn response_metadata(
     value: &Value,
     response_id: &mut Option<String>,
     usage: &mut TokenUsage,
-) -> Vec<CanonicalStreamEvent> {
+) -> Result<Vec<CanonicalStreamEvent>, ProtocolError> {
     let mut events = Vec::new();
     if let Some(response) = value.get("response") {
         if let Some(id) = response.get("id").and_then(Value::as_str)
@@ -840,15 +860,18 @@ fn response_metadata(
             events.push(CanonicalStreamEvent::ResponseStarted(id.to_owned()));
         }
         if let Some(next) = response.get("usage").filter(|next| next.is_object())
-            && merge_usage(usage, next)
+            && let Some(normalized) = merge_usage(usage, next)?
         {
-            events.push(CanonicalStreamEvent::Usage(usage.clone().into()));
+            events.push(CanonicalStreamEvent::Usage(normalized));
         }
     }
-    events
+    Ok(events)
 }
 
-fn merge_usage(current: &mut TokenUsage, value: &Value) -> bool {
+fn merge_usage(
+    current: &mut TokenUsage,
+    value: &Value,
+) -> Result<Option<crate::canonical::CanonicalUsage>, ProtocolError> {
     let before = current.clone();
     set_if_present(value, "input_tokens", &mut current.input_tokens);
     set_if_present(value, "prompt_tokens", &mut current.input_tokens);
@@ -873,7 +896,12 @@ fn merge_usage(current: &mut TokenUsage, value: &Value) -> bool {
             &mut current.cache_write_input_tokens,
         );
     }
-    *current != before
+    if *current == before {
+        return Ok(None);
+    }
+    provider::normalize_openai_usage(current.clone())
+        .map(Some)
+        .map_err(|_| ProtocolError::Invalid("OpenAI usage details exceed their totals"))
 }
 
 fn set_if_present(value: &Value, key: &str, target: &mut u64) {

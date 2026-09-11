@@ -10,7 +10,8 @@ use crate::{
     ledger::{Ledger, LedgerError},
     metrics::Instruments,
     model_registry::{
-        GatewayOperation, ModelRegistry, ProviderDialect, ProviderProfile, ProviderProfiles,
+        GatewayOperation, ModelRegistry, ProviderDialect, ProviderKind, ProviderProfile,
+        ProviderProfiles, RegistryError,
     },
     policy::PolicyEngine,
     quota::QuotaEngine,
@@ -62,7 +63,7 @@ impl AppState {
             .max_connections(config.admin_database_max_connections)
             .acquire_timeout(Duration::from_secs(2))
             .connect_lazy_with(pool.connect_options().as_ref().clone());
-        let profiles = ProviderProfiles::new([
+        let mut provider_profiles = vec![
             ProviderProfile::bearer(
                 "env://OPENAI_API_KEY",
                 config.openai_provider.clone(),
@@ -87,7 +88,51 @@ impl AppState {
                 config.provider_allowed_tenant_ids.clone(),
                 Arc::<str>::from(config.anthropic_api_key.clone()),
             ),
-        ])?;
+        ];
+        let extra_profiles = config
+            .extra_provider_profiles
+            .iter()
+            .map(|extra| {
+                let args = (
+                    extra.credential_ref.clone(),
+                    extra.provider_key.clone(),
+                    extra.base_url.clone(),
+                    extra.operations.clone(),
+                    config.provider_allowed_tenant_ids.clone(),
+                );
+                Ok(match (extra.kind, extra.secret.as_ref()) {
+                    (ProviderKind::Gemini, Some(secret)) => ProviderProfile::api_key_for(
+                        extra.kind,
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                        Arc::<str>::from(secret.clone()),
+                    ),
+                    (
+                        ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama,
+                        Some(secret),
+                    ) => ProviderProfile::bearer_for(
+                        extra.kind,
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                        Arc::<str>::from(secret.clone()),
+                    ),
+                    (ProviderKind::Vllm | ProviderKind::Ollama, None) => {
+                        ProviderProfile::unauthenticated_for(
+                            extra.kind, args.0, args.1, args.2, args.3, args.4,
+                        )
+                    }
+                    _ => return Err(RegistryError::InvalidProviderProfile),
+                })
+            })
+            .collect::<Result<Vec<_>, RegistryError>>()?;
+        provider_profiles.extend(extra_profiles);
+        let profiles = ProviderProfiles::new(provider_profiles)?;
         let policies = PolicyEngine::with_cache(
             pool.clone(),
             config.policy_cache_capacity,

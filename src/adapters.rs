@@ -1,3 +1,4 @@
+mod gemini_wire;
 pub mod protocol;
 pub mod provider;
 pub mod response;
@@ -82,6 +83,9 @@ fn validate_cross_request(
         ) | (
             GatewayOperation::OpenAiResponses,
             GatewayOperation::AnthropicMessages
+        ) | (
+            GatewayOperation::OpenAiResponses,
+            GatewayOperation::GeminiGenerateContent
         )
     ) || request.reasoning.is_some()
         || !options_are_empty(&request.provider_options)
@@ -150,6 +154,9 @@ fn validate_cross_request(
                     provider_options,
                     ..
                 } => {
+                    if target == GatewayOperation::GeminiGenerateContent {
+                        return Err(GatewayError::UnsupportedRequest);
+                    }
                     if !matches!(message.role, CanonicalRole::User | CanonicalRole::Tool)
                         || !content.is_string()
                     {

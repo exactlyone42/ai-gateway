@@ -9,7 +9,7 @@ use crate::{
         CanonicalContent, CanonicalError, CanonicalRequest, CanonicalRole, CanonicalStreamEvent,
         CanonicalToolArguments, CanonicalToolCall, CanonicalUsage, ProviderOptions,
     },
-    model_registry::GatewayOperation,
+    model_registry::{GatewayOperation, ProviderKind},
     services::streaming::{ProtocolError, StreamEncoder, StreamObserver, event_data},
 };
 
@@ -19,6 +19,7 @@ const MAX_TOOL_ARGUMENT_BYTES: usize = 8 * 1024 * 1024;
 pub enum CrossStreamObserver {
     Anthropic(AnthropicObserver),
     OpenAi(OpenAiResponsesObserver),
+    Gemini(GeminiObserver),
 }
 
 impl CrossStreamObserver {
@@ -30,6 +31,7 @@ impl CrossStreamObserver {
             GatewayOperation::OpenAiResponses => {
                 Ok(Self::OpenAi(OpenAiResponsesObserver::default()))
             }
+            GatewayOperation::GeminiGenerateContent => Ok(Self::Gemini(GeminiObserver::default())),
             _ => Err(ProtocolError::Invalid(
                 "cross-provider stream target is unsupported",
             )),
@@ -42,6 +44,7 @@ impl StreamObserver for CrossStreamObserver {
         match self {
             Self::Anthropic(observer) => observer.observe(event),
             Self::OpenAi(observer) => observer.observe(event),
+            Self::Gemini(observer) => observer.observe(event),
         }
     }
 
@@ -49,6 +52,100 @@ impl StreamObserver for CrossStreamObserver {
         Err(ProtocolError::Invalid(
             "translated provider stream ended without its terminal event",
         ))
+    }
+}
+
+#[derive(Default)]
+pub struct GeminiObserver {
+    started: bool,
+    content_started: bool,
+    terminal: bool,
+}
+
+impl StreamObserver for GeminiObserver {
+    fn observe(&mut self, event: &[u8]) -> Result<Vec<CanonicalStreamEvent>, ProtocolError> {
+        let value = strict_event(event)?;
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        if self.terminal {
+            return Err(ProtocolError::Invalid(
+                "Gemini event followed the terminal event",
+            ));
+        }
+        let response = super::gemini_wire::decode(value.clone())
+            .map_err(|_| ProtocolError::Invalid("Gemini chunk is invalid"))?;
+        if response.error.is_some() {
+            self.terminal = true;
+            return Ok(vec![CanonicalStreamEvent::Error(CanonicalError::provider(
+                "provider_stream_error",
+            ))]);
+        }
+        let candidate = response
+            .candidates
+            .first()
+            .ok_or(ProtocolError::Invalid("Gemini chunk has no candidate"))?;
+        let mut events = Vec::new();
+        if !self.started {
+            self.started = true;
+            events.extend([
+                CanonicalStreamEvent::ResponseStarted("gemini".to_owned()),
+                CanonicalStreamEvent::MessageStarted {
+                    role: CanonicalRole::Assistant,
+                },
+            ]);
+        }
+        for part in &candidate.content.parts {
+            let text = part
+                .text
+                .as_deref()
+                .filter(|_| part.function_call.is_none())
+                .ok_or(ProtocolError::Invalid("Gemini stream part is not text"))?;
+            if !self.content_started {
+                self.content_started = true;
+                events.push(CanonicalStreamEvent::ContentBlockStarted {
+                    index: 0,
+                    content: CanonicalContent::Text {
+                        text: String::new(),
+                        provider_options: ProviderOptions::new(),
+                    },
+                });
+            }
+            events.push(CanonicalStreamEvent::TextDelta {
+                index: 0,
+                text: text.to_owned(),
+            });
+        }
+        if let Some(reason) = candidate.finish_reason.as_deref() {
+            let finish_reason = match reason {
+                "STOP" => "stop",
+                "MAX_TOKENS" => "max_tokens",
+                _ => {
+                    return Err(ProtocolError::Invalid(
+                        "Gemini finish reason is not translatable",
+                    ));
+                }
+            };
+            if self.content_started {
+                events.push(CanonicalStreamEvent::ContentBlockCompleted { index: 0 });
+            }
+            let encoded = serde_json::to_vec(&value)
+                .map_err(|_| ProtocolError::Invalid("Gemini usage could not be encoded"))?;
+            let usage = super::provider::usage_for(ProviderKind::Gemini, &encoded)
+                .map_err(|_| ProtocolError::Invalid("Gemini terminal usage is invalid"))?
+                .ok_or(ProtocolError::Invalid("Gemini terminal usage is missing"))?;
+            events.extend([
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 0,
+                    finish_reason: finish_reason.to_owned(),
+                },
+                CanonicalStreamEvent::Usage(usage),
+                CanonicalStreamEvent::MessageCompleted,
+                CanonicalStreamEvent::ResponseCompleted,
+            ]);
+            self.terminal = true;
+        }
+        Ok(events)
     }
 }
 
@@ -1046,12 +1143,17 @@ impl StreamEncoder for OpenAiResponsesEncoder {
                     if incomplete {
                         response["incomplete_details"] = json!({"reason": "max_output_tokens"});
                     }
+                    let input_tokens = self.usage.input_tokens
+                        .saturating_add(self.usage.cached_input_tokens)
+                        .saturating_add(self.usage.cache_write_input_tokens);
+                    let output_tokens = self.usage.output_tokens
+                        .saturating_add(self.usage.reasoning_tokens);
                     response["usage"] = json!({
-                        "input_tokens": self.usage.input_tokens,
+                        "input_tokens": input_tokens,
                         "input_tokens_details": {"cached_tokens": self.usage.cached_input_tokens},
-                        "output_tokens": self.usage.output_tokens,
+                        "output_tokens": output_tokens,
                         "output_tokens_details": {"reasoning_tokens": self.usage.reasoning_tokens},
-                        "total_tokens": self.usage.input_tokens.saturating_add(self.usage.output_tokens)
+                        "total_tokens": input_tokens.saturating_add(output_tokens)
                     });
                     let event = if incomplete { "response.incomplete" } else { "response.completed" };
                     output.push(self.event(event, json!({"type": event, "response": response})));
@@ -1065,12 +1167,17 @@ impl StreamEncoder for OpenAiResponsesEncoder {
                     }).collect::<Vec<_>>();
                     let mut response = self.base_response("incomplete", Value::Array(items));
                     response["incomplete_details"] = json!({"reason": "max_output_tokens"});
+                    let input_tokens = self.usage.input_tokens
+                        .saturating_add(self.usage.cached_input_tokens)
+                        .saturating_add(self.usage.cache_write_input_tokens);
+                    let output_tokens = self.usage.output_tokens
+                        .saturating_add(self.usage.reasoning_tokens);
                     response["usage"] = json!({
-                        "input_tokens": self.usage.input_tokens,
+                        "input_tokens": input_tokens,
                         "input_tokens_details": {"cached_tokens": self.usage.cached_input_tokens},
-                        "output_tokens": self.usage.output_tokens,
+                        "output_tokens": output_tokens,
                         "output_tokens_details": {"reasoning_tokens": self.usage.reasoning_tokens},
-                        "total_tokens": self.usage.input_tokens.saturating_add(self.usage.output_tokens)
+                        "total_tokens": input_tokens.saturating_add(output_tokens)
                     });
                     output.push(self.event("response.incomplete", json!({"type": "response.incomplete", "response": response})));
                 }
@@ -1275,7 +1382,7 @@ mod tests {
     use super::{CrossStreamEncoder, CrossStreamObserver};
     use crate::{
         adapters::protocol,
-        canonical::{PrincipalRef, RequestEnrichment},
+        canonical::{CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
         model_registry::GatewayOperation,
         services::streaming::{StreamEncoder, StreamObserver},
     };
@@ -1561,6 +1668,40 @@ mod tests {
         items.observe(b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"in_progress\"},\"sequence_number\":0}\n\n").unwrap();
         items.observe(b"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"same\",\"status\":\"in_progress\",\"role\":\"assistant\"},\"sequence_number\":1}\n\n").unwrap();
         assert!(items.observe(b"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"same\",\"status\":\"in_progress\",\"role\":\"assistant\"},\"sequence_number\":2}\n\n").is_err());
+    }
+
+    #[test]
+    fn gemini_stream_requires_terminal_usage_and_rejects_midstream_errors() {
+        let mut observer =
+            CrossStreamObserver::new(GatewayOperation::GeminiGenerateContent).unwrap();
+        let first = observer
+            .observe(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hel\"}]}}]}\n\n")
+            .unwrap();
+        assert!(first.iter().any(
+            |event| matches!(event, CanonicalStreamEvent::TextDelta { text, .. } if text == "hel")
+        ));
+        let terminal = observer
+            .observe(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":1}}\n\n")
+            .unwrap();
+        assert!(matches!(
+            terminal.last(),
+            Some(CanonicalStreamEvent::ResponseCompleted)
+        ));
+        assert!(observer.observe(b"data: {\"candidates\":[]}\n\n").is_err());
+
+        let mut missing_usage =
+            CrossStreamObserver::new(GatewayOperation::GeminiGenerateContent).unwrap();
+        assert!(missing_usage.observe(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}]},\"finishReason\":\"STOP\"}]}\n\n").is_err());
+
+        let mut failed = CrossStreamObserver::new(GatewayOperation::GeminiGenerateContent).unwrap();
+        let events = failed
+            .observe(b"data: {\"error\":{\"code\":503,\"message\":\"unavailable\"}}\n\n")
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [CanonicalStreamEvent::Error(_)]
+        ));
+        assert!(failed.observe(b"data: {\"candidates\":[]}\n\n").is_err());
     }
 
     fn source_request() -> crate::canonical::CanonicalRequest {

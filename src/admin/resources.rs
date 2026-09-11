@@ -1277,20 +1277,10 @@ impl AdminService {
                   AND a.tenant_id = $1 AND a.id = $2 AND a.version = $3
                   AND a.lifecycle_state IN ('draft', 'disabled')
                   AND m.lifecycle_state = 'active' AND p.lifecycle_state = 'active'
-                  AND CASE
-                        WHEN p.provider_type = 'openai' AND a.operation = 'anthropic_messages'
-                          THEN 'openai_responses'
-                        WHEN p.provider_type = 'anthropic' AND a.operation = 'openai_responses'
-                          THEN 'anthropic_messages'
-                        ELSE a.operation
-                      END = ANY(p.supported_operations)
-                  AND CASE
-                        WHEN p.provider_type = 'openai' AND a.operation = 'anthropic_messages'
-                          THEN 'openai_responses'
-                        WHEN p.provider_type = 'anthropic' AND a.operation = 'openai_responses'
-                          THEN 'anthropic_messages'
-                        ELSE a.operation
-                      END = ANY(m.supported_operations)
+                  AND provider_target_operation(p.provider_type, a.operation)
+                      = ANY(p.supported_operations)
+                  AND provider_target_operation(p.provider_type, a.operation)
+                      = ANY(m.supported_operations)
                 RETURNING to_jsonb(a)
                 "#
             }
@@ -2019,6 +2009,36 @@ mod tests {
             .unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].supports_target_operation(GatewayOperation::OpenAiResponses));
+    }
+
+    #[sqlx::test]
+    async fn provider_target_operations_cover_every_cross_protocol_kind(pool: PgPool) {
+        let mappings: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT provider_target_operation(provider_type, source_operation)
+            FROM (VALUES
+                (1, 'openai', 'anthropic_messages'),
+                (2, 'xai', 'anthropic_messages'),
+                (3, 'local', 'anthropic_messages'),
+                (4, 'anthropic', 'openai_responses'),
+                (5, 'gemini', 'openai_responses')
+            ) AS cases(ordinal, provider_type, source_operation)
+            ORDER BY ordinal
+            "#,
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            mappings,
+            [
+                "openai_responses",
+                "openai_responses",
+                "openai_responses",
+                "anthropic_messages",
+                "gemini_generate_content",
+            ]
+        );
     }
 
     #[test]

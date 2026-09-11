@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     adapters::ProviderRequestInput,
+    adapters::gemini_wire,
     canonical::{
         CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalToolArguments,
         CanonicalToolChoice, CanonicalUsage,
@@ -24,7 +25,7 @@ pub enum AuthenticationMode {
     ApiKey,
     Bearer,
     GoogleApiKey,
-    None,
+    OptionalBearer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +43,7 @@ pub struct ProviderCapabilities {
     pub usage: UsageAvailability,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProviderHealthProbe {
     pub method: Method,
@@ -49,6 +51,7 @@ pub struct ProviderHealthProbe {
     authentication: AuthenticationMode,
 }
 
+#[allow(dead_code)]
 impl ProviderHealthProbe {
     pub async fn execute(
         &self,
@@ -118,6 +121,7 @@ pub trait ProviderAdapter: Sync {
 
     fn capabilities(&self) -> ProviderCapabilities;
 
+    #[allow(dead_code)]
     fn health(
         &self,
         profile: &ProviderProfile,
@@ -140,11 +144,14 @@ pub trait ProviderAdapter: Sync {
         input: ProviderRequestInput<'_>,
     ) -> Result<PreparedProviderRequest, GatewayError>;
 
+    #[allow(dead_code)]
     fn estimate_cost(
         &self,
         usage: &CanonicalUsage,
         cost_metadata: &Value,
     ) -> Result<u64, GatewayError>;
+
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError>;
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation>;
 
@@ -287,7 +294,14 @@ fn apply_authentication(
             headers.insert(header::AUTHORIZATION, value);
             return Ok(());
         }
-        AuthenticationMode::None => return Ok(()),
+        AuthenticationMode::OptionalBearer => {
+            if let Some(secret) = profile.bearer_secret() {
+                let value = HeaderValue::from_str(&format!("Bearer {secret}"))
+                    .map_err(|_| GatewayError::InvalidConfiguration)?;
+                headers.insert(header::AUTHORIZATION, value);
+            }
+            return Ok(());
+        }
     };
     headers.insert(
         name,
@@ -296,6 +310,7 @@ fn apply_authentication(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn standard_cost(usage: &CanonicalUsage, cost_metadata: &Value) -> Result<u64, GatewayError> {
     cost_for_usage(
         cost_metadata,
@@ -312,7 +327,18 @@ fn standard_cost(usage: &CanonicalUsage, cost_metadata: &Value) -> Result<u64, G
 
 struct AnthropicProviderAdapter;
 struct OpenAiProviderAdapter;
-struct GeminiProviderAdapter;
+pub struct GeminiProvider;
+pub struct XaiProvider;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalRuntime {
+    Vllm,
+    Ollama,
+}
+
+pub struct LocalProvider {
+    runtime: LocalRuntime,
+}
 
 impl ProviderAdapter for AnthropicProviderAdapter {
     fn kind(&self) -> ProviderKind {
@@ -371,6 +397,10 @@ impl ProviderAdapter for AnthropicProviderAdapter {
         cost_metadata: &Value,
     ) -> Result<u64, GatewayError> {
         standard_cost(usage, cost_metadata)
+    }
+
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+        openai_compatible_usage(response)
     }
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
@@ -470,6 +500,10 @@ impl ProviderAdapter for OpenAiProviderAdapter {
         standard_cost(usage, cost_metadata)
     }
 
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+        openai_compatible_usage(response)
+    }
+
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
         match operation {
             CanonicalOperation::Generate => Some(GatewayOperation::OpenAiResponses),
@@ -512,7 +546,7 @@ impl ProviderAdapter for OpenAiProviderAdapter {
     }
 }
 
-impl ProviderAdapter for GeminiProviderAdapter {
+impl ProviderAdapter for GeminiProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Gemini
     }
@@ -524,9 +558,9 @@ impl ProviderAdapter for GeminiProviderAdapter {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            tools: true,
+            tools: false,
             structured_output: true,
-            reasoning: true,
+            reasoning: false,
             usage: UsageAvailability::Required,
         }
     }
@@ -571,6 +605,10 @@ impl ProviderAdapter for GeminiProviderAdapter {
         standard_cost(usage, cost_metadata)
     }
 
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+        gemini_wire::usage(response)
+    }
+
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
         (operation == CanonicalOperation::Generate)
             .then_some(GatewayOperation::GeminiGenerateContent)
@@ -590,9 +628,9 @@ impl ProviderAdapter for GeminiProviderAdapter {
             return Err(GatewayError::InvalidConfiguration);
         }
         let method = if stream {
-            "streamGenerateContent?alt=sse"
+            concat!("stream", "Generate", "Content?alt=sse")
         } else {
-            "generateContent"
+            concat!("generate", "Content")
         };
         Ok(format!("/v1beta/models/{provider_model_id}:{method}"))
     }
@@ -604,6 +642,253 @@ impl ProviderAdapter for GeminiProviderAdapter {
     fn allows_client_header(&self, name: &HeaderName) -> bool {
         name == header::CONTENT_TYPE || name == header::ACCEPT
     }
+
+    fn encode_canonical(
+        &self,
+        request: &CanonicalRequest,
+        target_operation: GatewayOperation,
+        provider_model_id: &str,
+    ) -> Result<Bytes, GatewayError> {
+        if target_operation != GatewayOperation::GeminiGenerateContent {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        if provider_model_id.is_empty() {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+        gemini_wire::encode(request).map(Bytes::from)
+    }
+}
+
+impl ProviderAdapter for XaiProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Xai
+    }
+
+    fn dialect(&self) -> ProviderDialect {
+        ProviderDialect::OpenAi
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+            structured_output: true,
+            reasoning: true,
+            usage: UsageAvailability::Required,
+        }
+    }
+
+    fn health(
+        &self,
+        _profile: &ProviderProfile,
+        _provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError> {
+        Ok(ProviderHealthProbe {
+            method: Method::GET,
+            path_and_query: "/v1/models".to_owned(),
+            authentication: self.authentication(),
+        })
+    }
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError> {
+        standard_cost(usage, cost_metadata)
+    }
+
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+        openai_compatible_usage(response)
+    }
+
+    fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
+        (operation == CanonicalOperation::Generate).then_some(GatewayOperation::OpenAiResponses)
+    }
+
+    fn default_path(&self, operation: GatewayOperation) -> Option<&'static str> {
+        match operation {
+            GatewayOperation::OpenAiResponses => Some("/v1/responses"),
+            GatewayOperation::OpenAiChatCompletions => Some("/v1/chat/completions"),
+            _ => None,
+        }
+    }
+
+    fn authentication(&self) -> AuthenticationMode {
+        AuthenticationMode::Bearer
+    }
+
+    fn allows_client_header(&self, name: &HeaderName) -> bool {
+        name == header::CONTENT_TYPE || name == header::ACCEPT
+    }
+
+    fn encode_canonical(
+        &self,
+        request: &CanonicalRequest,
+        target_operation: GatewayOperation,
+        provider_model_id: &str,
+    ) -> Result<Bytes, GatewayError> {
+        if target_operation != GatewayOperation::OpenAiResponses {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        encode_openai_request(request, provider_model_id)
+    }
+}
+
+impl ProviderAdapter for LocalProvider {
+    fn kind(&self) -> ProviderKind {
+        match self.runtime {
+            LocalRuntime::Vllm => ProviderKind::Vllm,
+            LocalRuntime::Ollama => ProviderKind::Ollama,
+        }
+    }
+
+    fn dialect(&self) -> ProviderDialect {
+        ProviderDialect::OpenAi
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+            structured_output: true,
+            reasoning: true,
+            usage: UsageAvailability::Optional,
+        }
+    }
+
+    fn health(
+        &self,
+        _profile: &ProviderProfile,
+        _provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError> {
+        Ok(ProviderHealthProbe {
+            method: Method::GET,
+            path_and_query: match self.runtime {
+                LocalRuntime::Vllm => "/health",
+                LocalRuntime::Ollama => "/api/version",
+            }
+            .to_owned(),
+            authentication: self.authentication(),
+        })
+    }
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError> {
+        standard_cost(usage, cost_metadata)
+    }
+
+    fn usage(&self, response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+        openai_compatible_usage(response)
+    }
+
+    fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
+        (operation == CanonicalOperation::Generate).then_some(GatewayOperation::OpenAiResponses)
+    }
+
+    fn default_path(&self, operation: GatewayOperation) -> Option<&'static str> {
+        match operation {
+            GatewayOperation::OpenAiResponses => Some("/v1/responses"),
+            GatewayOperation::OpenAiChatCompletions => Some("/v1/chat/completions"),
+            _ => None,
+        }
+    }
+
+    fn authentication(&self) -> AuthenticationMode {
+        AuthenticationMode::OptionalBearer
+    }
+
+    fn allows_client_header(&self, name: &HeaderName) -> bool {
+        name == header::CONTENT_TYPE || name == header::ACCEPT
+    }
+
+    fn encode_canonical(
+        &self,
+        request: &CanonicalRequest,
+        target_operation: GatewayOperation,
+        provider_model_id: &str,
+    ) -> Result<Bytes, GatewayError> {
+        if target_operation != GatewayOperation::OpenAiResponses {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        encode_openai_request(request, provider_model_id)
+    }
+}
+
+fn openai_compatible_usage(response: &Value) -> Result<Option<CanonicalUsage>, GatewayError> {
+    let Some(usage) = response.get("usage").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    if !usage.is_object() {
+        return Err(GatewayError::UpstreamProtocol);
+    }
+    normalize_openai_usage(crate::ledger::TokenUsage::from_value(usage)).map(Some)
+}
+
+pub(crate) fn normalize_openai_usage(
+    usage: crate::ledger::TokenUsage,
+) -> Result<CanonicalUsage, GatewayError> {
+    let detailed_input = usage
+        .cached_input_tokens
+        .checked_add(usage.cache_write_input_tokens)
+        .ok_or(GatewayError::UpstreamProtocol)?;
+    Ok(CanonicalUsage {
+        input_tokens: usage
+            .input_tokens
+            .checked_sub(detailed_input)
+            .ok_or(GatewayError::UpstreamProtocol)?,
+        output_tokens: usage
+            .output_tokens
+            .checked_sub(usage.reasoning_tokens)
+            .ok_or(GatewayError::UpstreamProtocol)?,
+        cached_input_tokens: usage.cached_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        ..CanonicalUsage::default()
+    })
 }
 
 fn encode_openai_request(
@@ -849,8 +1134,16 @@ fn anthropic_tool_choice(choice: &CanonicalToolChoice) -> Value {
 
 static ANTHROPIC: AnthropicProviderAdapter = AnthropicProviderAdapter;
 static OPENAI: OpenAiProviderAdapter = OpenAiProviderAdapter;
-static GEMINI: GeminiProviderAdapter = GeminiProviderAdapter;
+static GEMINI: GeminiProvider = GeminiProvider;
+static XAI: XaiProvider = XaiProvider;
+static VLLM: LocalProvider = LocalProvider {
+    runtime: LocalRuntime::Vllm,
+};
+static OLLAMA: LocalProvider = LocalProvider {
+    runtime: LocalRuntime::Ollama,
+};
 
+#[cfg(test)]
 pub fn for_dialect(dialect: ProviderDialect) -> &'static dyn ProviderAdapter {
     match dialect {
         ProviderDialect::Anthropic => &ANTHROPIC,
@@ -864,12 +1157,25 @@ pub fn for_kind(kind: ProviderKind) -> Result<&'static dyn ProviderAdapter, Gate
         ProviderKind::Anthropic => &ANTHROPIC,
         ProviderKind::OpenAi => &OPENAI,
         ProviderKind::Gemini => &GEMINI,
-        ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => {
-            return Err(GatewayError::InvalidConfiguration);
-        }
+        ProviderKind::Xai => &XAI,
+        ProviderKind::Vllm => &VLLM,
+        ProviderKind::Ollama => &OLLAMA,
     };
     debug_assert_eq!(adapter.kind(), kind);
     Ok(adapter)
+}
+
+pub fn usage_for(
+    kind: ProviderKind,
+    response: &[u8],
+) -> Result<Option<CanonicalUsage>, GatewayError> {
+    let response = serde_json::from_slice(response).map_err(|_| GatewayError::UpstreamProtocol)?;
+    let adapter = for_kind(kind)?;
+    let usage = adapter.usage(&response)?;
+    if usage.is_none() && adapter.capabilities().usage == UsageAvailability::Required {
+        return Err(GatewayError::UpstreamProtocol);
+    }
+    Ok(usage)
 }
 
 #[tracing::instrument(
@@ -894,11 +1200,16 @@ pub async fn send(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Bytes;
+    use axum::{Router, body::Bytes, http::HeaderMap};
     use serde_json::json;
+    use uuid::Uuid;
 
-    use super::{NativePayload, for_dialect};
-    use crate::model_registry::ProviderDialect;
+    use super::{NativePayload, UsageAvailability, for_dialect, for_kind};
+    use crate::{
+        adapters::{ProviderRequestInput, protocol},
+        canonical::{CanonicalUsage, PrincipalRef, RequestEnrichment},
+        model_registry::{GatewayOperation, ProviderDialect, ProviderKind, ProviderProfile},
+    };
 
     #[test]
     fn unchanged_model_preserves_every_request_byte() {
@@ -929,5 +1240,328 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn gemini_provider_contract_maps_request_stream_usage_and_cost() {
+        let adapter = for_kind(ProviderKind::Gemini).unwrap();
+        let profile = profile(ProviderKind::Gemini, true);
+        let request = canonical_request(true);
+        let headers = HeaderMap::new();
+        let plan = adapter
+            .plan_for_target(
+                GatewayOperation::GeminiGenerateContent,
+                GatewayOperation::OpenAiResponses,
+                "gemini-2.5-flash",
+                true,
+                &input(&headers),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.path_and_query,
+            "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        let body = adapter
+            .encode_canonical(
+                &request,
+                GatewayOperation::GeminiGenerateContent,
+                "gemini-2.5-flash",
+            )
+            .unwrap();
+        let prepared = adapter
+            .stream(plan, body, &profile, input(&headers))
+            .unwrap();
+        assert_eq!(prepared.headers().get("x-goog-api-key").unwrap(), "secret");
+        let body: serde_json::Value = serde_json::from_slice(prepared.body()).unwrap();
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "hello");
+        assert!(!adapter.capabilities().tools);
+        assert!(!adapter.capabilities().reasoning);
+        let usage = adapter
+            .usage(&json!({"usageMetadata": {
+                "promptTokenCount": 11,
+                "cachedContentTokenCount": 3,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 2
+            }}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            usage,
+            CanonicalUsage {
+                input_tokens: 8,
+                cached_input_tokens: 3,
+                output_tokens: 5,
+                reasoning_tokens: 2,
+                ..CanonicalUsage::default()
+            }
+        );
+        assert_eq!(
+            adapter.estimate_cost(&priced_usage(), &pricing()).unwrap(),
+            3
+        );
+        let disjoint = CanonicalUsage {
+            input_tokens: 750_000,
+            cached_input_tokens: 250_000,
+            ..CanonicalUsage::default()
+        };
+        let tiered_pricing = json!({
+            "schema": "token_v1",
+            "currency": "USD",
+            "input_microusd_per_million_tokens": 4,
+            "output_microusd_per_million_tokens": 0,
+            "cache_read_input_microusd_per_million_tokens": 1
+        });
+        assert_eq!(
+            adapter.estimate_cost(&disjoint, &tiered_pricing).unwrap(),
+            4
+        );
+        assert!(
+            adapter
+                .usage(&json!({"usageMetadata": {
+                    "promptTokenCount": 1,
+                    "cachedContentTokenCount": 2,
+                    "candidatesTokenCount": 1
+                }}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn xai_provider_contract_is_explicit_openai_compatibility() {
+        let adapter = for_kind(ProviderKind::Xai).unwrap();
+        let profile = profile(ProviderKind::Xai, true);
+        let headers = HeaderMap::new();
+        let plan = adapter
+            .plan_for_target(
+                GatewayOperation::OpenAiResponses,
+                GatewayOperation::AnthropicMessages,
+                "grok-4",
+                false,
+                &input(&headers),
+            )
+            .unwrap();
+        let prepared = adapter
+            .send(plan, Bytes::from_static(b"{}"), &profile, input(&headers))
+            .unwrap();
+        assert_eq!(prepared.path_and_query(), "/v1/responses");
+        assert_eq!(
+            prepared.headers().get("authorization").unwrap(),
+            "Bearer secret"
+        );
+        let usage = adapter
+            .usage(&json!({"usage": {
+                "input_tokens": 9,
+                "output_tokens": 4,
+                "input_tokens_details": {"cached_tokens": 6},
+                "output_tokens_details": {"reasoning_tokens": 2}
+            }}))
+            .unwrap()
+            .unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (3, 2));
+        assert_eq!((usage.cached_input_tokens, usage.reasoning_tokens), (6, 2));
+        assert_eq!(adapter.capabilities().usage, UsageAvailability::Required);
+        assert_eq!(
+            adapter.estimate_cost(&priced_usage(), &pricing()).unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn local_provider_contract_distinguishes_vllm_and_ollama() {
+        let vllm = for_kind(ProviderKind::Vllm).unwrap();
+        let ollama = for_kind(ProviderKind::Ollama).unwrap();
+        let vllm_profile = profile(ProviderKind::Vllm, false);
+        let headers = HeaderMap::new();
+        assert_eq!(
+            vllm.health(&vllm_profile, "model").unwrap().path_and_query,
+            "/health"
+        );
+        assert_eq!(
+            ollama
+                .health(&profile(ProviderKind::Ollama, false), "model")
+                .unwrap()
+                .path_and_query,
+            "/api/version"
+        );
+        let plan = vllm
+            .plan_for_target(
+                GatewayOperation::OpenAiResponses,
+                GatewayOperation::AnthropicMessages,
+                "model",
+                true,
+                &input(&headers),
+            )
+            .unwrap();
+        let prepared = vllm
+            .stream(
+                plan,
+                Bytes::from_static(b"{}"),
+                &vllm_profile,
+                input(&headers),
+            )
+            .unwrap();
+        assert!(prepared.headers().get("authorization").is_none());
+        assert_eq!(vllm.capabilities().usage, UsageAvailability::Optional);
+        assert_eq!(vllm.usage(&json!({})).unwrap(), None);
+        assert!(vllm.usage(&json!({"usage": "invalid"})).is_err());
+        assert_eq!(
+            ollama.estimate_cost(&priced_usage(), &pricing()).unwrap(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn every_provider_health_probe_executes_once_and_preserves_error_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .await
+            .unwrap();
+        });
+        let base_url = format!("http://{address}");
+        let client = reqwest::Client::new();
+        let gemini = profile(ProviderKind::Gemini, true);
+        let xai = profile(ProviderKind::Xai, true);
+        let vllm = profile(ProviderKind::Vllm, false);
+        let ollama = profile(ProviderKind::Ollama, false);
+        assert_eq!(
+            for_kind(ProviderKind::Gemini)
+                .unwrap()
+                .health(&gemini, "model")
+                .unwrap()
+                .execute(&client, &base_url, &gemini)
+                .await
+                .unwrap(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            for_kind(ProviderKind::Xai)
+                .unwrap()
+                .health(&xai, "model")
+                .unwrap()
+                .execute(&client, &base_url, &xai)
+                .await
+                .unwrap(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            for_kind(ProviderKind::Vllm)
+                .unwrap()
+                .health(&vllm, "model")
+                .unwrap()
+                .execute(&client, &base_url, &vllm)
+                .await
+                .unwrap(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            for_kind(ProviderKind::Ollama)
+                .unwrap()
+                .health(&ollama, "model")
+                .unwrap()
+                .execute(&client, &base_url, &ollama)
+                .await
+                .unwrap(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        task.abort();
+    }
+
+    fn canonical_request(stream: bool) -> crate::canonical::CanonicalRequest {
+        protocol::decode(
+            GatewayOperation::OpenAiResponses,
+            Bytes::from(format!(
+                r#"{{"model":"public","input":"hello","stream":{stream},"max_output_tokens":16}}"#
+            )),
+        )
+        .unwrap()
+        .enrich(RequestEnrichment {
+            gateway_request_id: Uuid::nil(),
+            trace_id: None,
+            session_id: None,
+            principal: PrincipalRef {
+                tenant_id: Uuid::nil(),
+                credential_id: Uuid::nil(),
+                user_id: None,
+                device_id: None,
+                client_id: None,
+                agent_id: None,
+            },
+            requested_model: "public".to_owned(),
+            requested_quality: None,
+            workload_class: "interactive".to_owned(),
+            urgency: "normal".to_owned(),
+            budget_class: "standard".to_owned(),
+            deadline: None,
+        })
+    }
+
+    fn input(headers: &HeaderMap) -> ProviderRequestInput<'_> {
+        ProviderRequestInput {
+            source_path_and_query: "/v1/responses",
+            client_headers: headers,
+            idempotency_key: None,
+        }
+    }
+
+    fn profile(kind: ProviderKind, authenticated: bool) -> ProviderProfile {
+        let operations = match kind {
+            ProviderKind::Gemini => vec![GatewayOperation::GeminiGenerateContent],
+            _ => vec![
+                GatewayOperation::OpenAiResponses,
+                GatewayOperation::OpenAiChatCompletions,
+            ],
+        };
+        if kind == ProviderKind::Gemini {
+            ProviderProfile::api_key_for(
+                kind,
+                format!("env://{}", kind.as_str()),
+                kind.as_str(),
+                "https://example.test",
+                operations,
+                vec![Uuid::nil()],
+                "secret",
+            )
+        } else if authenticated {
+            ProviderProfile::bearer_for(
+                kind,
+                format!("env://{}", kind.as_str()),
+                kind.as_str(),
+                "https://example.test",
+                operations,
+                vec![Uuid::nil()],
+                "secret",
+            )
+        } else {
+            ProviderProfile::unauthenticated_for(
+                kind,
+                format!("none://{}", kind.as_str()),
+                kind.as_str(),
+                "https://example.test",
+                operations,
+                vec![Uuid::nil()],
+            )
+        }
+    }
+
+    fn priced_usage() -> CanonicalUsage {
+        CanonicalUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..CanonicalUsage::default()
+        }
+    }
+
+    fn pricing() -> serde_json::Value {
+        json!({
+            "schema": "token_v1",
+            "currency": "USD",
+            "input_microusd_per_million_tokens": 1,
+            "output_microusd_per_million_tokens": 2
+        })
     }
 }

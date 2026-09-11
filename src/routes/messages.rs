@@ -345,7 +345,24 @@ pub(super) async fn proxy(
             });
         attempt.observe_response_id(response_id);
         if status.is_success() && matches!(operation, Operation::Messages) {
-            attempt.observe_usage(TokenUsage::from_response(&bytes), completed_at);
+            let usage = match provider::usage_for(profile.kind, &bytes) {
+                Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
+                Err(error) => {
+                    attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                    reservation.set_client_first_byte_at(completed_at);
+                    reservation
+                        .finish(completion(
+                            StatusCode::BAD_GATEWAY,
+                            model,
+                            provider,
+                            attempt,
+                            completed_at,
+                        ))
+                        .await?;
+                    return Err(error);
+                }
+            };
+            attempt.observe_usage(usage, completed_at);
         }
         let client_response = if translation.translated {
             if !status.is_success() {
