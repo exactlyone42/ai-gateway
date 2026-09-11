@@ -36,7 +36,7 @@
 | [canonical-layer](./canonical-layer.loop.md) | W14 | 已交付 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
 | [cross-provider](./cross-provider.loop.md) | W15 | 已交付 | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
 | [providers-expansion](./providers-expansion.loop.md) | W16 | 已交付 | P2 | 加 Gemini／xAI／Local 不需要改 Core（改了就是抽象設計錯了） |
-| [advanced-routing](./advanced-routing.loop.md) | W17 | 未開始 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
+| [advanced-routing](./advanced-routing.loop.md) | W17 | 進行中 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 未開始 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 未開始 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
 
