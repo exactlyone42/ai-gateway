@@ -1130,6 +1130,7 @@ impl AdminService {
                     context.tenant_id,
                     before["credential_ref"].as_str().unwrap_or_default(),
                     before["provider_key"].as_str().unwrap_or_default(),
+                    before["provider_type"].as_str().unwrap_or_default(),
                     before["base_url"].as_str().unwrap_or_default(),
                     &operations,
                 )

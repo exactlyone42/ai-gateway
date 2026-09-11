@@ -50,12 +50,19 @@
   W16 issue／PR／branch 查重，建立卡 #46、Project #2 item 與唯一 feature branch。
 - 2026-09-11T10:47+08:00：核對 Google、xAI、vLLM、Ollama 官方文件，記錄 native endpoint、
   authentication、stream、health 與 token usage 差異；未以 OpenAI-compatible 宣稱完全相容。
+- 2026-09-11T11:12+08:00：計畫審查完成（Codex session
+  `01a08e5b-6eaf-7361-9324-b87bc2c156af`，9,459 tokens）；採納健康檢查必須能實際單次執行、
+  W14 修復獨立提交、Local kind 不靠 URL 猜測、Gemini path 必須取得 provider model、介面方法無
+  預設實作，以及串流終止／中途錯誤／缺 usage／取消的合約案例。
+- 2026-09-11T11:34+08:00：完成 W14 extension 修復：ProviderKind 與 DB provider_type 綁定、
+  typed capabilities／health／send／stream／estimate_cost 必要介面、Gemini 動態 target path，既有
+  OpenAI／Anthropic 也顯式實作同一契約；精確單元測試 2/2 綠。
 
 ## 已確定不可行
 - 直接檢查 `git diff --stat crates/gateway-core`：repo 沒有該 workspace 路徑，空結果不能當證據。
 
 ## 證據
-- （待填：`git diff --stat crates/gateway-core` 必須是空的）
+- W14 修復基線：待填提交 SHA；W16 provider 實作完成後比較 core path diff 必須為空。
 
 ## 來源
 - 規格 §19（Provider 介面）、§73（Phase 6）。

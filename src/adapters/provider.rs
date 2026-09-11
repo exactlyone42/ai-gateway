@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    http::{HeaderMap, HeaderName, HeaderValue, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
 };
 use serde_json::{Map, Value, json};
 
@@ -8,19 +8,66 @@ use crate::{
     adapters::ProviderRequestInput,
     canonical::{
         CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalToolArguments,
-        CanonicalToolChoice,
+        CanonicalToolChoice, CanonicalUsage,
     },
     error::GatewayError,
     logging,
     model_registry::{
-        CanonicalOperation, GatewayOperation, ProviderDialect, ProviderProfile, rewrite_model,
+        CanonicalOperation, GatewayOperation, ProviderDialect, ProviderKind, ProviderProfile,
+        rewrite_model,
     },
+    quota::cost_for_usage,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthenticationMode {
     ApiKey,
     Bearer,
+    GoogleApiKey,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageAvailability {
+    Required,
+    Optional,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderCapabilities {
+    pub streaming: bool,
+    pub tools: bool,
+    pub structured_output: bool,
+    pub reasoning: bool,
+    pub usage: UsageAvailability,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProviderHealthProbe {
+    pub method: Method,
+    pub path_and_query: String,
+    authentication: AuthenticationMode,
+}
+
+impl ProviderHealthProbe {
+    pub async fn execute(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        profile: &ProviderProfile,
+    ) -> Result<StatusCode, GatewayError> {
+        let mut headers = HeaderMap::new();
+        apply_authentication(&mut headers, self.authentication, profile)?;
+        Ok(client
+            .request(
+                self.method.clone(),
+                format!("{}{}", base_url.trim_end_matches('/'), self.path_and_query),
+            )
+            .headers(headers)
+            .send()
+            .await?
+            .status())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -65,7 +112,39 @@ impl<'a> NativePayload<'a> {
 }
 
 pub trait ProviderAdapter: Sync {
+    fn kind(&self) -> ProviderKind;
+
     fn dialect(&self) -> ProviderDialect;
+
+    fn capabilities(&self) -> ProviderCapabilities;
+
+    fn health(
+        &self,
+        profile: &ProviderProfile,
+        provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError>;
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError>;
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError>;
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError>;
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation>;
 
@@ -79,6 +158,8 @@ pub trait ProviderAdapter: Sync {
         &self,
         target_operation: GatewayOperation,
         source_operation: GatewayOperation,
+        provider_model_id: &str,
+        stream: bool,
         input: &ProviderRequestInput<'_>,
     ) -> Result<ProviderRequestPlan, GatewayError> {
         if target_operation.dialect() != self.dialect() {
@@ -88,9 +169,7 @@ pub trait ProviderAdapter: Sync {
         let path_and_query = if !translated {
             input.source_path_and_query.to_owned()
         } else {
-            self.default_path(target_operation)
-                .ok_or(GatewayError::InvalidConfiguration)?
-                .to_owned()
+            self.target_path(target_operation, provider_model_id, stream)?
         };
         Ok(ProviderRequestPlan {
             operation: target_operation,
@@ -100,68 +179,15 @@ pub trait ProviderAdapter: Sync {
         })
     }
 
-    fn prepare(
+    fn target_path(
         &self,
-        plan: ProviderRequestPlan,
-        body: Bytes,
-        profile: &ProviderProfile,
-        input: ProviderRequestInput<'_>,
-    ) -> Result<PreparedProviderRequest, GatewayError> {
-        let mut headers = HeaderMap::new();
-        for (name, value) in input.client_headers {
-            if (!plan.translated || name == header::CONTENT_TYPE || name == header::ACCEPT)
-                && self.allows_client_header(name)
-                && name != header::AUTHORIZATION
-                && name.as_str() != "x-api-key"
-            {
-                headers.append(name.clone(), value.clone());
-            }
-        }
-        if plan.translated || !headers.contains_key(header::CONTENT_TYPE) {
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            );
-        }
-        if self.dialect() == ProviderDialect::Anthropic && plan.translated {
-            headers.insert(
-                HeaderName::from_static("anthropic-version"),
-                HeaderValue::from_static("2023-06-01"),
-            );
-        }
-        if self.dialect() == ProviderDialect::OpenAi
-            && !plan.translated
-            && let Some(value) = input.idempotency_key
-        {
-            headers.insert(HeaderName::from_static("idempotency-key"), value);
-        }
-        logging::inject_context(&mut headers);
-        match plan.authentication {
-            AuthenticationMode::ApiKey => {
-                let value = HeaderValue::from_str(
-                    profile
-                        .api_key_secret()
-                        .ok_or(GatewayError::InvalidConfiguration)?,
-                )
-                .map_err(|_| GatewayError::InvalidConfiguration)?;
-                headers.insert(HeaderName::from_static("x-api-key"), value);
-            }
-            AuthenticationMode::Bearer => {
-                let value = HeaderValue::from_str(&format!(
-                    "Bearer {}",
-                    profile
-                        .bearer_secret()
-                        .ok_or(GatewayError::InvalidConfiguration)?
-                ))
-                .map_err(|_| GatewayError::InvalidConfiguration)?;
-                headers.insert(header::AUTHORIZATION, value);
-            }
-        }
-        Ok(PreparedProviderRequest {
-            plan,
-            headers,
-            body,
-        })
+        operation: GatewayOperation,
+        _provider_model_id: &str,
+        _stream: bool,
+    ) -> Result<String, GatewayError> {
+        self.default_path(operation)
+            .map(ToOwned::to_owned)
+            .ok_or(GatewayError::InvalidConfiguration)
     }
 
     fn encode_native(
@@ -187,12 +213,164 @@ pub trait ProviderAdapter: Sync {
     }
 }
 
+fn prepare_request(
+    adapter: &dyn ProviderAdapter,
+    plan: ProviderRequestPlan,
+    body: Bytes,
+    profile: &ProviderProfile,
+    input: ProviderRequestInput<'_>,
+) -> Result<PreparedProviderRequest, GatewayError> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in input.client_headers {
+        if (!plan.translated || name == header::CONTENT_TYPE || name == header::ACCEPT)
+            && adapter.allows_client_header(name)
+            && name != header::AUTHORIZATION
+            && name.as_str() != "x-api-key"
+            && name.as_str() != "x-goog-api-key"
+        {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    if plan.translated || !headers.contains_key(header::CONTENT_TYPE) {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    if adapter.dialect() == ProviderDialect::Anthropic && plan.translated {
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static("2023-06-01"),
+        );
+    }
+    if adapter.dialect() == ProviderDialect::OpenAi
+        && !plan.translated
+        && let Some(value) = input.idempotency_key
+    {
+        headers.insert(HeaderName::from_static("idempotency-key"), value);
+    }
+    logging::inject_context(&mut headers);
+    apply_authentication(&mut headers, plan.authentication, profile)?;
+    Ok(PreparedProviderRequest {
+        plan,
+        headers,
+        body,
+    })
+}
+
+fn apply_authentication(
+    headers: &mut HeaderMap,
+    mode: AuthenticationMode,
+    profile: &ProviderProfile,
+) -> Result<(), GatewayError> {
+    let (name, value) = match mode {
+        AuthenticationMode::ApiKey => (
+            HeaderName::from_static("x-api-key"),
+            profile
+                .api_key_secret()
+                .ok_or(GatewayError::InvalidConfiguration)?,
+        ),
+        AuthenticationMode::GoogleApiKey => (
+            HeaderName::from_static("x-goog-api-key"),
+            profile
+                .api_key_secret()
+                .ok_or(GatewayError::InvalidConfiguration)?,
+        ),
+        AuthenticationMode::Bearer => {
+            let value = HeaderValue::from_str(&format!(
+                "Bearer {}",
+                profile
+                    .bearer_secret()
+                    .ok_or(GatewayError::InvalidConfiguration)?
+            ))
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+            headers.insert(header::AUTHORIZATION, value);
+            return Ok(());
+        }
+        AuthenticationMode::None => return Ok(()),
+    };
+    headers.insert(
+        name,
+        HeaderValue::from_str(value).map_err(|_| GatewayError::InvalidConfiguration)?,
+    );
+    Ok(())
+}
+
+fn standard_cost(usage: &CanonicalUsage, cost_metadata: &Value) -> Result<u64, GatewayError> {
+    cost_for_usage(
+        cost_metadata,
+        &crate::ledger::TokenUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_write_input_tokens: usage.cache_write_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        },
+    )
+    .map_err(|_| GatewayError::InvalidConfiguration)
+}
+
 struct AnthropicProviderAdapter;
 struct OpenAiProviderAdapter;
+struct GeminiProviderAdapter;
 
 impl ProviderAdapter for AnthropicProviderAdapter {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Anthropic
+    }
+
     fn dialect(&self) -> ProviderDialect {
         ProviderDialect::Anthropic
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+            structured_output: true,
+            reasoning: true,
+            usage: UsageAvailability::Required,
+        }
+    }
+
+    fn health(
+        &self,
+        _profile: &ProviderProfile,
+        _provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError> {
+        Ok(ProviderHealthProbe {
+            method: Method::GET,
+            path_and_query: "/v1/models".to_owned(),
+            authentication: self.authentication(),
+        })
+    }
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError> {
+        standard_cost(usage, cost_metadata)
     }
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
@@ -234,8 +412,62 @@ impl ProviderAdapter for AnthropicProviderAdapter {
 }
 
 impl ProviderAdapter for OpenAiProviderAdapter {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::OpenAi
+    }
+
     fn dialect(&self) -> ProviderDialect {
         ProviderDialect::OpenAi
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+            structured_output: true,
+            reasoning: true,
+            usage: UsageAvailability::Required,
+        }
+    }
+
+    fn health(
+        &self,
+        _profile: &ProviderProfile,
+        _provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError> {
+        Ok(ProviderHealthProbe {
+            method: Method::GET,
+            path_and_query: "/v1/models".to_owned(),
+            authentication: self.authentication(),
+        })
+    }
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError> {
+        standard_cost(usage, cost_metadata)
     }
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
@@ -277,6 +509,100 @@ impl ProviderAdapter for OpenAiProviderAdapter {
             return Err(GatewayError::UnsupportedRequest);
         }
         encode_openai_request(request, provider_model_id)
+    }
+}
+
+impl ProviderAdapter for GeminiProviderAdapter {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Gemini
+    }
+
+    fn dialect(&self) -> ProviderDialect {
+        ProviderDialect::Gemini
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+            structured_output: true,
+            reasoning: true,
+            usage: UsageAvailability::Required,
+        }
+    }
+
+    fn health(
+        &self,
+        _profile: &ProviderProfile,
+        provider_model_id: &str,
+    ) -> Result<ProviderHealthProbe, GatewayError> {
+        Ok(ProviderHealthProbe {
+            method: Method::GET,
+            path_and_query: format!("/v1beta/models/{provider_model_id}"),
+            authentication: self.authentication(),
+        })
+    }
+
+    fn send(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn stream(
+        &self,
+        plan: ProviderRequestPlan,
+        body: Bytes,
+        profile: &ProviderProfile,
+        input: ProviderRequestInput<'_>,
+    ) -> Result<PreparedProviderRequest, GatewayError> {
+        prepare_request(self, plan, body, profile, input)
+    }
+
+    fn estimate_cost(
+        &self,
+        usage: &CanonicalUsage,
+        cost_metadata: &Value,
+    ) -> Result<u64, GatewayError> {
+        standard_cost(usage, cost_metadata)
+    }
+
+    fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
+        (operation == CanonicalOperation::Generate)
+            .then_some(GatewayOperation::GeminiGenerateContent)
+    }
+
+    fn default_path(&self, _operation: GatewayOperation) -> Option<&'static str> {
+        None
+    }
+
+    fn target_path(
+        &self,
+        operation: GatewayOperation,
+        provider_model_id: &str,
+        stream: bool,
+    ) -> Result<String, GatewayError> {
+        if operation != GatewayOperation::GeminiGenerateContent || provider_model_id.is_empty() {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+        let method = if stream {
+            "streamGenerateContent?alt=sse"
+        } else {
+            "generateContent"
+        };
+        Ok(format!("/v1beta/models/{provider_model_id}:{method}"))
+    }
+
+    fn authentication(&self) -> AuthenticationMode {
+        AuthenticationMode::GoogleApiKey
+    }
+
+    fn allows_client_header(&self, name: &HeaderName) -> bool {
+        name == header::CONTENT_TYPE || name == header::ACCEPT
     }
 }
 
@@ -523,12 +849,27 @@ fn anthropic_tool_choice(choice: &CanonicalToolChoice) -> Value {
 
 static ANTHROPIC: AnthropicProviderAdapter = AnthropicProviderAdapter;
 static OPENAI: OpenAiProviderAdapter = OpenAiProviderAdapter;
+static GEMINI: GeminiProviderAdapter = GeminiProviderAdapter;
 
 pub fn for_dialect(dialect: ProviderDialect) -> &'static dyn ProviderAdapter {
     match dialect {
         ProviderDialect::Anthropic => &ANTHROPIC,
         ProviderDialect::OpenAi => &OPENAI,
+        ProviderDialect::Gemini => &GEMINI,
     }
+}
+
+pub fn for_kind(kind: ProviderKind) -> Result<&'static dyn ProviderAdapter, GatewayError> {
+    let adapter: &'static dyn ProviderAdapter = match kind {
+        ProviderKind::Anthropic => &ANTHROPIC,
+        ProviderKind::OpenAi => &OPENAI,
+        ProviderKind::Gemini => &GEMINI,
+        ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+    };
+    debug_assert_eq!(adapter.kind(), kind);
+    Ok(adapter)
 }
 
 #[tracing::instrument(

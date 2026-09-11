@@ -135,6 +135,7 @@ fn source_provider(operation: GatewayOperation) -> &'static str {
     match operation {
         GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => "anthropic",
         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions => "openai",
+        GatewayOperation::GeminiGenerateContent => "gemini",
     }
 }
 
@@ -153,6 +154,7 @@ fn take_output_limit(
         GatewayOperation::AnthropicCountTokens => return (Some(0), false),
         GatewayOperation::OpenAiResponses => &["max_output_tokens"],
         GatewayOperation::OpenAiChatCompletions => &["max_completion_tokens", "max_tokens"],
+        GatewayOperation::GeminiGenerateContent => return (None, false),
     };
     let present = keys
         .iter()
@@ -233,6 +235,7 @@ fn take_tool_choice(
             value.is_object()
         }
         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions => true,
+        GatewayOperation::GeminiGenerateContent => false,
     };
     if !valid_shape {
         return None;
@@ -245,6 +248,9 @@ fn take_reasoning(
     operation: GatewayOperation,
     object: &mut Map<String, Value>,
 ) -> Option<CanonicalReasoning> {
+    if operation == GatewayOperation::GeminiGenerateContent {
+        return None;
+    }
     if matches!(operation, GatewayOperation::OpenAiChatCompletions)
         && let Some(effort) = object.get("reasoning_effort").and_then(Value::as_str)
     {
@@ -258,6 +264,7 @@ fn take_reasoning(
     let key = match operation {
         GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => "thinking",
         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions => "reasoning",
+        GatewayOperation::GeminiGenerateContent => return None,
     };
     let source = object.get(key)?.as_object()?;
     let allowed = match operation {
@@ -267,6 +274,7 @@ fn take_reasoning(
         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions => {
             ["effort", "summary"].as_slice()
         }
+        GatewayOperation::GeminiGenerateContent => return None,
     };
     if source
         .keys()
@@ -300,6 +308,7 @@ fn take_reasoning(
                 ..CanonicalReasoning::default()
             }
         }
+        GatewayOperation::GeminiGenerateContent => return None,
     };
     object.remove(key);
     Some(reasoning)
@@ -330,6 +339,7 @@ fn take_structured_output(
         GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => {
             take_nested_structured_output(object, "output_config", "format")
         }
+        GatewayOperation::GeminiGenerateContent => None,
     }
 }
 
@@ -495,6 +505,7 @@ fn take_messages(
         GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => "system",
         GatewayOperation::OpenAiResponses => "instructions",
         GatewayOperation::OpenAiChatCompletions => "",
+        GatewayOperation::GeminiGenerateContent => "",
     };
     if !system_key.is_empty()
         && let Some(system) = object.get(system_key)
@@ -514,6 +525,7 @@ fn take_messages(
         | GatewayOperation::AnthropicCountTokens
         | GatewayOperation::OpenAiChatCompletions => "messages",
         GatewayOperation::OpenAiResponses => "input",
+        GatewayOperation::GeminiGenerateContent => return messages,
     };
     let Some(value) = object.get(content_key) else {
         return messages;
