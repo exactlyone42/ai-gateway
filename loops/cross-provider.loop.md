@@ -1,14 +1,14 @@
 # LOOP: cross-provider
 
 > 主體上限 200 行（不含「已做」）、實時更新。方法見全域 `start-work` skill。
-> 卡 待開（開工時建）｜分支 `feature/cross-provider`｜段落 `W15`
+> 卡 [#44](https://github.com/DnaBoss/agent-pool-gateway/issues/44)｜分支 `feature/cross-provider`｜段落 `W15`
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P2 |
 | 前置 | `canonical-layer` |
-| 開始 | — |
+| 開始 | `2026-09-11T08:50:31+08:00` |
 | 結束 | — |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
@@ -34,9 +34,16 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
 - 規格 §18 列出不一定能一對一轉換的能力：reasoning／extended thinking／prompt cache／
   tool calling／structured outputs／computer use／image／provider hosted tools／MCP 語意。
 - 這段開始前，`docs/provider-protocols.md` 必須已記錄兩邊的實際事件形狀（W05／W06 的產出）。
+- 查重：2026-09-11 開工時只有本 loop；沒有同題 open issue／PR、遠端 branch 或其他
+  worktree owner。建立唯一卡 #44 與 `feature/cross-provider`。
+- Reviewer 使用獨立 `codex exec`；能力矩陣／轉換策略定案前與完整 diff 各審一次，高／中風險
+  必須修正或以規格及 contract 實測裁定。
+- 每項先跑精確 contract test；PR 前跑 `./scripts/check.sh all`、loops 與 `git diff --check`。
+  每輪記錄已做、證據、不可行、trade-off、下一步；完成後 AI 可自行合入 `dev`。
+- 外部依賴先自行打通；只做安全性、W15 必需依賴與 W15 目標，不順手擴增第三方 Provider。
 
 ## 已做
-- （待填）
+- 2026-09-11T08:50+08:00：完成 cashloop 查重，建立卡 #44、Project #2 item、唯一 feature 分支。
 
 ## 已確定不可行
 - （待填）
@@ -52,5 +59,6 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
 | --- | --- | --- | --- |
 
 ## 下一步
-1. 先寫「能力對照矩陣」：哪些能對映、哪些不能、不能的處置是哪一種。
-2. 照 ①→⑤ 順序做，每項獨立 contract test，做完一項才動下一項。
+1. 盤點 canonical request/stream 與兩邊 native wire，寫能力對照矩陣及拒絕策略。
+2. 把查證事實與 ①→⑤ 實作順序送獨立 reviewer。
+3. 先完成雙向文字 request/response contract，再進串流；每項獨立驗收。
