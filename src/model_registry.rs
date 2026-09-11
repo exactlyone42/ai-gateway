@@ -394,14 +394,12 @@ impl ProviderProfiles {
         credential_ref: &str,
         provider_key: &str,
         base_url: &str,
-        operation: GatewayOperation,
     ) -> Result<ProviderProfile, RegistryError> {
         self.by_ref
             .get(credential_ref)
             .filter(|profile| profile.allowed_tenants.contains(&tenant_id))
             .filter(|profile| profile.provider_key == provider_key)
             .filter(|profile| profile.base_url == canonical_base_url(base_url.to_owned()))
-            .filter(|profile| profile.operations.contains(&operation))
             .cloned()
             .ok_or(RegistryError::UntrustedProvider)
     }
@@ -415,12 +413,14 @@ impl ProviderProfiles {
         operations: &[String],
     ) -> bool {
         !operations.is_empty()
-            && operations.iter().all(|operation| {
-                GatewayOperation::parse(operation).is_some_and(|operation| {
-                    self.resolve(tenant_id, credential_ref, provider_key, base_url, operation)
-                        .is_ok()
+            && self
+                .resolve(tenant_id, credential_ref, provider_key, base_url)
+                .is_ok_and(|profile| {
+                    operations.iter().all(|operation| {
+                        GatewayOperation::parse(operation)
+                            .is_some_and(|operation| profile.operations.contains(&operation))
+                    })
                 })
-            })
     }
 }
 
@@ -459,6 +459,8 @@ pub struct ModelSelection {
     pub max_output_tokens: Option<i64>,
     pub cost_metadata: Value,
     pub profile: ProviderProfile,
+    pub(crate) model_supported_operations: Vec<GatewayOperation>,
+    pub(crate) provider_supported_operations: Vec<GatewayOperation>,
 }
 
 #[derive(FromRow)]
@@ -482,6 +484,8 @@ struct SelectionRow {
     supports_structured_output: bool,
     max_output_tokens: Option<i64>,
     cost_metadata: Value,
+    model_supported_operations: Vec<String>,
+    provider_supported_operations: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -561,9 +565,8 @@ impl ModelRegistry {
                             &model.credential_ref,
                             &model.provider_key,
                             &model.base_url,
-                            operation,
                         )
-                        .is_ok()
+                        .is_ok_and(|profile| profile.operations.contains(&operation))
                 })
             })
         });
@@ -571,6 +574,7 @@ impl ModelRegistry {
     }
 
     #[tracing::instrument(name = "router.select", skip_all)]
+    #[cfg(test)]
     pub async fn select(
         &self,
         tenant_id: Uuid,
@@ -593,7 +597,10 @@ impl ModelRegistry {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(RegistryError::ModelUnavailable)?;
-        let selection = self.selection_from_row(tenant_id, operation, selector, row, required)?;
+        let selection = self.selection_from_row(tenant_id, selector, row, required)?;
+        if !selection.supports_target_operation(operation) {
+            return Err(RegistryError::ModelUnavailable);
+        }
         tracing::info!(
             event.name = "router.selected",
             gen_ai.system = %selection.provider_key,
@@ -611,42 +618,40 @@ impl ModelRegistry {
         selector: ModelSelector,
         required: CapabilityRequirements,
     ) -> Result<Vec<ModelSelection>, RegistryError> {
-        if development_bootstrap || matches!(selector, ModelSelector::Model(_)) {
+        if development_bootstrap {
             return self
-                .select(
-                    tenant_id,
-                    development_bootstrap,
-                    operation,
-                    selector,
-                    required,
-                )
-                .await
+                .development_selection(operation, selector, required)
                 .map(|selection| vec![selection]);
         }
         if tenant_id.is_nil() {
             return Err(RegistryError::ModelUnavailable);
         }
-        let rows = sqlx::query_as::<_, SelectionRow>(QUALITY_CANDIDATES_SQL)
-            .bind(tenant_id)
-            .bind(operation.as_str())
-            .bind(selector.value())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = if matches!(selector, ModelSelector::Model(_)) {
+            sqlx::query_as::<_, SelectionRow>(SELECTION_SQL)
+                .bind(tenant_id)
+                .bind(operation.as_str())
+                .bind(selector.kind())
+                .bind(selector.value())
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            sqlx::query_as::<_, SelectionRow>(QUALITY_CANDIDATES_SQL)
+                .bind(tenant_id)
+                .bind(operation.as_str())
+                .bind(selector.value())
+                .fetch_all(&self.pool)
+                .await?
+        };
         let mut selections = Vec::new();
         let mut capability_error = None;
         for row in rows {
-            let quality = row
-                .quality_tier
-                .as_deref()
-                .and_then(QualityTier::parse)
-                .ok_or(RegistryError::ModelUnavailable)?;
-            match self.selection_from_row(
-                tenant_id,
-                operation,
-                ModelSelector::Quality(quality),
-                row,
-                required,
-            ) {
+            let row_selector = match row.quality_tier.as_deref() {
+                Some(quality) => ModelSelector::Quality(
+                    QualityTier::parse(quality).ok_or(RegistryError::ModelUnavailable)?,
+                ),
+                None => selector.clone(),
+            };
+            match self.selection_from_row(tenant_id, row_selector, row, required) {
                 Ok(selection) => selections.push(selection),
                 Err(error @ RegistryError::CapabilityMismatch(_)) => capability_error = Some(error),
                 Err(error) => return Err(error),
@@ -661,7 +666,6 @@ impl ModelRegistry {
     fn selection_from_row(
         &self,
         tenant_id: Uuid,
-        operation: GatewayOperation,
         selector: ModelSelector,
         row: SelectionRow,
         required: CapabilityRequirements,
@@ -672,8 +676,9 @@ impl ModelRegistry {
             &row.credential_ref,
             &row.provider_key,
             &row.base_url,
-            operation,
         )?;
+        let model_supported_operations = parse_operations(&row.model_supported_operations)?;
+        let provider_supported_operations = parse_operations(&row.provider_supported_operations)?;
         Ok(ModelSelection {
             selector,
             alias_id: row.alias_id,
@@ -688,6 +693,8 @@ impl ModelRegistry {
             max_output_tokens: row.max_output_tokens,
             cost_metadata: row.cost_metadata,
             profile,
+            model_supported_operations,
+            provider_supported_operations,
         })
     }
 
@@ -708,13 +715,14 @@ impl ModelRegistry {
         {
             return Err(RegistryError::ModelUnavailable);
         }
+        let target_operation = operation;
         let profile = self
             .profiles
             .by_ref
             .values()
             .find(|profile| {
                 profile.allowed_tenants.contains(&Uuid::nil())
-                    && profile.operations.contains(&operation)
+                    && profile.operations.contains(&target_operation)
             })
             .cloned()
             .ok_or(RegistryError::UntrustedProvider)?;
@@ -733,11 +741,18 @@ impl ModelRegistry {
             max_output_tokens: None,
             cost_metadata: serde_json::json!({}),
             profile,
+            model_supported_operations: vec![target_operation],
+            provider_supported_operations: vec![target_operation],
         })
     }
 }
 
 impl ModelSelection {
+    pub fn supports_target_operation(&self, operation: GatewayOperation) -> bool {
+        self.model_supported_operations.contains(&operation)
+            && self.provider_supported_operations.contains(&operation)
+            && self.profile.operations.contains(&operation)
+    }
     pub fn record_selected(&self) {
         tracing::info!(
             event.name = "router.selected",
@@ -785,6 +800,13 @@ fn ensure_capabilities(
         .unwrap_or(Ok(()))
 }
 
+fn parse_operations(values: &[String]) -> Result<Vec<GatewayOperation>, RegistryError> {
+    values
+        .iter()
+        .map(|value| GatewayOperation::parse(value).ok_or(RegistryError::InvalidProviderProfile))
+        .collect()
+}
+
 fn canonical_base_url(value: String) -> String {
     value.trim_end_matches('/').to_owned()
 }
@@ -815,29 +837,30 @@ const SELECTION_SQL: &str = r#"
                m.public_model_id, m.provider_model_id, m.provider_id,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
                m.supports_images, m.supports_structured_output,
-               m.max_output_tokens, m.cost_metadata
+               m.max_output_tokens, m.cost_metadata,
+               m.supported_operations AS model_supported_operations
         FROM models m
         WHERE $3 = 'model' AND m.tenant_id = $1
           AND m.public_model_id = $4 AND m.lifecycle_state = 'active'
-          AND $2 = ANY(m.supported_operations)
         UNION ALL
         SELECT a.id, a.version, a.quality_tier, m.id, m.version,
                m.public_model_id, m.provider_model_id, m.provider_id,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
                m.supports_images, m.supports_structured_output,
-               m.max_output_tokens, m.cost_metadata
+               m.max_output_tokens, m.cost_metadata,
+               m.supported_operations AS model_supported_operations
         FROM model_aliases a
         JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
         WHERE $3 = 'quality' AND a.tenant_id = $1 AND a.operation = $2
           AND a.quality_tier = $4 AND a.lifecycle_state = 'active'
           AND m.lifecycle_state = 'active'
-          AND $2 = ANY(m.supported_operations)
     )
     SELECT c.*, p.version AS provider_version, p.provider_key,
-           p.base_url, p.credential_ref
+           p.base_url, p.credential_ref,
+           p.supported_operations AS provider_supported_operations
     FROM candidate c
     JOIN providers p ON (p.tenant_id, p.id) = ($1, c.provider_id)
-    WHERE p.lifecycle_state = 'active' AND $2 = ANY(p.supported_operations)
+    WHERE p.lifecycle_state = 'active'
     ORDER BY c.public_model_id, c.model_id
     LIMIT 1
 "#;
@@ -850,14 +873,15 @@ const QUALITY_CANDIDATES_SQL: &str = r#"
            m.supports_images, m.supports_structured_output,
            m.max_output_tokens, m.cost_metadata,
            p.version AS provider_version, p.provider_key,
-           p.base_url, p.credential_ref
+           p.base_url, p.credential_ref,
+           m.supported_operations AS model_supported_operations,
+           p.supported_operations AS provider_supported_operations
     FROM model_aliases a
     JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
     JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
     WHERE a.tenant_id = $1 AND a.operation = $2
       AND a.lifecycle_state = 'active' AND m.lifecycle_state = 'active'
       AND p.lifecycle_state = 'active'
-      AND $2 = ANY(m.supported_operations) AND $2 = ANY(p.supported_operations)
       AND CASE a.quality_tier
             WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
             WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3

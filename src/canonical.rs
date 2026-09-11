@@ -136,6 +136,7 @@ pub struct CanonicalToolDefinition {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: Value,
+    pub strict: Option<bool>,
     pub provider_options: ProviderOptions,
 }
 
@@ -145,6 +146,7 @@ impl fmt::Debug for CanonicalToolDefinition {
             .debug_struct("CanonicalToolDefinition")
             .field("name", &"[redacted]")
             .field("has_description", &self.description.is_some())
+            .field("strict", &self.strict)
             .field("provider_option_names", &self.provider_options.keys())
             .finish()
     }
@@ -523,6 +525,10 @@ impl CanonicalRequest {
 
     pub(crate) fn native(&self) -> &NativeWire {
         &self.native
+    }
+
+    pub fn source_operation(&self) -> GatewayOperation {
+        self.native.operation
     }
 
     pub(crate) fn source_document(&self) -> &Value {

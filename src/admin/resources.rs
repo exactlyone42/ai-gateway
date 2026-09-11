@@ -1276,8 +1276,20 @@ impl AdminService {
                   AND a.tenant_id = $1 AND a.id = $2 AND a.version = $3
                   AND a.lifecycle_state IN ('draft', 'disabled')
                   AND m.lifecycle_state = 'active' AND p.lifecycle_state = 'active'
-                  AND a.operation = ANY(p.supported_operations)
-                  AND a.operation = ANY(m.supported_operations)
+                  AND CASE
+                        WHEN p.provider_type = 'openai' AND a.operation = 'anthropic_messages'
+                          THEN 'openai_responses'
+                        WHEN p.provider_type = 'anthropic' AND a.operation = 'openai_responses'
+                          THEN 'anthropic_messages'
+                        ELSE a.operation
+                      END = ANY(p.supported_operations)
+                  AND CASE
+                        WHEN p.provider_type = 'openai' AND a.operation = 'anthropic_messages'
+                          THEN 'openai_responses'
+                        WHEN p.provider_type = 'anthropic' AND a.operation = 'openai_responses'
+                          THEN 'anthropic_messages'
+                        ELSE a.operation
+                      END = ANY(m.supported_operations)
                 RETURNING to_jsonb(a)
                 "#
             }
@@ -1820,7 +1832,10 @@ mod tests {
     use crate::{
         admin::{AdminContext, AdminError, AdminRole, AdminService, AdminServiceConfig},
         identity::{CredentialService, IdentityError},
-        model_registry::{GatewayOperation, ProviderDialect, ProviderProfile, ProviderProfiles},
+        model_registry::{
+            CapabilityRequirements, GatewayOperation, ModelRegistry, ModelSelector,
+            ProviderDialect, ProviderProfile, ProviderProfiles,
+        },
     };
 
     fn service(pool: PgPool) -> AdminService {
@@ -1863,6 +1878,146 @@ mod tests {
 
     fn id(output: &crate::admin::ResourceMutationOutput) -> Uuid {
         Uuid::parse_str(output.resource["id"].as_str().unwrap()).unwrap()
+    }
+
+    #[sqlx::test]
+    async fn cross_provider_quality_alias_activates_through_the_admin_lifecycle(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'admin', 'admin')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let profiles = provider_profiles(tenant_id);
+        let service = service(pool.clone()).with_provider_profiles(profiles.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let provider = service
+            .create_resource(
+                &context,
+                ResourceKind::Providers,
+                json!({
+                    "provider_key": "provider-one",
+                    "display_name": "OpenAI target",
+                    "provider_type": "openai",
+                    "base_url": "https://provider.example",
+                    "credential_ref": "env://PROVIDER_ONE_KEY",
+                    "supported_operations": ["openai_responses"]
+                }),
+                source,
+                source,
+                "create-cross-provider",
+            )
+            .await
+            .unwrap();
+        let provider_id = id(&provider);
+        let model = service
+            .create_resource(
+                &context,
+                ResourceKind::Models,
+                json!({
+                    "provider_id": provider_id,
+                    "public_model_id": "cross-model",
+                    "provider_model_id": "provider-model",
+                    "display_name": "Cross model",
+                    "supported_operations": ["openai_responses"]
+                }),
+                source,
+                source,
+                "create-cross-model",
+            )
+            .await
+            .unwrap();
+        let model_id = id(&model);
+        let alias = service
+            .create_resource(
+                &context,
+                ResourceKind::ModelAliases,
+                json!({
+                    "operation": "anthropic_messages",
+                    "quality_tier": "premium",
+                    "model_id": model_id
+                }),
+                source,
+                source,
+                "create-cross-alias",
+            )
+            .await
+            .unwrap();
+        let alias_id = id(&alias);
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Providers, provider_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-cross-provider",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Models, model_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-cross-model",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::ModelAliases, alias_id),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "activate-cross-alias",
+            )
+            .await
+            .unwrap();
+
+        let active: bool = sqlx::query_scalar(
+            "SELECT lifecycle_state = 'active' FROM model_aliases WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(alias_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(active);
+        let candidates = ModelRegistry::new(pool, profiles, Vec::new())
+            .candidates(
+                tenant_id,
+                false,
+                GatewayOperation::AnthropicMessages,
+                ModelSelector::parse("quality:premium").unwrap(),
+                CapabilityRequirements::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].supports_target_operation(GatewayOperation::OpenAiResponses));
     }
 
     #[test]

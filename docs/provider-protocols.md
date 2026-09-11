@@ -117,3 +117,59 @@ the model metadata fallback boundary.
 Sources: OpenAI Responses create and streaming event references, and the Codex
 configuration reference, verified 2026-09-11 and linked in
 `docs/client-compatibility.md` and `docs/feasibility.md`.
+
+## Cross-provider translation
+
+W15 deliberately exposes a narrow intersection instead of claiming general
+OpenAI/Anthropic compatibility. A neutral canonical operation finds candidate
+models, but it does not authorize a target call. Before quota reservation, the
+gateway builds a validated translation plan and checks that the model row,
+provider row, and trusted runtime profile all authorize the exact target
+operation.
+
+| Source | Target | Text | Stream | Client tools | JSON Schema | Reasoning |
+| --- | --- | --- | --- | --- | --- | --- |
+| Anthropic Messages | OpenAI Responses | translate | reject before quota | translate | verified subset | reject 400 |
+| OpenAI Responses | Anthropic Messages | translate | strict state machine | translate | verified subset | reject 400 |
+| OpenAI Chat Completions | Anthropic | reject | reject | reject | reject | reject |
+| Anthropic Count Tokens | OpenAI | reject | reject | reject | reject | reject |
+
+The translated request scanner covers root options, messages, content blocks,
+tool definitions, tool calls/results, structured-output schema, and reasoning.
+It rejects images, opaque blocks, unknown roles, unmatched or duplicate tool
+call IDs, malformed tool arguments, `json_object`, unsupported schema keywords,
+provider extensions, input-level system/developer messages whose position would
+change, background/conversation state, and every explicit reasoning or thinking
+setting/history block. Generated Responses function-call items can be supplied
+to the next request without losing their public item ID or semantic call ID. No
+rejected candidate enters the quota engine or reaches a provider.
+
+Translated requests forward only neutral `content-type` and `accept` headers.
+Target authentication and `anthropic-version` come from the trusted adapter;
+client vendor headers never cross providers. Translated responses rebuild
+headers and protocol bodies, use gateway-namespaced public response IDs, and
+keep target response IDs only in the ledger. Provider-reported target usage is
+the accounting authority even when response transcoding later fails. A target
+token limit returns the partial translated response with the source protocol's
+incomplete marker and records the request/attempt as failed incomplete.
+
+Native same-dialect traffic retains the byte-preserving W05/W06 behavior. Its
+observer tolerates unknown events and forwards raw bytes. A translated stream
+instead fails closed on unknown semantic events and validates start/delta/stop
+order, unique indexes and terminal events, bounded item/tool-argument counts,
+and total provider/client response bytes.
+
+Streaming translation is intentionally directional. OpenAI Responses reports
+input usage only in its terminal event, but Anthropic requires input usage in
+`message_start`; therefore Anthropic-source to OpenAI-target streaming is
+rejected before quota. OpenAI-source to Anthropic-target streaming is accepted
+because Anthropic supplies input usage at `message_start`. Non-empty citations,
+annotations, and initial streamed tool input are rejected when they cannot be
+represented without loss. Responses envelopes echo the accepted source request
+fields, including `instructions`, from one immutable request snapshot.
+
+The feature is a gateway API capability, not a claim that Claude Code supports
+non-Claude routing. Anthropic's Claude Code gateway policy explicitly excludes
+that use. Protocol shapes were checked against the Anthropic streaming,
+structured output, stop-reason, and strict tool-use documentation and the
+OpenAI Responses streaming reference on 2026-09-11.

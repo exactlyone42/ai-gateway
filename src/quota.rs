@@ -882,6 +882,8 @@ mod tests {
                 vec![tenant_id],
                 Arc::<str>::from("secret"),
             ),
+            model_supported_operations: vec![GatewayOperation::OpenAiResponses],
+            provider_supported_operations: vec![GatewayOperation::OpenAiResponses],
         }
     }
 
