@@ -15,6 +15,7 @@ use crate::{
     },
     policy::PolicyEngine,
     quota::QuotaEngine,
+    routing::RoutingEngine,
     scheduler::Scheduler,
 };
 use thiserror::Error;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub(crate) models: ModelRegistry,
     pub(crate) policies: PolicyEngine,
     pub(crate) quotas: QuotaEngine,
+    pub(crate) routing: RoutingEngine,
     pub(crate) scheduler: Scheduler,
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
@@ -132,6 +134,12 @@ impl AppState {
             })
             .collect::<Result<Vec<_>, RegistryError>>()?;
         provider_profiles.extend(extra_profiles);
+        let routing = RoutingEngine::new(
+            config.routing,
+            provider_profiles
+                .iter()
+                .map(|profile| profile.provider_key.clone()),
+        );
         let profiles = ProviderProfiles::new(provider_profiles)?;
         let policies = PolicyEngine::with_cache(
             pool.clone(),
@@ -172,6 +180,7 @@ impl AppState {
             models,
             policies,
             quotas,
+            routing,
             scheduler,
             credentials,
             admin,

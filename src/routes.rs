@@ -102,7 +102,7 @@ pub(crate) fn body_bytes(body: BodyBytes) -> Result<Bytes, crate::error::Gateway
 mod tests {
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -126,11 +126,12 @@ mod tests {
     use chrono::Utc;
 
     use crate::{
-        config::Config,
+        config::{Config, ExtraProviderProfile},
         db,
         identity::PrincipalContext,
         ledger::{Ledger, RequestCompletion, RequestStart},
         logging,
+        model_registry::{GatewayOperation, ProviderKind},
         services::openai::{self, Operation as OpenAiOperation, RequestContext},
         state::AppState,
     };
@@ -177,6 +178,7 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            routing: Default::default(),
             scheduler: Default::default(),
         }
     }
@@ -555,7 +557,7 @@ mod tests {
                    gr.selected_provider, pa.provider_request_id,
                    pa.provider_response_id, ur.input_tokens, ur.output_tokens,
                    ur.cached_input_tokens, ur.cache_write_input_tokens,
-                   ur.reasoning_tokens
+                   ur.reasoning_tokens, gr.policy_decision
             FROM gateway_requests gr
             JOIN provider_attempts pa
               ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
@@ -585,8 +587,176 @@ mod tests {
         assert_eq!(row.get::<i64, _>("cached_input_tokens"), 4);
         assert_eq!(row.get::<i64, _>("cache_write_input_tokens"), 2);
         assert_eq!(row.get::<i64, _>("reasoning_tokens"), 1);
+        let policy: serde_json::Value = row.get("policy_decision");
+        assert_eq!(policy["routing"]["attempt_kind"], "initial");
+        assert_eq!(policy["routing"]["reason"], "registry");
+        assert_eq!(policy["routing"]["same_request_retry"], false);
         upstream_task.abort();
         std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn transient_failure_routes_the_next_request_without_retrying_the_first(pool: PgPool) {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let primary_counter = Arc::clone(&primary_calls);
+        let primary = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let counter = Arc::clone(&primary_counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": {"type": "overloaded"}})),
+                    )
+                }
+            }),
+        );
+        let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary_address = primary_listener.local_addr().unwrap();
+        let primary_task =
+            tokio::spawn(async move { axum::serve(primary_listener, primary).await.unwrap() });
+
+        let secondary_calls = Arc::new(AtomicUsize::new(0));
+        let secondary_counter = Arc::clone(&secondary_calls);
+        let secondary = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let counter = Arc::clone(&secondary_counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "id": "resp_secondary",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens_details": {"reasoning_tokens": 0}
+                        }
+                    }))
+                }
+            }),
+        );
+        let secondary_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secondary_address = secondary_listener.local_addr().unwrap();
+        let secondary_task =
+            tokio::spawn(async move { axum::serve(secondary_listener, secondary).await.unwrap() });
+
+        let tenant_id = Uuid::new_v4();
+        let primary_provider_id = Uuid::new_v4();
+        let secondary_provider_id = Uuid::new_v4();
+        let primary_model_id = Uuid::new_v4();
+        let secondary_model_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_providers AS (
+            INSERT INTO providers (
+                id, tenant_id, provider_key, display_name, provider_type, base_url,
+                credential_ref, supported_operations, lifecycle_state
+            ) VALUES
+                ($1, $3, 'primary', 'Primary', 'openai', $7,
+                 'env://OPENAI_API_KEY', ARRAY['openai_responses'], 'active'),
+                ($2, $3, 'secondary', 'Secondary', 'xai', $8,
+                 'env://XAI_TEST', ARRAY['openai_responses'], 'active')
+            RETURNING id
+            ), inserted_models AS (
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, max_output_tokens, lifecycle_state
+            ) VALUES
+                ($4, $3, $1, 'primary-public', 'primary-target', 'Primary',
+                 ARRAY['openai_responses'], 1024, 'active'),
+                ($5, $3, $2, 'secondary-public', 'secondary-target', 'Secondary',
+                 ARRAY['openai_responses'], 1024, 'active')
+            RETURNING id
+            )
+            INSERT INTO model_aliases (
+                id, tenant_id, operation, quality_tier, model_id, lifecycle_state
+            ) VALUES
+                (gen_random_uuid(), $3, 'openai_responses', 'advanced', $4, 'active'),
+                ($6, $3, 'openai_responses', 'standard', $5, 'active')
+            "#,
+        )
+        .bind(primary_provider_id)
+        .bind(secondary_provider_id)
+        .bind(tenant_id)
+        .bind(primary_model_id)
+        .bind(secondary_model_id)
+        .bind(Uuid::new_v4())
+        .bind(format!("http://{primary_address}"))
+        .bind(format!("http://{secondary_address}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.openai_provider = "primary".to_owned();
+        config.openai_base_url = format!("http://{primary_address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        config.extra_provider_profiles = vec![ExtraProviderProfile {
+            kind: ProviderKind::Xai,
+            credential_ref: "env://XAI_TEST".to_owned(),
+            provider_key: "secondary".to_owned(),
+            base_url: format!("http://{secondary_address}"),
+            operations: vec![GatewayOperation::OpenAiResponses],
+            secret: Some("secondary-secret".to_owned()),
+        }];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let request = |request_id: &str| {
+            RequestContext {
+            principal: principal(tenant_id),
+            received_at: Utc::now(),
+            path_and_query: "/v1/responses".to_owned(),
+            headers: HeaderMap::from_iter([(
+                "x-request-id".parse().unwrap(),
+                request_id.parse().unwrap(),
+            )]),
+            body: Bytes::from_static(
+                br#"{"model":"quality:advanced","input":"x","stream":false,"max_output_tokens":16}"#,
+            ),
+            operation: OpenAiOperation::Responses,
+        }
+        };
+        let first = openai::execute(&state, request("route-first"))
+            .await
+            .unwrap();
+        assert_eq!(first.status, StatusCode::SERVICE_UNAVAILABLE);
+        let second = openai::execute(&state, request("route-second"))
+            .await
+            .unwrap();
+        assert_eq!(second.status, StatusCode::OK);
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'providers', jsonb_agg(gr.selected_provider ORDER BY gr.request_id),
+                'reasons', jsonb_agg(gr.policy_decision->'routing'->>'reason' ORDER BY gr.request_id),
+                'max_attempts', max(attempts.attempt_count)
+            )
+            FROM gateway_requests gr
+            JOIN (
+                SELECT tenant_id, gateway_request_id, count(*) AS attempt_count
+                FROM provider_attempts GROUP BY tenant_id, gateway_request_id
+            ) attempts ON (attempts.tenant_id, attempts.gateway_request_id) = (gr.tenant_id, gr.id)
+            WHERE gr.tenant_id = $1 AND gr.request_id IN ('route-first', 'route-second')
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["providers"], json!(["primary", "secondary"]));
+        assert_eq!(evidence["reasons"], json!(["registry", "health"]));
+        assert_eq!(evidence["max_attempts"], 1);
+
+        primary_task.abort();
+        secondary_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
     #[sqlx::test]
@@ -2128,13 +2298,19 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_openai_sse_fails_the_body_and_is_logged() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_by_server = Arc::clone(&calls);
         let upstream = Router::new().route(
             "/v1/responses",
-            post(|| async {
-                (
-                    [("content-type", "text/event-stream")],
-                    "{\"type\":\"response.completed\"}\n\n",
-                )
+            post(move || {
+                let calls = Arc::clone(&calls_by_server);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (
+                        [("content-type", "text/event-stream")],
+                        "{\"type\":\"response.completed\"}\n\n",
+                    )
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2164,6 +2340,7 @@ mod tests {
             .await
             .unwrap();
         assert!(to_bytes(response.into_body(), 4096).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(logs.lines().iter().any(|line| {
             line["event"]["name"] == "http.access"
                 && line["error"]["type"] == "stream_body_error"

@@ -161,6 +161,8 @@ pub(super) async fn proxy(
         required,
     )
     .await?;
+    let routing_reason = prepared_quota.routing_reason;
+    let routing_claim = prepared_quota.routing_claim;
     let translation = prepared_quota.translation;
     let crate::quota::QuotaAdmission {
         selection,
@@ -202,7 +204,7 @@ pub(super) async fn proxy(
                     .as_ref()
                     .map(request_quota::estimated_tokens),
                 selection: selection_snapshot.clone(),
-                policy: Some(policy.ledger_snapshot()),
+                policy: Some(policy.ledger_snapshot().with_routing(routing_reason)),
                 principal: principal.clone(),
                 created_at: received_at,
             },
@@ -230,6 +232,11 @@ pub(super) async fn proxy(
     )
     .await?;
     let provider_request_at = Utc::now();
+    reservation.attach_routing_lease(state.routing.begin(
+        &provider,
+        provider_request_at,
+        routing_claim,
+    )?);
     let upstream = match provider::send(
         &state.client,
         &profile.base_url,

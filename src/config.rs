@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
 use crate::model_registry::{GatewayOperation, ProviderKind};
+use crate::routing::RoutingConfig;
 use crate::scheduler::SchedulerConfig;
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ pub struct Config {
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
+    pub routing: RoutingConfig,
     pub scheduler: SchedulerConfig,
 }
 
@@ -380,6 +382,7 @@ impl Config {
             ));
         }
         let scheduler = scheduler_config()?;
+        let routing = routing_config()?;
 
         Ok(Self {
             listen_address,
@@ -416,6 +419,7 @@ impl Config {
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
+            routing,
             scheduler,
         })
     }
@@ -423,6 +427,26 @@ impl Config {
     pub fn data_database_max_connections(&self) -> u32 {
         self.database_max_connections - self.admin_database_max_connections
     }
+}
+
+fn routing_config() -> Result<RoutingConfig, ConfigError> {
+    let defaults = RoutingConfig::default();
+    Ok(RoutingConfig {
+        health_aware: scheduler_bool("ROUTING_HEALTH_AWARE", defaults.health_aware)?,
+        load_aware: scheduler_bool("ROUTING_LOAD_AWARE", defaults.load_aware)?,
+        cost_aware: scheduler_bool("ROUTING_COST_AWARE", defaults.cost_aware)?,
+        quota_aware: scheduler_bool("ROUTING_QUOTA_AWARE", defaults.quota_aware)?,
+        auto_quality: scheduler_bool("ROUTING_AUTO_QUALITY", defaults.auto_quality)?,
+        failure_cooldown: chrono::Duration::milliseconds(
+            i64::try_from(scheduler_u64(
+                "ROUTING_FAILURE_COOLDOWN_MS",
+                defaults.failure_cooldown.num_milliseconds() as u64,
+            )?)
+            .map_err(|_| {
+                ConfigError::InvalidScheduler("routing cooldown is too large".to_owned())
+            })?,
+        ),
+    })
 }
 
 fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, ConfigError> {

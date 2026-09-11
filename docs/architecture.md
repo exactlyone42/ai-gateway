@@ -170,7 +170,7 @@ Global 預設 → User → Device → Client → Agent → Credential → Reques
 | OTel 後端掛掉 | 推論不受影響，遙測降級 |
 | 儀表板／分析查詢掛掉 | 推論不受影響 |
 | PostgreSQL 掛掉 | **已存在的串流不得被 kill**；新請求靠有上限的憑證／政策快取，快取未命中則 fail closed；用量寫進有上限的持久化 spool，恢復後補寫 |
-| Provider 掛掉 | 依政策 retry／fallback，遙測分開記 |
+| Provider 掛掉 | 本次不重送；被動健康訊號讓下一請求預先換路，理由持久化 |
 | 佇列滿 | 明確拒絕，不無上限堆積 |
 | 收到 SIGTERM | 停收新請求、既有串流繼續、`drain_timeout` 到才強制關閉並留下記錄（W19） |
 

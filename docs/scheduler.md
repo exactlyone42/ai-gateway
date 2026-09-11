@@ -17,8 +17,9 @@ the queue-left fsync. Cancellation, process recovery and pre-provider rejection
 reconcile token and cost reservations to zero; request-rate quota remains consumed.
 
 The scheduler produces `accept`, `queue` and `reject`. W12 model selection owns
-quota-driven `downgrade`; W17 routing owns `route elsewhere`. The request
-admission flow composes these outcomes without moving routing into the scheduler.
+quota-driven `downgrade`; the passive Routing Engine orders where the next
+request should go before admission. The request flow composes these outcomes
+without moving routing into the scheduler or making a second upstream call.
 
 ## Fairness and bounds
 
