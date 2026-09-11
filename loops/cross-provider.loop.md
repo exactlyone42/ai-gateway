@@ -5,7 +5,7 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 已完成（待合入 `dev`） |
+| 狀態 | 已交付（PR #45，`8d15b9c`） |
 | 優先度 | P2 |
 | 前置 | `canonical-layer` |
 | 開始 | `2026-09-11T08:50:31+08:00` |
@@ -101,5 +101,4 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
 | 推理 | 穩定 400 | 猜測映射 effort/budget 或丟 thinking | hidden state 與簽章不可無損轉換 |
 
 ## 下一步
-1. 提交並推送 PR #45，確認 CI 後合入 `dev`。
-2. 啟動 W16 `providers-expansion`，先查重再建立唯一 owner。
+1. W16 `providers-expansion` 已由卡 #46 與唯一 feature branch 接手。
