@@ -188,6 +188,22 @@ mod tests {
         Arc::new(AppState::new(config, pool).unwrap())
     }
 
+    fn principal(tenant_id: Uuid) -> PrincipalContext {
+        PrincipalContext {
+            tenant_id,
+            credential_id: Uuid::nil(),
+            credential_name: "route-test".to_owned(),
+            user_id: None,
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        }
+    }
+
     #[tokio::test]
     async fn admin_spa_has_strict_csp_and_does_not_shadow_the_api() {
         let app = router(test_state());
@@ -744,6 +760,620 @@ mod tests {
         assert_eq!(evidence["reason"], "hard_limit");
         assert_eq!(evidence["limit_kind"], "requests_per_minute");
         assert_eq!(evidence["attempts"], 0);
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn rejected_cross_provider_reasoning_never_calls_upstream_or_reserves_quota(
+        pool: PgPool,
+    ) {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_server = Arc::clone(&called);
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let called = Arc::clone(&called_by_server);
+                async move {
+                    called.store(true, Ordering::Release);
+                    Json(json!({
+                        "id": "must-not-exist",
+                        "content": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 1}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'anthropic-test', 'Cross provider', 'anthropic',
+                    $3, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            ), inserted_model AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, supports_reasoning,
+                    max_output_tokens, lifecycle_state
+                ) SELECT $4, $2, id, 'cross-model', 'provider-cross-model',
+                         'Cross model', ARRAY['anthropic_messages'], true, 4096, 'active'
+                  FROM inserted_provider RETURNING id
+            )
+            INSERT INTO quotas (
+                id, tenant_id, quota_key, revision, configuration, lifecycle_state
+            ) SELECT $5, $2, 'cross-test', 1,
+                     '{"mode":"hard","limits":{"requests_per_minute":100}}', 'active'
+              FROM inserted_model
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: principal(tenant_id),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(
+                    br#"{"model":"cross-model","input":"hello","max_output_tokens":32,"reasoning":{"effort":"high"}}"#,
+                ),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::UnsupportedRequest)
+        ));
+        assert!(
+            !called.load(Ordering::Acquire),
+            "rejected request called upstream"
+        );
+        let quota_counts: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'windows', (SELECT count(*) FROM quota_windows WHERE tenant_id = $1),
+                'reservations', (SELECT count(*) FROM quota_reservations WHERE tenant_id = $1)
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(quota_counts, json!({"windows": 0, "reservations": 0}));
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn buffered_text_crosses_both_protocols_with_gateway_ids_and_trusted_headers(
+        pool: PgPool,
+    ) {
+        let seen = Arc::new(Mutex::new(
+            Vec::<(String, HeaderMap, serde_json::Value)>::new(),
+        ));
+        let openai_seen = Arc::clone(&seen);
+        let anthropic_seen = Arc::clone(&seen);
+        let upstream = Router::new()
+            .route(
+                "/v1/responses",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let seen = Arc::clone(&openai_seen);
+                    async move {
+                        seen.lock().unwrap().push((
+                            "openai".to_owned(),
+                            headers,
+                            serde_json::from_slice(&body).unwrap(),
+                        ));
+                        Json(json!({
+                            "id": "resp_target_private",
+                            "object": "response",
+                            "status": "incomplete",
+                            "incomplete_details": {"reason": "max_output_tokens"},
+                            "model": "provider-openai-model",
+                            "output": [{"type":"message","id":"item_target","status":"completed","role":"assistant","content":[{"type":"output_text","text":"from openai","annotations":[]}]}],
+                            "usage": {"input_tokens": 7, "output_tokens": 2}
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/messages",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let seen = Arc::clone(&anthropic_seen);
+                    async move {
+                        seen.lock().unwrap().push((
+                            "anthropic".to_owned(),
+                            headers,
+                            serde_json::from_slice(&body).unwrap(),
+                        ));
+                        Json(json!({
+                            "id": "msg_target_private",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "provider-anthropic-model",
+                            "content": [{"type":"text","text":"from anthropic"}],
+                            "stop_reason": "max_tokens",
+                            "usage": {"input_tokens": 9, "output_tokens": 3}
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        let base_url = format!("http://{address}");
+        sqlx::query(
+            r#"
+            WITH inserted_providers AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES
+                    ($1, $3, 'openai-test', 'OpenAI target', 'openai', $4,
+                     'env://OPENAI_API_KEY', ARRAY['openai_responses'], 'active'),
+                    ($2, $3, 'anthropic-test', 'Anthropic target', 'anthropic', $4,
+                     'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active')
+                RETURNING id, provider_key
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, lifecycle_state
+            )
+            SELECT gen_random_uuid(), $3, id,
+                   CASE provider_key WHEN 'openai-test' THEN 'openai-cross' ELSE 'anthropic-cross' END,
+                   CASE provider_key WHEN 'openai-test' THEN 'provider-openai-model' ELSE 'provider-anthropic-model' END,
+                   'Cross model',
+                   CASE provider_key WHEN 'openai-test' THEN ARRAY['openai_responses'] ELSE ARRAY['anthropic_messages'] END,
+                   'active'
+            FROM inserted_providers
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(&base_url)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.openai_base_url = base_url.clone();
+        config.anthropic_base_url = base_url;
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let openai_reply = openai::execute(
+            &state,
+            RequestContext {
+                principal: principal(tenant_id),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses?client=true".to_owned(),
+                headers: HeaderMap::from_iter([(
+                    "openai-beta".parse().unwrap(),
+                    "client-beta".parse().unwrap(),
+                )]),
+                body: Bytes::from_static(
+                    br#"{"model":"anthropic-cross","input":"hello","max_output_tokens":32}"#,
+                ),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(openai_reply.status, StatusCode::OK);
+        assert!(openai_reply.headers.get("anthropic-version").is_none());
+        let openai_body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(openai_reply.body, 64 * 1024).await.unwrap()).unwrap();
+        assert!(openai_body["id"].as_str().unwrap().starts_with("resp_apg_"));
+        assert_eq!(openai_body["model"], "anthropic-cross");
+        assert_eq!(openai_body["status"], "incomplete");
+        assert_eq!(
+            openai_body["output"][0]["content"][0]["text"],
+            "from anthropic"
+        );
+
+        let anthropic_response = super::messages::proxy(
+            Arc::clone(&state),
+            principal(tenant_id),
+            Utc::now(),
+            "/v1/messages?client=true",
+            HeaderMap::from_iter([(
+                "anthropic-beta".parse().unwrap(),
+                "client-beta".parse().unwrap(),
+            )]),
+            Bytes::from_static(
+                br#"{"model":"openai-cross","messages":[{"role":"user","content":"hello"}],"max_tokens":32}"#,
+            ),
+            super::messages::Operation::Messages,
+        )
+        .await
+        .unwrap();
+        assert_eq!(anthropic_response.status(), StatusCode::OK);
+        assert!(anthropic_response.headers().get("x-request-id").is_none());
+        let anthropic_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(anthropic_response.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            anthropic_body["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("msg_apg_")
+        );
+        assert_eq!(anthropic_body["model"], "openai-cross");
+        assert_eq!(anthropic_body["stop_reason"], "max_tokens");
+        assert_eq!(anthropic_body["content"][0]["text"], "from openai");
+
+        {
+            let seen = seen.lock().unwrap();
+            let openai_target = seen.iter().find(|entry| entry.0 == "openai").unwrap();
+            assert_eq!(openai_target.2["model"], "provider-openai-model");
+            assert_eq!(openai_target.2["input"][0]["content"][0]["text"], "hello");
+            assert!(openai_target.1.get("anthropic-beta").is_none());
+            let anthropic_target = seen.iter().find(|entry| entry.0 == "anthropic").unwrap();
+            assert_eq!(anthropic_target.2["model"], "provider-anthropic-model");
+            assert_eq!(
+                anthropic_target.2["messages"][0]["content"][0]["text"],
+                "hello"
+            );
+            assert!(anthropic_target.1.get("openai-beta").is_none());
+            assert_eq!(anthropic_target.1["anthropic-version"], "2023-06-01");
+        }
+
+        state.ledger.wait_for_idle().await;
+        let ledger_statuses: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'requests', count(DISTINCT gr.id),
+                'failed_requests', count(DISTINCT gr.id) FILTER (WHERE gr.status = 'failed'),
+                'failed_attempts', count(pa.id) FILTER (
+                    WHERE pa.status = 'failed'
+                      AND pa.error_type = 'provider_response_incomplete'
+                )
+            )
+            FROM gateway_requests gr
+            JOIN provider_attempts pa
+              ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
+            WHERE gr.tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            ledger_statuses,
+            json!({"requests": 2, "failed_requests": 2, "failed_attempts": 2})
+        );
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn translated_tool_stream_keeps_protocol_order_request_echo_and_target_accounting(
+        pool: PgPool,
+    ) {
+        let stream = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_target_tool\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":12,\"output_tokens\":0,\"cache_creation_input_tokens\":3}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || async move {
+                ([("content-type", "text/event-stream")], Body::from(stream)).into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'anthropic-test', 'Anthropic stream target', 'anthropic',
+                    $3, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, supports_streaming,
+                supports_tools, max_output_tokens, lifecycle_state
+                ) SELECT $4, $2, id, 'anthropic-stream', 'provider-anthropic-stream',
+                         'Anthropic stream', ARRAY['anthropic_messages'], true, true, 4096, 'active'
+              FROM inserted_provider
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let response = openai::execute(
+            &state,
+            RequestContext {
+                principal: principal(tenant_id),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(
+                    br#"{"model":"anthropic-stream","input":"hello","max_output_tokens":32,"stream":true,"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}],"tool_choice":"required"}"#,
+                ),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers["content-type"], "text/event-stream");
+        let wire =
+            String::from_utf8(to_bytes(response.body, 64 * 1024).await.unwrap().to_vec()).unwrap();
+        assert!(wire.contains("response.function_call_arguments.delta"));
+        assert!(wire.contains("response.completed"));
+        assert!(wire.contains("resp_apg_"));
+        assert!(wire.contains("\"max_output_tokens\":32"));
+        assert!(wire.contains("\"tool_choice\":\"required\""));
+        assert!(!wire.contains("msg_target_tool"));
+
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'request_status', gr.status,
+                'attempt_status', pa.status,
+                'target_id', pa.provider_response_id,
+                'input_tokens', ur.input_tokens,
+                'output_tokens', ur.output_tokens,
+                'cache_write_tokens', ur.cache_write_input_tokens
+            )
+            FROM gateway_requests gr
+            JOIN provider_attempts pa
+              ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
+            JOIN usage_records ur
+              ON (ur.tenant_id, ur.provider_attempt_id) = (pa.tenant_id, pa.id)
+            WHERE gr.tenant_id = $1 AND ur.source = 'provider_reported'
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["request_status"], "completed");
+        assert_eq!(evidence["attempt_status"], "completed");
+        assert_eq!(evidence["target_id"], "msg_target_tool");
+        assert_eq!(evidence["input_tokens"], 12);
+        assert_eq!(evidence["output_tokens"], 5);
+        assert_eq!(evidence["cache_write_tokens"], 3);
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn translated_openai_target_stream_rejects_before_provider_and_quota(pool: PgPool) {
+        let stream = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_incomplete\"},\"sequence_number\":0}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"status\":\"incomplete\",\"usage\":{\"input_tokens\":9,\"output_tokens\":4,\"input_tokens_details\":{\"cache_write_tokens\":5}}},\"sequence_number\":1}\n\n"
+        );
+        let called = Arc::new(AtomicBool::new(false));
+        let upstream_called = Arc::clone(&called);
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let called = Arc::clone(&upstream_called);
+                async move {
+                    called.store(true, Ordering::Release);
+                    ([("content-type", "text/event-stream")], Body::from(stream)).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'openai-test', 'OpenAI incomplete target', 'openai',
+                    $3, 'env://OPENAI_API_KEY', ARRAY['openai_responses'], 'active'
+                ) RETURNING id
+            ), inserted_model AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, supports_streaming,
+                    max_output_tokens, cost_metadata, lifecycle_state
+                ) SELECT $4, $2, id, 'openai-incomplete', 'provider-openai-incomplete',
+                         'OpenAI incomplete', ARRAY['openai_responses'], true, 4096,
+                         '{"schema":"token_v1","currency":"USD","input_microusd_per_million_tokens":1000000,"output_microusd_per_million_tokens":1000000,"cache_read_input_microusd_per_million_tokens":1000000,"cache_write_input_microusd_per_million_tokens":1000000}',
+                         'active'
+                  FROM inserted_provider RETURNING id
+            )
+            INSERT INTO quotas (
+                id, tenant_id, quota_key, revision, configuration, lifecycle_state
+            ) SELECT $5, $2, 'cross-stream-tokens', 1,
+                     '{"mode":"hard","limits":{"tokens_per_day":10000,"cost_per_day_microusd":10000}}', 'active'
+              FROM inserted_model
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let result = super::messages::proxy(
+            Arc::clone(&state),
+            principal(tenant_id),
+            Utc::now(),
+            "/v1/messages",
+            HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"openai-incomplete","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stream":true}"#,
+            ),
+            super::messages::Operation::Messages,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::UnsupportedRequest)
+        ));
+        assert!(!called.load(Ordering::Acquire));
+        let quota_counts: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'windows', (SELECT count(*) FROM quota_windows WHERE tenant_id = $1),
+                'reservations', (SELECT count(*) FROM quota_reservations WHERE tenant_id = $1)
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(quota_counts, json!({"windows": 0, "reservations": 0}));
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn translated_stream_rejects_a_successful_non_sse_target_response(pool: PgPool) {
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                Json(json!({
+                    "id": "msg_wrong_topology",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'anthropic-test', 'Anthropic target', 'anthropic',
+                    $3, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, supports_streaming,
+                max_output_tokens, lifecycle_state
+            ) SELECT $4, $2, id, 'anthropic-non-sse', 'provider-anthropic-non-sse',
+                     'Anthropic non SSE', ARRAY['anthropic_messages'], true, 4096, 'active'
+              FROM inserted_provider
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: principal(tenant_id),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(
+                    br#"{"model":"anthropic-non-sse","input":"hello","max_output_tokens":32,"stream":true}"#,
+                ),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::UpstreamProtocol)
+        ));
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM gateway_requests WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+
+        upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 

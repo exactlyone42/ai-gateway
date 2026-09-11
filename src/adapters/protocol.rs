@@ -366,11 +366,12 @@ fn parse_structured_output(value: &Value) -> Option<CanonicalStructuredOutput> {
     if kind != "json_schema" {
         return None;
     }
+    let nested_definition = outer.contains_key("json_schema");
     let definition = outer
         .get("json_schema")
         .and_then(Value::as_object)
         .unwrap_or(outer);
-    let outer_allowed: &[&str] = if outer.contains_key("json_schema") {
+    let outer_allowed: &[&str] = if nested_definition {
         &["type", "json_schema"]
     } else {
         &["type", "name", "description", "schema", "strict"]
@@ -378,9 +379,10 @@ fn parse_structured_output(value: &Value) -> Option<CanonicalStructuredOutput> {
     if outer
         .keys()
         .any(|field| !outer_allowed.contains(&field.as_str()))
-        || definition
-            .keys()
-            .any(|field| !["name", "description", "schema", "strict"].contains(&field.as_str()))
+        || definition.keys().any(|field| {
+            !["name", "description", "schema", "strict"].contains(&field.as_str())
+                && !(!nested_definition && field == "type")
+        })
     {
         return None;
     }
@@ -440,6 +442,11 @@ fn project_tool_definition(provider: &str, value: &Value) -> Option<CanonicalToo
         .and_then(|key| definition_source.get(*key))
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
+    let strict = match definition_source.get("strict") {
+        None => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return None,
+    };
     let mut definition = definition_source.clone();
     definition.remove("name");
     if description.is_some() {
@@ -447,6 +454,9 @@ fn project_tool_definition(provider: &str, value: &Value) -> Option<CanonicalToo
     }
     if let Some(key) = schema_keys.first() {
         definition.remove(*key);
+    }
+    if strict.is_some() {
+        definition.remove("strict");
     }
     let mut outer = if nested {
         source.clone()
@@ -470,6 +480,7 @@ fn project_tool_definition(provider: &str, value: &Value) -> Option<CanonicalToo
         name,
         description,
         input_schema,
+        strict,
         provider_options: scoped_options(provider, outer),
     })
 }
@@ -569,6 +580,9 @@ fn project_message(provider: &str, value: &Value, default_role: CanonicalRole) -
             content: vec![content],
             provider_options: ProviderOptions::new(),
         };
+    }
+    if source.get("type").and_then(Value::as_str) == Some("message") {
+        residual.remove("type");
     }
     let role = source
         .get("role")
@@ -769,13 +783,34 @@ fn project_tool_call(provider: &str, value: &Value) -> Option<CanonicalToolCall>
     let source = value.as_object()?;
     let mut outer = source.clone();
     let nested = provider == "openai" && outer.get("function").is_some_and(Value::is_object);
+    let responses_item = provider == "openai"
+        && !nested
+        && outer.get("type").and_then(Value::as_str) == Some("function_call");
     let mut call = if nested {
         outer.remove("function")?.as_object()?.clone()
     } else {
         outer.clone()
     };
-    let id_keys = ["id", "call_id"]
-        .into_iter()
+    if responses_item {
+        if outer
+            .get("status")
+            .is_some_and(|status| status.as_str() != Some("completed"))
+        {
+            return None;
+        }
+        outer.remove("id");
+        outer.remove("status");
+        call.remove("id");
+        call.remove("status");
+    }
+    let id_keys: &[&str] = if responses_item {
+        &["call_id"]
+    } else {
+        &["id", "call_id"]
+    };
+    let id_keys = id_keys
+        .iter()
+        .copied()
         .filter(|key| source.contains_key(*key))
         .collect::<Vec<_>>();
     if id_keys.len() > 1 {
@@ -787,6 +822,7 @@ fn project_tool_call(provider: &str, value: &Value) -> Option<CanonicalToolCall>
     };
     if let Some(key) = id_keys.first() {
         outer.remove(*key);
+        call.remove(*key);
     }
     let name = call.get("name")?.as_str()?.to_owned();
     call.remove("name");
@@ -810,6 +846,12 @@ fn project_tool_call(provider: &str, value: &Value) -> Option<CanonicalToolCall>
         || outer.get("type").and_then(Value::as_str) == Some("tool_use")
     {
         outer.remove("type");
+    }
+    if matches!(
+        call.get("type").and_then(Value::as_str),
+        Some("function" | "function_call" | "tool_use")
+    ) {
+        call.remove("type");
     }
     if nested {
         if !call.is_empty() {
@@ -937,7 +979,8 @@ mod tests {
         assert_eq!(request.messages[1].role, CanonicalRole::User);
         assert_eq!(request.tools[0].name, "lookup");
         assert_eq!(request.tools[0].input_schema, json!({"type": "object"}));
-        assert_eq!(request.tools[0].provider_options["openai"]["strict"], true);
+        assert_eq!(request.tools[0].strict, Some(true));
+        assert!(request.tools[0].provider_options.is_empty());
         assert_eq!(
             request
                 .reasoning
@@ -947,6 +990,27 @@ mod tests {
         );
         assert_eq!(request.tool_choice, Some(CanonicalToolChoice::Auto));
         assert_eq!(request.max_output_tokens, Some(77));
+    }
+
+    #[test]
+    fn generated_responses_function_call_can_be_used_as_the_next_input() {
+        let request = decode(
+            GatewayOperation::OpenAiResponses,
+            Bytes::from_static(
+                br#"{"model":"public","input":[{"type":"function_call","id":"fc_public_0","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}","status":"completed"},{"type":"function_call_output","call_id":"call_1","output":"found"}],"max_output_tokens":8}"#,
+            ),
+        )
+        .unwrap();
+        let CanonicalContent::ToolCall(call) = &request.messages[0].content[0] else {
+            panic!("generated function call was not projected");
+        };
+        assert_eq!(call.id, "call_1");
+        assert!(call.provider_options.is_empty());
+        assert!(matches!(
+            call.arguments,
+            CanonicalToolArguments::Complete(Value::String(ref value))
+                if value == "{\"q\":\"x\"}"
+        ));
     }
 
     #[test]

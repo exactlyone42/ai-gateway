@@ -33,8 +33,8 @@
 | [policy-engine](./policy-engine.loop.md) | W11 | 已交付 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
 | [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 已交付 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
 | [scheduler-admission](./scheduler-admission.loop.md) | W13 | 已交付 | P1 | 互動工作不被背景餓死，背景工作也不會永遠排不到 |
-| [canonical-layer](./canonical-layer.loop.md) | W14 | 進行中 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
-| [cross-provider](./cross-provider.loop.md) | W15 | 未開始 | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
+| [canonical-layer](./canonical-layer.loop.md) | W14 | 已交付 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
+| [cross-provider](./cross-provider.loop.md) | W15 | 已完成（待合 `dev`） | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
 | [providers-expansion](./providers-expansion.loop.md) | W16 | 未開始 | P2 | 加 Gemini／xAI／Local 不需要改 Core（改了就是抽象設計錯了） |
 | [advanced-routing](./advanced-routing.loop.md) | W17 | 未開始 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 未開始 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
@@ -43,7 +43,7 @@
 ## 現在該做哪一個
 
 看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`；W00–W13 已交付，下一段是 W14。依前置條件
-逐段推進 W14–W19，並回收 W07 的移交判準。
+`W02 → W03/W04 → W05 → W06 → W14 → W15`；W00–W14 已交付，W15 已完成且待合入 `dev`。
+合併後逐段推進 W16–W19，並回收 W07 的移交判準。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。

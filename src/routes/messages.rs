@@ -4,7 +4,7 @@ use axum::{
     Extension, Json,
     body::{Body, Bytes},
     extract::{OriginalUri, State},
-    http::{HeaderMap, HeaderName, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -12,7 +12,10 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use crate::{
-    adapters::{ProviderRequestInput, prepare_for_provider, protocol, provider},
+    adapters::{
+        ProviderRequestInput, prepare_for_provider, protocol, provider, response,
+        stream::{CrossStreamEncoder, CrossStreamObserver},
+    },
     canonical::{PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
@@ -34,7 +37,7 @@ use crate::{
 pub(crate) struct StreamingResponse;
 
 #[derive(Clone, Copy)]
-enum Operation {
+pub(super) enum Operation {
     Messages,
     CountTokens,
 }
@@ -97,7 +100,7 @@ pub async fn count_tokens(
     .await
 }
 
-async fn proxy(
+pub(super) async fn proxy(
     state: Arc<AppState>,
     principal: PrincipalContext,
     received_at: DateTime<Utc>,
@@ -132,28 +135,7 @@ async fn proxy(
     .await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(gateway_operation, decoded.document());
-    let prepared_quota = request_quota::admit(
-        &state,
-        &prepared,
-        gateway_operation,
-        decoded.document(),
-        body_len,
-        required,
-    )
-    .await?;
-    let gateway_request_id = prepared_quota.gateway_request_id;
-    let crate::quota::QuotaAdmission {
-        selection,
-        estimated_usage: estimated,
-        snapshot: quota_snapshot,
-        concurrency,
-    } = prepared_quota.admission;
-    let model = selection.public_model_id.clone();
-    let provider_model = selection.provider_model_id.clone();
-    let provider = selection.provider_key.clone();
-    let profile = selection.profile.clone();
-    let selection_snapshot = selection.ledger_snapshot();
-    let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
+    let gateway_request_id = uuid::Uuid::new_v4();
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
@@ -170,10 +152,33 @@ async fn proxy(
         budget_class: value_text(&policy.budget_class),
         deadline: policy.deadline_at,
     });
+    let prepared_quota = request_quota::admit(
+        &state,
+        &prepared,
+        gateway_request_id,
+        &canonical,
+        body_len,
+        required,
+    )
+    .await?;
+    let translation = prepared_quota.translation;
+    let crate::quota::QuotaAdmission {
+        selection,
+        estimated_usage: estimated,
+        snapshot: quota_snapshot,
+        concurrency,
+    } = prepared_quota.admission;
+    let model = selection.public_model_id.clone();
+    let provider_model = selection.provider_model_id.clone();
+    let provider = selection.provider_key.clone();
+    let profile = selection.profile.clone();
+    let selection_snapshot = selection.ledger_snapshot();
+    let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
     let upstream_request = prepare_for_provider(
         &canonical,
         &profile,
         &provider_model,
+        translation,
         ProviderRequestInput {
             source_path_and_query: path_and_query,
             client_headers: &headers,
@@ -274,10 +279,45 @@ async fn proxy(
         ledger_estimated.unwrap_or_default(),
     )
     .with_selection(selection_snapshot);
+    let content_is_sse = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+
+    if status.is_success() && is_stream && translation.translated && !content_is_sse {
+        let completed_at = Utc::now();
+        let mut attempt = attempt;
+        attempt.conclude(
+            "failed",
+            Some("upstream_protocol_error".to_owned()),
+            completed_at,
+        );
+        reservation
+            .finish(completion(
+                StatusCode::BAD_GATEWAY,
+                model,
+                provider,
+                attempt,
+                completed_at,
+            ))
+            .await?;
+        return Err(GatewayError::UpstreamProtocol);
+    }
 
     if !status.is_success() || !is_stream {
         let mut attempt = attempt;
-        let bytes = match collect_body(upstream, &mut attempt).await {
+        let bytes = match collect_body(
+            upstream,
+            &mut attempt,
+            if translation.translated {
+                state.config.stream_event_max_bytes.saturating_mul(8)
+            } else {
+                usize::MAX
+            },
+        )
+        .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 let failed_at = Utc::now();
@@ -291,7 +331,7 @@ async fn proxy(
                         failed_at,
                     ))
                     .await?;
-                return Err(GatewayError::Upstream(error));
+                return Err(error);
             }
         };
         let completed_at = Utc::now();
@@ -307,57 +347,158 @@ async fn proxy(
         if status.is_success() && matches!(operation, Operation::Messages) {
             attempt.observe_usage(TokenUsage::from_response(&bytes), completed_at);
         }
+        let client_response = if translation.translated {
+            if !status.is_success() {
+                None
+            } else {
+                match response::transcode_buffered_with_outcome(
+                    translation.target_operation,
+                    translation.source_operation,
+                    &bytes,
+                    &format!("msg_apg_{}", gateway_request_id.simple()),
+                    &model,
+                    &canonical,
+                ) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                        reservation.set_client_first_byte_at(completed_at);
+                        reservation
+                            .finish(completion(
+                                StatusCode::BAD_GATEWAY,
+                                model,
+                                provider,
+                                attempt,
+                                completed_at,
+                            ))
+                            .await?;
+                        return Err(error);
+                    }
+                }
+            }
+        } else {
+            Some(response::TranscodedBufferedResponse {
+                body: bytes.clone(),
+                incomplete: false,
+            })
+        };
+        let incomplete = client_response
+            .as_ref()
+            .is_some_and(|response| response.incomplete);
         attempt.conclude(
-            if status.is_success() {
+            if incomplete {
+                "failed"
+            } else if status.is_success() {
                 "completed"
             } else {
                 "rejected"
             },
-            (!status.is_success()).then(|| status.as_u16().to_string()),
+            if incomplete {
+                Some("provider_response_incomplete".to_owned())
+            } else {
+                (!status.is_success()).then(|| status.as_u16().to_string())
+            },
             completed_at,
         );
         reservation.set_client_first_byte_at(completed_at);
-        reservation
-            .finish(completion(
-                status,
-                model,
-                provider.clone(),
-                attempt,
-                completed_at,
-            ))
-            .await?;
-        return build_response(status, &response_headers, Body::from(bytes));
+        let mut request_completion =
+            completion(status, model, provider.clone(), attempt, completed_at);
+        if incomplete {
+            request_completion.status = "failed".to_owned();
+        }
+        reservation.finish(request_completion).await?;
+        if translation.translated && client_response.is_none() {
+            return Err(GatewayError::UpstreamProtocol);
+        }
+        let client_bytes = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
+        let response_headers = if translation.translated {
+            translated_response_headers()
+        } else {
+            response_headers
+        };
+        return build_response(status, &response_headers, Body::from(client_bytes));
     }
 
-    let body = streaming::relay(
-        upstream,
-        reservation,
-        attempt,
-        model,
-        provider,
-        MetadataParser::default(),
-        state.config.stream_event_max_bytes,
-    )
-    .await?;
+    let body = if translation.translated {
+        streaming::relay_transcoded(
+            upstream,
+            reservation,
+            attempt,
+            model.clone(),
+            provider,
+            (
+                CrossStreamObserver::new(translation.target_operation)
+                    .map_err(|_| GatewayError::InvalidConfiguration)?,
+                CrossStreamEncoder::new(
+                    translation.source_operation,
+                    format!("msg_apg_{}", gateway_request_id.simple()),
+                    model,
+                    &canonical,
+                )
+                .map_err(|_| GatewayError::InvalidConfiguration)?,
+            ),
+            state.config.stream_event_max_bytes,
+        )
+        .await?
+    } else {
+        streaming::relay(
+            upstream,
+            reservation,
+            attempt,
+            model,
+            provider,
+            MetadataParser::default(),
+            state.config.stream_event_max_bytes,
+        )
+        .await?
+    };
+    let response_headers = if translation.translated {
+        translated_stream_headers()
+    } else {
+        response_headers
+    };
     let mut response = build_response(status, &response_headers, body)?;
     response.extensions_mut().insert(StreamingResponse);
     Ok(response)
 }
 
+fn translated_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers
+}
+
+fn translated_stream_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers
+}
+
 async fn collect_body(
     response: reqwest::Response,
     attempt: &mut ProviderAttempt,
-) -> Result<Bytes, reqwest::Error> {
+    response_max_bytes: usize,
+) -> Result<Bytes, GatewayError> {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     let mut first = true;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(GatewayError::Upstream)?;
         if first {
             first = false;
             attempt.observe_first_byte(Utc::now());
         }
         body.extend_from_slice(&chunk);
+        if body.len() > response_max_bytes {
+            return Err(GatewayError::UpstreamProtocol);
+        }
     }
     Ok(Bytes::from(body))
 }

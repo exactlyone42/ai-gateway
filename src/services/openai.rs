@@ -11,8 +11,12 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use crate::{
-    adapters::{ProviderRequestInput, prepare_for_provider, protocol, provider},
-    canonical::{CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
+    adapters::{
+        ProviderRequestInput, ValidatedTranslationPlan, prepare_for_provider, protocol, provider,
+        response,
+        stream::{CrossStreamEncoder, CrossStreamObserver},
+    },
+    canonical::{CanonicalRequest, CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
@@ -24,7 +28,7 @@ use crate::{
     services::{
         request_policy::{self, RejectionContext},
         request_quota,
-        streaming::{ProtocolError, StreamObserver, event_data, relay},
+        streaming::{ProtocolError, StreamObserver, event_data, relay, relay_transcoded},
     },
     state::AppState,
 };
@@ -93,6 +97,10 @@ struct BufferedContext {
     model: String,
     provider: String,
     operation: Operation,
+    translation: ValidatedTranslationPlan,
+    gateway_request_id: uuid::Uuid,
+    response_max_bytes: usize,
+    canonical: CanonicalRequest,
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
@@ -132,29 +140,8 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     .await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(operation, decoded.document());
-    let observer = request.operation.observer(decoded.document())?;
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
-    let prepared_quota = request_quota::admit(
-        state,
-        &prepared,
-        operation,
-        decoded.document(),
-        body_len,
-        required,
-    )
-    .await?;
-    let gateway_request_id = prepared_quota.gateway_request_id;
-    let QuotaAdmission {
-        selection,
-        estimated_usage: estimated,
-        snapshot: quota_snapshot,
-        concurrency,
-    } = prepared_quota.admission;
-    let model = selection.public_model_id.clone();
-    let provider_model = selection.provider_model_id.clone();
-    let provider = selection.provider_key.clone();
-    let profile = selection.profile.clone();
-    let selection_snapshot = selection.ledger_snapshot();
+    let gateway_request_id = uuid::Uuid::new_v4();
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
@@ -171,10 +158,37 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         budget_class: value_text(&policy.budget_class),
         deadline: policy.deadline_at,
     });
+    let prepared_quota = request_quota::admit(
+        state,
+        &prepared,
+        gateway_request_id,
+        &canonical,
+        body_len,
+        required,
+    )
+    .await?;
+    let translation = prepared_quota.translation;
+    let response_max_bytes = if translation.translated {
+        state.config.stream_event_max_bytes.saturating_mul(8)
+    } else {
+        usize::MAX
+    };
+    let QuotaAdmission {
+        selection,
+        estimated_usage: estimated,
+        snapshot: quota_snapshot,
+        concurrency,
+    } = prepared_quota.admission;
+    let model = selection.public_model_id.clone();
+    let provider_model = selection.provider_model_id.clone();
+    let provider = selection.provider_key.clone();
+    let profile = selection.profile.clone();
+    let selection_snapshot = selection.ledger_snapshot();
     let upstream_request = prepare_for_provider(
         &canonical,
         &profile,
         &provider_model,
+        translation,
         ProviderRequestInput {
             source_path_and_query: &request.path_and_query,
             client_headers: &request.headers,
@@ -288,20 +302,67 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/event-stream"));
 
+    if status.is_success() && is_stream && translation.translated && !content_is_sse {
+        let completed_at = Utc::now();
+        let mut attempt = attempt;
+        attempt.conclude(
+            "failed",
+            Some("upstream_protocol_error".to_owned()),
+            completed_at,
+        );
+        reservation
+            .finish(RequestCompletion {
+                status: "failed".to_owned(),
+                selected_model: Some(model),
+                selected_provider: Some(provider),
+                attempts: vec![attempt],
+                completed_at,
+            })
+            .await?;
+        return Err(GatewayError::UpstreamProtocol);
+    }
+
     if status.is_success() && is_stream && content_is_sse {
-        let body = relay(
-            upstream,
-            reservation,
-            attempt,
-            model,
-            provider.clone(),
-            observer,
-            state.config.stream_event_max_bytes,
-        )
-        .await?;
+        let body = if translation.translated {
+            relay_transcoded(
+                upstream,
+                reservation,
+                attempt,
+                model.clone(),
+                provider.clone(),
+                (
+                    CrossStreamObserver::new(translation.target_operation)
+                        .map_err(|_| GatewayError::InvalidConfiguration)?,
+                    CrossStreamEncoder::new(
+                        translation.source_operation,
+                        format!("resp_apg_{}", gateway_request_id.simple()),
+                        model,
+                        &canonical,
+                    )
+                    .map_err(|_| GatewayError::InvalidConfiguration)?,
+                ),
+                state.config.stream_event_max_bytes,
+            )
+            .await?
+        } else {
+            relay(
+                upstream,
+                reservation,
+                attempt,
+                model,
+                provider.clone(),
+                request.operation.observer(canonical.source_document())?,
+                state.config.stream_event_max_bytes,
+            )
+            .await?
+        };
         return Ok(Reply {
             status,
-            headers: response_headers,
+            headers: if translation.translated {
+                translated_stream_headers()
+            } else {
+                response_headers
+            },
             body,
             streaming: true,
         });
@@ -316,6 +377,10 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         model,
         provider,
         operation: request.operation,
+        translation,
+        gateway_request_id,
+        response_max_bytes,
+        canonical,
     })
     .await
 }
@@ -330,6 +395,10 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         model,
         provider,
         operation,
+        translation,
+        gateway_request_id,
+        response_max_bytes,
+        canonical,
     } = context;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
@@ -361,6 +430,24 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
             attempt.observe_first_byte(Utc::now());
         }
         bytes.extend_from_slice(&chunk);
+        if bytes.len() > response_max_bytes {
+            let completed_at = Utc::now();
+            attempt.conclude(
+                "failed",
+                Some("response_too_large".to_owned()),
+                completed_at,
+            );
+            reservation
+                .finish(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: Some(model),
+                    selected_provider: Some(provider),
+                    attempts: vec![attempt],
+                    completed_at,
+                })
+                .await?;
+            return Err(GatewayError::UpstreamProtocol);
+        }
     }
     let body = Bytes::from(bytes);
     let completed_at = Utc::now();
@@ -374,8 +461,55 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     if status.is_success() {
         attempt.observe_usage(TokenUsage::from_response(&body), completed_at);
     }
-    let (request_status, attempt_status, error_type) =
-        buffered_outcome(operation, status, response_value.as_ref());
+    let client_response = if translation.translated {
+        if !status.is_success() {
+            None
+        } else {
+            match response::transcode_buffered_with_outcome(
+                translation.target_operation,
+                translation.source_operation,
+                &body,
+                &format!("resp_apg_{}", gateway_request_id.simple()),
+                &model,
+                &canonical,
+            ) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                    reservation.set_client_first_byte_at(completed_at);
+                    reservation
+                        .finish(RequestCompletion {
+                            status: "failed".to_owned(),
+                            selected_model: Some(model),
+                            selected_provider: Some(provider),
+                            attempts: vec![attempt],
+                            completed_at,
+                        })
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
+    } else {
+        Some(response::TranscodedBufferedResponse {
+            body,
+            incomplete: false,
+        })
+    };
+    let incomplete = client_response
+        .as_ref()
+        .is_some_and(|response| response.incomplete);
+    let (request_status, attempt_status, error_type) = if incomplete {
+        (
+            "failed",
+            "failed",
+            Some("provider_response_incomplete".to_owned()),
+        )
+    } else if translation.translated && status.is_success() {
+        ("completed", "completed", None)
+    } else {
+        buffered_outcome(operation, status, response_value.as_ref())
+    };
     attempt.conclude(attempt_status, error_type, completed_at);
     reservation.set_client_first_byte_at(completed_at);
     reservation
@@ -387,12 +521,39 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
             completed_at,
         })
         .await?;
+    if translation.translated && client_response.is_none() {
+        return Err(GatewayError::UpstreamProtocol);
+    }
+    let client_body = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
     Ok(Reply {
         status,
-        headers,
-        body: Body::from(body),
+        headers: if translation.translated {
+            translated_response_headers()
+        } else {
+            headers
+        },
+        body: Body::from(client_body),
         streaming: false,
     })
+}
+
+fn translated_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers
+}
+
+fn translated_stream_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers
 }
 
 fn buffered_outcome(

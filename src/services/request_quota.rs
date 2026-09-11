@@ -3,6 +3,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
+    adapters::{ValidatedTranslationPlan, validate_for_provider},
+    canonical::CanonicalRequest,
     error::GatewayError,
     ledger::{RequestStart, TokenUsage},
     model_registry::{CapabilityRequirements, GatewayOperation},
@@ -13,18 +15,20 @@ use crate::{
 };
 
 pub struct PreparedQuota {
-    pub gateway_request_id: Uuid,
     pub admission: QuotaAdmission,
+    pub translation: ValidatedTranslationPlan,
 }
 
 pub async fn admit(
     state: &AppState,
     prepared: &PreparedPolicy,
-    operation: GatewayOperation,
-    body: &Value,
+    gateway_request_id: Uuid,
+    request: &CanonicalRequest,
     body_bytes: usize,
     required: CapabilityRequirements,
 ) -> Result<PreparedQuota, GatewayError> {
+    let operation = request.source_operation();
+    let body = request.source_document();
     let mut candidates = state
         .models
         .candidates(
@@ -35,6 +39,24 @@ pub async fn admit(
             required,
         )
         .await?;
+    let mut had_unsupported_translation = false;
+    candidates.retain(
+        |candidate| match validate_for_provider(request, candidate) {
+            Ok(_) => true,
+            Err(GatewayError::UnsupportedRequest) => {
+                had_unsupported_translation = true;
+                false
+            }
+            Err(_) => false,
+        },
+    );
+    if candidates.is_empty() {
+        return Err(if had_unsupported_translation {
+            GatewayError::UnsupportedRequest
+        } else {
+            GatewayError::ModelForbidden
+        });
+    }
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
     super::request_policy::enforce_selected_model(
         state,
@@ -44,7 +66,6 @@ pub async fn admit(
     )
     .await?;
     candidates.retain(|candidate| prepared.policy.allows_model(&candidate.public_model_id));
-    let gateway_request_id = Uuid::new_v4();
     let output_limit = requested_output_tokens(operation, body);
     let output_multiplier = output_multiplier(operation, body)?;
     let billable = operation != GatewayOperation::AnthropicCountTokens;
@@ -59,8 +80,8 @@ pub async fn admit(
             .next()
             .ok_or(GatewayError::ModelForbidden)?;
         selection.record_selected();
+        let translation = validate_for_provider(request, &selection)?;
         return Ok(PreparedQuota {
-            gateway_request_id,
             admission: QuotaAdmission {
                 selection,
                 estimated_usage: TokenUsage {
@@ -71,6 +92,7 @@ pub async fn admit(
                 snapshot: None,
                 concurrency: Vec::new(),
             },
+            translation,
         });
     }
     match state
@@ -94,9 +116,10 @@ pub async fn admit(
     {
         QuotaOutcome::Allowed(admission) => {
             admission.selection.record_selected();
+            let translation = validate_for_provider(request, &admission.selection)?;
             Ok(PreparedQuota {
-                gateway_request_id,
                 admission: *admission,
+                translation,
             })
         }
         QuotaOutcome::Rejected(snapshot, rejection) => {

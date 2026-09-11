@@ -2,11 +2,14 @@ use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderName, HeaderValue, header},
 };
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::{
     adapters::ProviderRequestInput,
-    canonical::CanonicalRequest,
+    canonical::{
+        CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalToolArguments,
+        CanonicalToolChoice,
+    },
     error::GatewayError,
     logging,
     model_registry::{
@@ -25,6 +28,7 @@ pub struct ProviderRequestPlan {
     pub operation: GatewayOperation,
     pub path_and_query: String,
     pub authentication: AuthenticationMode,
+    pub translated: bool,
 }
 
 pub struct PreparedProviderRequest {
@@ -41,6 +45,11 @@ impl PreparedProviderRequest {
     #[cfg(test)]
     pub fn body(&self) -> &Bytes {
         &self.body
+    }
+
+    #[cfg(test)]
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
     }
 }
 
@@ -66,19 +75,17 @@ pub trait ProviderAdapter: Sync {
 
     fn allows_client_header(&self, name: &HeaderName) -> bool;
 
-    fn plan(
+    fn plan_for_target(
         &self,
-        operation: CanonicalOperation,
+        target_operation: GatewayOperation,
         source_operation: GatewayOperation,
         input: &ProviderRequestInput<'_>,
     ) -> Result<ProviderRequestPlan, GatewayError> {
-        let target_operation = if source_operation.dialect() == self.dialect() {
-            source_operation
-        } else {
-            self.target_operation(operation)
-                .ok_or(GatewayError::UnsupportedRequest)?
-        };
-        let path_and_query = if target_operation == source_operation {
+        if target_operation.dialect() != self.dialect() {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+        let translated = target_operation != source_operation;
+        let path_and_query = if !translated {
             input.source_path_and_query.to_owned()
         } else {
             self.default_path(target_operation)
@@ -89,6 +96,7 @@ pub trait ProviderAdapter: Sync {
             operation: target_operation,
             path_and_query,
             authentication: self.authentication(),
+            translated,
         })
     }
 
@@ -101,14 +109,28 @@ pub trait ProviderAdapter: Sync {
     ) -> Result<PreparedProviderRequest, GatewayError> {
         let mut headers = HeaderMap::new();
         for (name, value) in input.client_headers {
-            if self.allows_client_header(name)
+            if (!plan.translated || name == header::CONTENT_TYPE || name == header::ACCEPT)
+                && self.allows_client_header(name)
                 && name != header::AUTHORIZATION
                 && name.as_str() != "x-api-key"
             {
                 headers.append(name.clone(), value.clone());
             }
         }
+        if plan.translated || !headers.contains_key(header::CONTENT_TYPE) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+        }
+        if self.dialect() == ProviderDialect::Anthropic && plan.translated {
+            headers.insert(
+                HeaderName::from_static("anthropic-version"),
+                HeaderValue::from_static("2023-06-01"),
+            );
+        }
         if self.dialect() == ProviderDialect::OpenAi
+            && !plan.translated
             && let Some(value) = input.idempotency_key
         {
             headers.insert(HeaderName::from_static("idempotency-key"), value);
@@ -197,6 +219,18 @@ impl ProviderAdapter for AnthropicProviderAdapter {
             || name == header::ACCEPT
             || name.as_str().starts_with("anthropic-")
     }
+
+    fn encode_canonical(
+        &self,
+        request: &CanonicalRequest,
+        target_operation: GatewayOperation,
+        provider_model_id: &str,
+    ) -> Result<Bytes, GatewayError> {
+        if target_operation != GatewayOperation::AnthropicMessages {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        encode_anthropic_request(request, provider_model_id)
+    }
 }
 
 impl ProviderAdapter for OpenAiProviderAdapter {
@@ -231,6 +265,259 @@ impl ProviderAdapter for OpenAiProviderAdapter {
             || text == "originator"
             || text == "session_id"
             || text.starts_with("x-stainless-")
+    }
+
+    fn encode_canonical(
+        &self,
+        request: &CanonicalRequest,
+        target_operation: GatewayOperation,
+        provider_model_id: &str,
+    ) -> Result<Bytes, GatewayError> {
+        if target_operation != GatewayOperation::OpenAiResponses {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        encode_openai_request(request, provider_model_id)
+    }
+}
+
+fn encode_openai_request(
+    request: &CanonicalRequest,
+    provider_model_id: &str,
+) -> Result<Bytes, GatewayError> {
+    let mut input = Vec::new();
+    for message in &request.messages {
+        let role = match message.role {
+            CanonicalRole::System => "system",
+            CanonicalRole::User | CanonicalRole::Tool => "user",
+            CanonicalRole::Assistant => "assistant",
+            CanonicalRole::Developer | CanonicalRole::Other(_) => {
+                return Err(GatewayError::UnsupportedRequest);
+            }
+        };
+        let mut text_content = Vec::new();
+        for content in &message.content {
+            match content {
+                CanonicalContent::Text { text, .. } => text_content.push(json!({
+                    "type": if role == "assistant" { "output_text" } else { "input_text" },
+                    "text": text
+                })),
+                CanonicalContent::ToolCall(call) => {
+                    push_openai_text(&mut input, role, &mut text_content);
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": arguments_json(&call.arguments)?.to_string()
+                    }));
+                }
+                CanonicalContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                } => {
+                    push_openai_text(&mut input, role, &mut text_content);
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": value_text(content)
+                    }));
+                }
+                _ => return Err(GatewayError::UnsupportedRequest),
+            }
+        }
+        push_openai_text(&mut input, role, &mut text_content);
+    }
+    let mut document = Map::from_iter([
+        (
+            "model".to_owned(),
+            Value::String(provider_model_id.to_owned()),
+        ),
+        ("input".to_owned(), Value::Array(input)),
+        ("stream".to_owned(), Value::Bool(request.stream)),
+    ]);
+    if let Some(limit) = request.max_output_tokens {
+        document.insert("max_output_tokens".to_owned(), Value::from(limit));
+    }
+    if !request.tools.is_empty() {
+        document.insert(
+            "tools".to_owned(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        let mut value = json!({
+                            "type": "function",
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema
+                        });
+                        if let Some(strict) = tool.strict {
+                            value["strict"] = Value::Bool(strict);
+                        }
+                        value
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(choice) = &request.tool_choice {
+        document.insert("tool_choice".to_owned(), openai_tool_choice(choice));
+    }
+    if let Some(output) = &request.structured_output {
+        document.insert(
+            "text".to_owned(),
+            json!({"format": {
+                "type": "json_schema",
+                "name": output.name.as_deref().unwrap_or("response"),
+                "description": output.description,
+                "schema": output.schema,
+                "strict": true
+            }}),
+        );
+    }
+    serde_json::to_vec(&Value::Object(document))
+        .map(Bytes::from)
+        .map_err(GatewayError::InvalidRequest)
+}
+
+fn push_openai_text(input: &mut Vec<Value>, role: &str, content: &mut Vec<Value>) {
+    if !content.is_empty() {
+        input.push(json!({
+            "type": "message",
+            "role": role,
+            "content": std::mem::take(content)
+        }));
+    }
+}
+
+fn encode_anthropic_request(
+    request: &CanonicalRequest,
+    provider_model_id: &str,
+) -> Result<Bytes, GatewayError> {
+    let mut system = Vec::new();
+    let mut messages = Vec::new();
+    for message in &request.messages {
+        let mut content = Vec::new();
+        for item in &message.content {
+            match item {
+                CanonicalContent::Text { text, .. } => {
+                    content.push(json!({"type": "text", "text": text}));
+                }
+                CanonicalContent::ToolCall(call) => content.push(json!({
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": arguments_json(&call.arguments)?
+                })),
+                CanonicalContent::ToolResult {
+                    tool_call_id,
+                    content: result,
+                    ..
+                } => content.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": result
+                })),
+                _ => return Err(GatewayError::UnsupportedRequest),
+            }
+        }
+        match message.role {
+            CanonicalRole::System => system.extend(content),
+            CanonicalRole::User | CanonicalRole::Tool => {
+                messages.push(json!({"role": "user", "content": content}));
+            }
+            CanonicalRole::Assistant => {
+                messages.push(json!({"role": "assistant", "content": content}));
+            }
+            CanonicalRole::Developer | CanonicalRole::Other(_) => {
+                return Err(GatewayError::UnsupportedRequest);
+            }
+        }
+    }
+    let max_tokens = request
+        .max_output_tokens
+        .ok_or(GatewayError::UnsupportedRequest)?;
+    let mut document = Map::from_iter([
+        (
+            "model".to_owned(),
+            Value::String(provider_model_id.to_owned()),
+        ),
+        ("messages".to_owned(), Value::Array(messages)),
+        ("max_tokens".to_owned(), Value::from(max_tokens)),
+        ("stream".to_owned(), Value::Bool(request.stream)),
+    ]);
+    if !system.is_empty() {
+        document.insert("system".to_owned(), Value::Array(system));
+    }
+    if !request.tools.is_empty() {
+        document.insert(
+            "tools".to_owned(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        let mut value = json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "input_schema": tool.input_schema
+                        });
+                        if let Some(strict) = tool.strict {
+                            value["strict"] = Value::Bool(strict);
+                        }
+                        value
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(choice) = &request.tool_choice {
+        document.insert("tool_choice".to_owned(), anthropic_tool_choice(choice));
+    }
+    if let Some(output) = &request.structured_output {
+        document.insert(
+            "output_config".to_owned(),
+            json!({"format": {"type": "json_schema", "schema": output.schema}}),
+        );
+    }
+    serde_json::to_vec(&Value::Object(document))
+        .map(Bytes::from)
+        .map_err(GatewayError::InvalidRequest)
+}
+
+fn arguments_json(arguments: &CanonicalToolArguments) -> Result<Value, GatewayError> {
+    match arguments {
+        CanonicalToolArguments::Complete(Value::String(value)) => {
+            serde_json::from_str(value).map_err(|_| GatewayError::UnsupportedRequest)
+        }
+        CanonicalToolArguments::Complete(value) if value.is_object() => Ok(value.clone()),
+        _ => Err(GatewayError::UnsupportedRequest),
+    }
+}
+
+fn value_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn openai_tool_choice(choice: &CanonicalToolChoice) -> Value {
+    match choice {
+        CanonicalToolChoice::Auto => json!("auto"),
+        CanonicalToolChoice::Required => json!("required"),
+        CanonicalToolChoice::None => json!("none"),
+        CanonicalToolChoice::Named(name) => json!({"type": "function", "name": name}),
+    }
+}
+
+fn anthropic_tool_choice(choice: &CanonicalToolChoice) -> Value {
+    match choice {
+        CanonicalToolChoice::Auto => json!({"type": "auto"}),
+        CanonicalToolChoice::Required => json!({"type": "any"}),
+        CanonicalToolChoice::None => json!({"type": "none"}),
+        CanonicalToolChoice::Named(name) => json!({"type": "tool", "name": name}),
     }
 }
 

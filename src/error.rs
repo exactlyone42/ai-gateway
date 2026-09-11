@@ -47,6 +47,8 @@ pub enum GatewayError {
     AuthenticationUnavailable(#[source] IdentityError),
     #[error("upstream request failed")]
     Upstream(#[from] reqwest::Error),
+    #[error("upstream response does not satisfy the translated protocol")]
+    UpstreamProtocol,
     #[error("failed to build the response")]
     ResponseBuild(#[from] axum::http::Error),
     #[error("usage ledger is unavailable")]
@@ -95,6 +97,7 @@ impl GatewayError {
             Self::InvalidConfiguration => "invalid_configuration",
             Self::AuthenticationUnavailable(_) => "authentication_unavailable",
             Self::Upstream(_) => "upstream_unavailable",
+            Self::UpstreamProtocol => "upstream_protocol_error",
             Self::ResponseBuild(_) => "response_build_failed",
             Self::LedgerUnavailable(_) => "ledger_unavailable",
             Self::RegistryUnavailable(_) => "model_registry_unavailable",
@@ -126,6 +129,7 @@ impl GatewayError {
             Self::RequestBodyUnavailable(error) => Some(error.clone()),
             Self::AuthenticationUnavailable(error) => Some(error.to_string()),
             Self::Upstream(error) => Some(error.to_string()),
+            Self::UpstreamProtocol => None,
             Self::ResponseBuild(error) => Some(error.to_string()),
             Self::LedgerUnavailable(error) => Some(error.to_string()),
             Self::RegistryUnavailable(error) => Some(error.to_string()),
@@ -159,6 +163,7 @@ impl IntoResponse for GatewayError {
             Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AuthenticationUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Self::UpstreamProtocol => StatusCode::BAD_GATEWAY,
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::LedgerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::RegistryUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,

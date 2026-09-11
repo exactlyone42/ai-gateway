@@ -18,6 +18,8 @@ pub enum ProtocolError {
     EventTooLarge,
     #[error("terminal SSE events exceeded the bounded hold size")]
     TerminalTooLarge,
+    #[error("provider stream exceeded the bounded total response size")]
+    ResponseTooLarge,
     #[error("{0}")]
     Invalid(&'static str),
 }
@@ -30,6 +32,15 @@ pub trait StreamObserver: Send + 'static {
             "provider stream ended without a terminal event",
         ))
     }
+}
+
+pub trait StreamEncoder: Send + 'static {
+    fn encode(&mut self, events: &[CanonicalStreamEvent]) -> Result<Vec<Bytes>, ProtocolError>;
+}
+
+struct RelayProtocol<O> {
+    observer: O,
+    encoder: Option<Box<dyn StreamEncoder>>,
 }
 
 pub struct EventDecoder {
@@ -112,11 +123,59 @@ pub fn event_data(event: &[u8]) -> EventData {
 
 pub async fn relay<O: StreamObserver>(
     response: reqwest::Response,
-    mut reservation: Reservation,
+    reservation: Reservation,
     attempt: ProviderAttempt,
     model: String,
     provider: String,
     observer: O,
+    event_max_bytes: usize,
+) -> Result<Body, crate::ledger::LedgerError> {
+    relay_inner(
+        response,
+        reservation,
+        attempt,
+        model,
+        provider,
+        RelayProtocol {
+            observer,
+            encoder: None,
+        },
+        event_max_bytes,
+    )
+    .await
+}
+
+pub async fn relay_transcoded<O: StreamObserver, E: StreamEncoder>(
+    response: reqwest::Response,
+    reservation: Reservation,
+    attempt: ProviderAttempt,
+    model: String,
+    provider: String,
+    transcoder: (O, E),
+    event_max_bytes: usize,
+) -> Result<Body, crate::ledger::LedgerError> {
+    relay_inner(
+        response,
+        reservation,
+        attempt,
+        model,
+        provider,
+        RelayProtocol {
+            observer: transcoder.0,
+            encoder: Some(Box::new(transcoder.1)),
+        },
+        event_max_bytes,
+    )
+    .await
+}
+
+async fn relay_inner<O: StreamObserver>(
+    response: reqwest::Response,
+    mut reservation: Reservation,
+    attempt: ProviderAttempt,
+    model: String,
+    provider: String,
+    mut protocol: RelayProtocol<O>,
     event_max_bytes: usize,
 ) -> Result<Body, crate::ledger::LedgerError> {
     // The stream owns provider capacity until its final frame is yielded or the
@@ -136,7 +195,6 @@ pub async fn relay<O: StreamObserver>(
         let _scheduler_lease = scheduler_lease;
         let mut upstream = response.bytes_stream();
         let mut decoder = EventDecoder::new(event_max_bytes);
-        let mut observer = observer;
         let mut reservation = Some(reservation);
         let mut attempt = attempt;
         let mut first_provider_byte = false;
@@ -144,6 +202,19 @@ pub async fn relay<O: StreamObserver>(
         let mut held = Vec::<Bytes>::new();
         let mut held_bytes = 0usize;
         let mut holding_terminal = false;
+        let translated = protocol.encoder.is_some();
+        let response_max_bytes = if translated {
+            event_max_bytes.saturating_mul(8)
+        } else {
+            usize::MAX
+        };
+        let terminal_max_bytes = if translated {
+            response_max_bytes
+        } else {
+            event_max_bytes
+        };
+        let mut provider_bytes = 0usize;
+        let mut client_bytes = 0usize;
 
         while let Some(item) = upstream.next().await {
             let bytes = match item {
@@ -154,6 +225,12 @@ pub async fn relay<O: StreamObserver>(
                     return;
                 }
             };
+            provider_bytes = provider_bytes.saturating_add(bytes.len());
+            if provider_bytes > response_max_bytes {
+                finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
+                yield Err(io::Error::other(ProtocolError::ResponseTooLarge));
+                return;
+            }
             let mut batch_changed = false;
             if !first_provider_byte {
                 first_provider_byte = true;
@@ -171,7 +248,7 @@ pub async fn relay<O: StreamObserver>(
             let mut ready = Vec::new();
             let mut batch_terminal = None;
             for raw in events {
-                let observed = match observer.observe(&raw) {
+                let observed = match protocol.observer.observe(&raw) {
                     Ok(observed) => observed,
                     Err(error) => {
                         finish_failed(&mut reservation, &mut attempt, &model, &provider, "malformed_sse").await;
@@ -179,19 +256,39 @@ pub async fn relay<O: StreamObserver>(
                         return;
                     }
                 };
+                let rendered = if let Some(encoder) = protocol.encoder.as_mut() {
+                    match encoder.encode(&observed) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            finish_failed(&mut reservation, &mut attempt, &model, &provider, "malformed_sse").await;
+                            yield Err(io::Error::other(error));
+                            return;
+                        }
+                    }
+                } else {
+                    vec![raw]
+                };
                 let state = apply_events(&mut attempt, observed, Utc::now());
                 batch_changed |= state.changed;
                 holding_terminal |= state.hint || state.terminal.is_some();
-                if holding_terminal {
-                    held_bytes = held_bytes.saturating_add(raw.len());
-                    held.push(raw);
-                    if held_bytes > event_max_bytes {
-                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "terminal_buffer_overflow").await;
-                        yield Err(io::Error::other(ProtocolError::TerminalTooLarge));
+                for output in rendered {
+                    client_bytes = client_bytes.saturating_add(output.len());
+                    if client_bytes > response_max_bytes {
+                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
+                        yield Err(io::Error::other(ProtocolError::ResponseTooLarge));
                         return;
                     }
-                } else {
-                    ready.push(raw);
+                    if holding_terminal {
+                        held_bytes = held_bytes.saturating_add(output.len());
+                        held.push(output);
+                        if held_bytes > terminal_max_bytes {
+                            finish_failed(&mut reservation, &mut attempt, &model, &provider, "terminal_buffer_overflow").await;
+                            yield Err(io::Error::other(ProtocolError::TerminalTooLarge));
+                            return;
+                        }
+                    } else {
+                        ready.push(output);
+                    }
                 }
                 if let Some(outcome) = state.terminal {
                     batch_terminal = Some(outcome);
@@ -239,7 +336,7 @@ pub async fn relay<O: StreamObserver>(
             return;
         }
 
-        let final_events = match observer.finish() {
+        let final_events = match protocol.observer.finish() {
             Ok(events) => events,
             Err(error) => {
                 finish_failed(&mut reservation, &mut attempt, &model, &provider, "incomplete_stream").await;
