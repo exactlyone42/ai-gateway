@@ -1,3 +1,4 @@
+mod gemini_wire;
 pub mod protocol;
 pub mod provider;
 pub mod response;
@@ -36,7 +37,15 @@ pub fn validate_for_provider(
 ) -> Result<ValidatedTranslationPlan, GatewayError> {
     let source_operation = request.source_operation();
     let target_dialect = selection.profile.target_dialect;
-    let adapter = provider::for_dialect(target_dialect);
+    let adapter = provider::for_kind(selection.profile.kind)?;
+    let capabilities = adapter.capabilities();
+    if (request.stream && !capabilities.streaming)
+        || (!request.tools.is_empty() && !capabilities.tools)
+        || (request.structured_output.is_some() && !capabilities.structured_output)
+        || (request.reasoning.is_some() && !capabilities.reasoning)
+    {
+        return Err(GatewayError::UnsupportedRequest);
+    }
     let target_operation = if source_operation.dialect() == target_dialect {
         source_operation
     } else {
@@ -74,6 +83,9 @@ fn validate_cross_request(
         ) | (
             GatewayOperation::OpenAiResponses,
             GatewayOperation::AnthropicMessages
+        ) | (
+            GatewayOperation::OpenAiResponses,
+            GatewayOperation::GeminiGenerateContent
         )
     ) || request.reasoning.is_some()
         || !options_are_empty(&request.provider_options)
@@ -142,6 +154,9 @@ fn validate_cross_request(
                     provider_options,
                     ..
                 } => {
+                    if target == GatewayOperation::GeminiGenerateContent {
+                        return Err(GatewayError::UnsupportedRequest);
+                    }
                     if !matches!(message.role, CanonicalRole::User | CanonicalRole::Tool)
                         || !content.is_string()
                     {
@@ -313,13 +328,19 @@ pub fn prepare_for_provider(
     input: ProviderRequestInput<'_>,
 ) -> Result<provider::PreparedProviderRequest, GatewayError> {
     let native = request.native();
-    let adapter = provider::for_dialect(profile.target_dialect);
+    let adapter = provider::for_kind(profile.kind)?;
     if translation.source_operation != native.operation
         || translation.target_dialect != profile.target_dialect
     {
         return Err(GatewayError::InvalidConfiguration);
     }
-    let plan = adapter.plan_for_target(translation.target_operation, native.operation, &input)?;
+    let plan = adapter.plan_for_target(
+        translation.target_operation,
+        native.operation,
+        provider_model_id,
+        request.stream,
+        &input,
+    )?;
     let body = if native.operation == plan.operation {
         adapter.encode_native(
             provider::NativePayload::new(&native.body, &native.document),
@@ -328,7 +349,11 @@ pub fn prepare_for_provider(
     } else {
         adapter.encode_canonical(request, plan.operation, provider_model_id)?
     };
-    adapter.prepare(plan, body, profile, input)
+    if request.stream {
+        adapter.stream(plan, body, profile, input)
+    } else {
+        adapter.send(plan, body, profile, input)
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +436,8 @@ mod tests {
             .plan_for_target(
                 GatewayOperation::OpenAiResponses,
                 GatewayOperation::AnthropicMessages,
+                "provider-model",
+                false,
                 &input,
             )
             .unwrap();
@@ -726,6 +753,7 @@ mod tests {
             GatewayOperation::AnthropicCountTokens => "/v1/messages/count_tokens?native=true",
             GatewayOperation::OpenAiResponses => "/v1/responses?native=true",
             GatewayOperation::OpenAiChatCompletions => "/v1/chat/completions?native=true",
+            GatewayOperation::GeminiGenerateContent => "/target-only",
         }
     }
 
@@ -739,6 +767,7 @@ mod tests {
                 GatewayOperation::OpenAiResponses,
                 GatewayOperation::OpenAiChatCompletions,
             ],
+            ProviderDialect::Gemini => vec![GatewayOperation::GeminiGenerateContent],
         };
         match dialect {
             ProviderDialect::Anthropic => ProviderProfile::api_key(
@@ -751,6 +780,15 @@ mod tests {
                 "secret",
             ),
             ProviderDialect::OpenAi => ProviderProfile::bearer(
+                "env://KEY",
+                "provider",
+                "https://example.test",
+                dialect,
+                operations,
+                vec![Uuid::nil()],
+                "secret",
+            ),
+            ProviderDialect::Gemini => ProviderProfile::api_key(
                 "env://KEY",
                 "provider",
                 "https://example.test",

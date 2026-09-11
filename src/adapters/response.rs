@@ -49,6 +49,7 @@ pub fn transcode_buffered_with_outcome(
     let response = match target_operation {
         GatewayOperation::AnthropicMessages => decode_anthropic(body)?,
         GatewayOperation::OpenAiResponses => decode_openai(body)?,
+        GatewayOperation::GeminiGenerateContent => decode_gemini(body)?,
         _ => return Err(GatewayError::UnsupportedRequest),
     };
     let incomplete = matches!(response.finish_reason.as_deref(), Some("max_tokens"));
@@ -65,6 +66,52 @@ pub fn transcode_buffered_with_outcome(
         .map(Bytes::from)
         .map_err(GatewayError::InvalidRequest)?;
     Ok(TranscodedBufferedResponse { body, incomplete })
+}
+
+fn decode_gemini(body: &[u8]) -> Result<CanonicalResponse, GatewayError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| GatewayError::UpstreamProtocol)?;
+    let response = super::gemini_wire::decode(value)?;
+    let candidate = response
+        .candidates
+        .first()
+        .ok_or(GatewayError::UpstreamProtocol)?;
+    let content = candidate
+        .content
+        .parts
+        .iter()
+        .map(|part| {
+            part.text
+                .as_ref()
+                .filter(|_| part.function_call.is_none())
+                .map(|text| CanonicalContent::Text {
+                    text: text.clone(),
+                    provider_options: ProviderOptions::new(),
+                })
+                .ok_or(GatewayError::UpstreamProtocol)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let finish_reason = match candidate.finish_reason.as_deref() {
+        Some("STOP") => Some("stop".to_owned()),
+        Some("MAX_TOKENS") => Some("max_tokens".to_owned()),
+        _ => return Err(GatewayError::UpstreamProtocol),
+    };
+    let usage = super::provider::usage_for(crate::model_registry::ProviderKind::Gemini, body)?
+        .ok_or(GatewayError::UpstreamProtocol)?;
+    Ok(CanonicalResponse {
+        response_id: None,
+        model: None,
+        messages: vec![CanonicalMessage {
+            role: CanonicalRole::Assistant,
+            name: None,
+            content,
+            provider_options: ProviderOptions::new(),
+        }],
+        usage,
+        finish_reason,
+        error: None,
+        provider_options: ProviderOptions::new(),
+        metadata: Default::default(),
+    })
 }
 
 fn decode_anthropic(body: &[u8]) -> Result<CanonicalResponse, GatewayError> {
@@ -323,12 +370,21 @@ fn encode_openai(
         "completed"
     };
     let incomplete_details = incomplete.then(|| json!({"reason": "max_output_tokens"}));
+    let input_tokens = response
+        .usage
+        .input_tokens
+        .saturating_add(response.usage.cached_input_tokens)
+        .saturating_add(response.usage.cache_write_input_tokens);
+    let output_tokens = response
+        .usage
+        .output_tokens
+        .saturating_add(response.usage.reasoning_tokens);
     let usage = json!({
-        "input_tokens": response.usage.input_tokens,
+        "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": response.usage.cached_input_tokens},
-        "output_tokens": response.usage.output_tokens,
+        "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": response.usage.reasoning_tokens},
-        "total_tokens": response.usage.input_tokens.saturating_add(response.usage.output_tokens)
+        "total_tokens": input_tokens.saturating_add(output_tokens)
     });
     let mut envelope = openai_response_envelope(
         source_request,
@@ -630,11 +686,37 @@ mod tests {
         assert_eq!(value["model"], "public-model");
         assert_eq!(value["output"][0]["content"][0]["text"], "hello");
         assert_eq!(value["output"][1]["call_id"], "call_1");
-        assert_eq!(value["usage"]["input_tokens"], 7);
+        assert_eq!(value["usage"]["input_tokens"], 9);
         assert!(
             !String::from_utf8(encoded.to_vec())
                 .unwrap()
                 .contains("msg_target_secret")
+        );
+    }
+
+    #[test]
+    fn gemini_buffered_response_becomes_responses_with_usage() {
+        let body = br#"{
+            "candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":7,"cachedContentTokenCount":2,"candidatesTokenCount":3,"thoughtsTokenCount":1}
+        }"#;
+        let encoded = transcode_buffered(
+            GatewayOperation::GeminiGenerateContent,
+            GatewayOperation::OpenAiResponses,
+            body,
+            "resp_apg_public",
+            "public-model",
+            &source_request(GatewayOperation::OpenAiResponses),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["output"][0]["content"][0]["text"], "hello");
+        assert_eq!(value["usage"]["input_tokens"], 7);
+        assert_eq!(value["usage"]["input_tokens_details"]["cached_tokens"], 2);
+        assert_eq!(value["usage"]["output_tokens"], 4);
+        assert_eq!(
+            value["usage"]["output_tokens_details"]["reasoning_tokens"],
+            1
         );
     }
 

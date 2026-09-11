@@ -10,7 +10,29 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
+use crate::model_registry::{GatewayOperation, ProviderKind};
 use crate::scheduler::SchedulerConfig;
+
+#[derive(Clone)]
+pub struct ExtraProviderProfile {
+    pub kind: ProviderKind,
+    pub credential_ref: String,
+    pub provider_key: String,
+    pub base_url: String,
+    pub operations: Vec<GatewayOperation>,
+    pub secret: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExtraProviderProfile {
+    kind: String,
+    credential_ref: String,
+    provider_key: String,
+    base_url: String,
+    operations: Vec<String>,
+    secret_env: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -25,6 +47,7 @@ pub struct Config {
     pub anthropic_api_key: String,
     pub anthropic_provider: String,
     pub anthropic_request_max_bytes: usize,
+    pub extra_provider_profiles: Vec<ExtraProviderProfile>,
     /// Maximum bytes in one decoded SSE event and in the held terminal tail.
     pub stream_event_max_bytes: usize,
     pub bootstrap_client_key: Option<String>,
@@ -102,6 +125,8 @@ pub enum ConfigError {
     InvalidPolicyCacheTtl(String),
     #[error("OPENAI_PROVIDER and ANTHROPIC_PROVIDER must not be empty")]
     InvalidProvider,
+    #[error("invalid EXTRA_PROVIDER_PROFILES_JSON: {0}")]
+    InvalidExtraProviderProfiles(String),
     #[error("invalid ledger spool capacity: {0}")]
     InvalidLedgerSpoolCapacity(String),
     #[error("invalid ANTHROPIC_REQUEST_MAX_BYTES: {0}")]
@@ -165,6 +190,9 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let extra_provider_profiles = extra_provider_profiles(
+            env::var("EXTRA_PROVIDER_PROFILES_JSON").unwrap_or_else(|_| "[]".to_owned()),
+        )?;
         let stream_event_max_bytes = env::var("STREAM_EVENT_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
             .parse()
@@ -363,6 +391,7 @@ impl Config {
             anthropic_api_key,
             anthropic_provider,
             anthropic_request_max_bytes,
+            extra_provider_profiles,
             stream_event_max_bytes,
             bootstrap_client_key,
             allowed_models,
@@ -394,6 +423,85 @@ impl Config {
     pub fn data_database_max_connections(&self) -> u32 {
         self.database_max_connections - self.admin_database_max_connections
     }
+}
+
+fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, ConfigError> {
+    let raw = serde_json::from_str::<Vec<RawExtraProviderProfile>>(&value)
+        .map_err(|error| ConfigError::InvalidExtraProviderProfiles(error.to_string()))?;
+    raw.into_iter()
+        .map(|profile| {
+            let kind = match profile.kind.as_str() {
+                "gemini" => ProviderKind::Gemini,
+                "xai" => ProviderKind::Xai,
+                "vllm" => ProviderKind::Vllm,
+                "ollama" => ProviderKind::Ollama,
+                _ => {
+                    return Err(ConfigError::InvalidExtraProviderProfiles(format!(
+                        "unsupported kind {}",
+                        profile.kind
+                    )));
+                }
+            };
+            let operations = profile
+                .operations
+                .iter()
+                .map(|operation| {
+                    GatewayOperation::parse(operation).ok_or_else(|| {
+                        ConfigError::InvalidExtraProviderProfiles(format!(
+                            "unsupported operation {operation}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let valid_operations = !operations.is_empty()
+                && operations.iter().all(|operation| match kind {
+                    ProviderKind::Gemini => *operation == GatewayOperation::GeminiGenerateContent,
+                    ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => matches!(
+                        operation,
+                        GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions
+                    ),
+                    ProviderKind::Anthropic | ProviderKind::OpenAi => false,
+                });
+            if !valid_operations
+                || profile.credential_ref.trim().is_empty()
+                || profile.provider_key.trim().is_empty()
+                || profile.base_url.trim().is_empty()
+            {
+                return Err(ConfigError::InvalidExtraProviderProfiles(
+                    "profile fields or operations are invalid".to_owned(),
+                ));
+            }
+            let secret = profile
+                .secret_env
+                .as_deref()
+                .map(|name| {
+                    if name.trim().is_empty() {
+                        return Err(ConfigError::InvalidExtraProviderProfiles(
+                            "secret_env must not be empty".to_owned(),
+                        ));
+                    }
+                    env::var(name).map_err(|_| {
+                        ConfigError::InvalidExtraProviderProfiles(format!(
+                            "missing secret environment variable {name}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            if matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) && secret.is_none() {
+                return Err(ConfigError::InvalidExtraProviderProfiles(
+                    "gemini and xai require secret_env".to_owned(),
+                ));
+            }
+            Ok(ExtraProviderProfile {
+                kind,
+                credential_ref: profile.credential_ref,
+                provider_key: profile.provider_key,
+                base_url: profile.base_url.trim_end_matches('/').to_owned(),
+                operations,
+                secret,
+            })
+        })
+        .collect()
 }
 
 fn provider_tenant_ids(value: String) -> Result<Vec<Uuid>, ConfigError> {
@@ -679,5 +787,25 @@ mod tests {
         assert!(valid_origin("http://127.0.0.1:5173", "dev"));
         assert!(valid_origin("http://[::1]:5173", "dev"));
         assert!(!valid_origin("http://192.168.1.10:5173", "dev"));
+    }
+
+    #[test]
+    fn extra_provider_profiles_are_typed_and_local_auth_is_optional() {
+        let profiles = extra_provider_profiles(
+            r#"[{"kind":"vllm","credential_ref":"none://vllm","provider_key":"local-vllm","base_url":"http://127.0.0.1:8000/","operations":["openai_responses"],"secret_env":null}]"#.to_owned(),
+        )
+        .unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].kind, ProviderKind::Vllm);
+        assert_eq!(profiles[0].base_url, "http://127.0.0.1:8000");
+        assert!(profiles[0].secret.is_none());
+        assert!(extra_provider_profiles(
+            r#"[{"kind":"unknown","credential_ref":"x","provider_key":"x","base_url":"http://localhost","operations":["openai_responses"]}]"#.to_owned(),
+        )
+        .is_err());
+        assert!(extra_provider_profiles(
+            r#"[{"kind":"gemini","credential_ref":"x","provider_key":"x","base_url":"https://example.test","operations":["openai_responses"]}]"#.to_owned(),
+        )
+        .is_err());
     }
 }

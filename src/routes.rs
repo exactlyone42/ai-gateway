@@ -146,6 +146,7 @@ mod tests {
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
             bootstrap_client_key: Some("client-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
@@ -579,8 +580,8 @@ mod tests {
             row.get::<String, _>("provider_response_id"),
             "provider-response"
         );
-        assert_eq!(row.get::<i64, _>("input_tokens"), 10);
-        assert_eq!(row.get::<i64, _>("output_tokens"), 3);
+        assert_eq!(row.get::<i64, _>("input_tokens"), 4);
+        assert_eq!(row.get::<i64, _>("output_tokens"), 2);
         assert_eq!(row.get::<i64, _>("cached_input_tokens"), 4);
         assert_eq!(row.get::<i64, _>("cache_write_input_tokens"), 2);
         assert_eq!(row.get::<i64, _>("reasoning_tokens"), 1);
@@ -2755,10 +2756,70 @@ mod tests {
             "provider-request-responses"
         );
         assert_eq!(row.get::<String, _>("provider_response_id"), "resp_db");
-        assert_eq!(row.get::<i64, _>("input_tokens"), 12);
-        assert_eq!(row.get::<i64, _>("output_tokens"), 5);
+        assert_eq!(row.get::<i64, _>("input_tokens"), 8);
+        assert_eq!(row.get::<i64, _>("output_tokens"), 3);
         assert_eq!(row.get::<i64, _>("cached_input_tokens"), 4);
         assert_eq!(row.get::<i64, _>("reasoning_tokens"), 2);
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn malformed_required_usage_is_durably_finalized_as_failed(pool: PgPool) {
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                (
+                    [("content-type", "application/json")],
+                    r#"{"id":"resp_bad_usage","status":"completed","output":[],"usage":"invalid"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("x-request-id", "bad-usage-ledger-id")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        state.ledger.flush_startup().await.unwrap();
+        let row = sqlx::query(
+            r#"
+            SELECT gr.status, pa.status AS attempt_status, pa.error_type
+            FROM gateway_requests gr
+            JOIN provider_attempts pa
+              ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
+            WHERE gr.request_id = 'bad-usage-ledger-id'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(row.get::<String, _>("attempt_status"), "failed");
+        assert_eq!(
+            row.get::<String, _>("error_type"),
+            "upstream_protocol_error"
+        );
 
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();

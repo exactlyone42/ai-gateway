@@ -173,3 +173,49 @@ non-Claude routing. Anthropic's Claude Code gateway policy explicitly excludes
 that use. Protocol shapes were checked against the Anthropic streaming,
 structured output, stop-reason, and strict tool-use documentation and the
 OpenAI Responses streaming reference on 2026-09-11.
+
+## Gemini, xAI, vLLM, and Ollama
+
+These providers use the same required adapter contract: typed capabilities, an executable
+one-shot health probe, buffered send, stream send, usage mapping, and integer cost estimation.
+`EXTRA_PROVIDER_PROFILES_JSON` selects the provider kind explicitly; the gateway never guesses
+vLLM versus Ollama from a URL. Each entry names a `secret_env`; the JSON must not contain a secret.
+Gemini and xAI require one. Local profiles may omit it, while a configured local secret is sent as
+an optional Bearer token. Client authorization headers are always removed.
+
+| Kind | Request and stream endpoint | Health endpoint | Usage availability |
+| --- | --- | --- | --- |
+| Gemini | `/v1beta/models/{model}:generateContent`; stream uses `streamGenerateContent?alt=sse` | `/v1beta/models/{model}` | required |
+| xAI | OpenAI-compatible `/v1/responses` or `/v1/chat/completions` | `/v1/models` | required |
+| vLLM | OpenAI-compatible Responses or Chat | `/health` | optional, model/server dependent |
+| Ollama | OpenAI-compatible Responses or Chat | `/api/version` | optional, version/model dependent |
+
+Gemini uses `x-goog-api-key`; xAI uses Bearer. Gemini text, JSON schema output, terminal usage,
+and text SSE are translated. Tool and reasoning requests are rejected before the provider call
+because the current response decoder cannot preserve Gemini `functionCall` or thought content.
+Unsupported part types, malformed events, unknown finish reasons, missing terminal usage, and
+events after terminal completion fail closed.
+
+Token fields are semantic mappings, not a common unit and not values that may be directly added:
+
+| Provider field | Canonical field | Relationship |
+| --- | --- | --- |
+| Gemini `promptTokenCount - cachedContentTokenCount` | `input_tokens` | uncached prompt tokens |
+| Gemini `cachedContentTokenCount` | `cached_input_tokens` | subset/detail of prompt tokens |
+| Gemini `candidatesTokenCount` | `output_tokens` | generated candidate tokens |
+| Gemini `thoughtsTokenCount` | `reasoning_tokens` | separate thinking detail reported by Gemini |
+| xAI/OpenAI-compatible input total minus cached/write details | `input_tokens` | uncached input tokens |
+| xAI/OpenAI-compatible cached-token detail | `cached_input_tokens` | subset/detail, not extra input |
+| xAI/OpenAI-compatible output total minus reasoning detail | `output_tokens` | non-reasoning output tokens |
+| xAI/OpenAI-compatible reasoning detail | `reasoning_tokens` | output detail, not extra output |
+
+Local providers may omit usage. The ledger records that absence as no provider usage record; it
+does not turn missing usage into an authoritative zero. Pricing still comes from the selected
+model's versioned `cost_metadata`; provider token counts are never converted across tokenizers.
+
+Sources, verified 2026-09-11: [Gemini generateContent and usage metadata](https://ai.google.dev/api/generate-content),
+[xAI OpenAI-compatible inference](https://docs.x.ai/developers/rest-api-reference/inference),
+[xAI usage and pricing fields](https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing),
+[vLLM OpenAI-compatible server](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/),
+[vLLM stream usage](https://docs.vllm.ai/en/latest/features/per_request_metrics/), and
+[Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility).

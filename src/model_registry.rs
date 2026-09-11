@@ -22,12 +22,52 @@ pub enum GatewayOperation {
     AnthropicCountTokens,
     OpenAiResponses,
     OpenAiChatCompletions,
+    GeminiGenerateContent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderDialect {
     Anthropic,
     OpenAi,
+    Gemini,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProviderKind {
+    Anthropic,
+    OpenAi,
+    Gemini,
+    Xai,
+    Vllm,
+    Ollama,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Gemini => "gemini",
+            Self::Xai => "xai",
+            Self::Vllm => "vllm",
+            Self::Ollama => "ollama",
+        }
+    }
+
+    pub fn database_type(self) -> &'static str {
+        match self {
+            Self::Vllm | Self::Ollama => "local",
+            _ => self.as_str(),
+        }
+    }
+
+    pub fn dialect(self) -> ProviderDialect {
+        match self {
+            Self::Anthropic => ProviderDialect::Anthropic,
+            Self::Gemini => ProviderDialect::Gemini,
+            Self::OpenAi | Self::Xai | Self::Vllm | Self::Ollama => ProviderDialect::OpenAi,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,14 +81,16 @@ impl GatewayOperation {
         match self {
             Self::AnthropicMessages | Self::AnthropicCountTokens => ProviderDialect::Anthropic,
             Self::OpenAiResponses | Self::OpenAiChatCompletions => ProviderDialect::OpenAi,
+            Self::GeminiGenerateContent => ProviderDialect::Gemini,
         }
     }
 
     pub fn canonical(self) -> CanonicalOperation {
         match self {
-            Self::AnthropicMessages | Self::OpenAiResponses | Self::OpenAiChatCompletions => {
-                CanonicalOperation::Generate
-            }
+            Self::AnthropicMessages
+            | Self::OpenAiResponses
+            | Self::OpenAiChatCompletions
+            | Self::GeminiGenerateContent => CanonicalOperation::Generate,
             Self::AnthropicCountTokens => CanonicalOperation::CountTokens,
         }
     }
@@ -59,6 +101,7 @@ impl GatewayOperation {
             Self::AnthropicCountTokens => "anthropic_count_tokens",
             Self::OpenAiResponses => "openai_responses",
             Self::OpenAiChatCompletions => "openai_chat_completions",
+            Self::GeminiGenerateContent => "gemini_generate_content",
         }
     }
 
@@ -68,6 +111,7 @@ impl GatewayOperation {
             "anthropic_count_tokens" => Some(Self::AnthropicCountTokens),
             "openai_responses" => Some(Self::OpenAiResponses),
             "openai_chat_completions" => Some(Self::OpenAiChatCompletions),
+            "gemini_generate_content" => Some(Self::GeminiGenerateContent),
             _ => None,
         }
     }
@@ -168,6 +212,7 @@ impl CapabilityRequirements {
             }
             GatewayOperation::OpenAiResponses => request.get("input"),
             GatewayOperation::OpenAiChatCompletions => request.get("messages"),
+            GatewayOperation::GeminiGenerateContent => None,
         };
         let tools = request
             .get("tools")
@@ -296,6 +341,7 @@ pub struct ProviderProfile {
     pub base_url: String,
     pub operations: Vec<GatewayOperation>,
     pub target_dialect: ProviderDialect,
+    pub kind: ProviderKind,
     allowed_tenants: Arc<HashSet<Uuid>>,
     authorization: ProviderAuthorization,
 }
@@ -304,6 +350,7 @@ pub struct ProviderProfile {
 enum ProviderAuthorization {
     Bearer(Arc<str>),
     ApiKey(Arc<str>),
+    None,
 }
 
 impl ProviderProfile {
@@ -316,12 +363,37 @@ impl ProviderProfile {
         allowed_tenants: Vec<Uuid>,
         secret: impl Into<Arc<str>>,
     ) -> Self {
+        Self::bearer_for(
+            match target_dialect {
+                ProviderDialect::Anthropic => ProviderKind::Anthropic,
+                ProviderDialect::OpenAi => ProviderKind::OpenAi,
+                ProviderDialect::Gemini => ProviderKind::Gemini,
+            },
+            credential_ref,
+            provider_key,
+            base_url,
+            operations,
+            allowed_tenants,
+            secret,
+        )
+    }
+
+    pub fn bearer_for(
+        kind: ProviderKind,
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+        secret: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
             operations,
-            target_dialect,
+            target_dialect: kind.dialect(),
+            kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::Bearer(secret.into()),
         }
@@ -336,27 +408,72 @@ impl ProviderProfile {
         allowed_tenants: Vec<Uuid>,
         secret: impl Into<Arc<str>>,
     ) -> Self {
+        Self::api_key_for(
+            match target_dialect {
+                ProviderDialect::Anthropic => ProviderKind::Anthropic,
+                ProviderDialect::OpenAi => ProviderKind::OpenAi,
+                ProviderDialect::Gemini => ProviderKind::Gemini,
+            },
+            credential_ref,
+            provider_key,
+            base_url,
+            operations,
+            allowed_tenants,
+            secret,
+        )
+    }
+
+    pub fn api_key_for(
+        kind: ProviderKind,
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+        secret: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
             operations,
-            target_dialect,
+            target_dialect: kind.dialect(),
+            kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::ApiKey(secret.into()),
+        }
+    }
+
+    pub fn unauthenticated_for(
+        kind: ProviderKind,
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: kind.dialect(),
+            kind,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: ProviderAuthorization::None,
         }
     }
 
     pub fn bearer_secret(&self) -> Option<&str> {
         match &self.authorization {
             ProviderAuthorization::Bearer(secret) => Some(secret),
-            ProviderAuthorization::ApiKey(_) => None,
+            ProviderAuthorization::ApiKey(_) | ProviderAuthorization::None => None,
         }
     }
 
     pub fn api_key_secret(&self) -> Option<&str> {
         match &self.authorization {
-            ProviderAuthorization::Bearer(_) => None,
+            ProviderAuthorization::Bearer(_) | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
         }
     }
@@ -376,6 +493,7 @@ impl ProviderProfiles {
                 || profile.base_url.is_empty()
                 || profile.operations.is_empty()
                 || profile.allowed_tenants.is_empty()
+                || profile.target_dialect != profile.kind.dialect()
                 || by_ref
                     .insert(profile.credential_ref.clone(), profile)
                     .is_some()
@@ -393,12 +511,14 @@ impl ProviderProfiles {
         tenant_id: Uuid,
         credential_ref: &str,
         provider_key: &str,
+        provider_type: &str,
         base_url: &str,
     ) -> Result<ProviderProfile, RegistryError> {
         self.by_ref
             .get(credential_ref)
             .filter(|profile| profile.allowed_tenants.contains(&tenant_id))
             .filter(|profile| profile.provider_key == provider_key)
+            .filter(|profile| profile.kind.database_type() == provider_type)
             .filter(|profile| profile.base_url == canonical_base_url(base_url.to_owned()))
             .cloned()
             .ok_or(RegistryError::UntrustedProvider)
@@ -409,12 +529,19 @@ impl ProviderProfiles {
         tenant_id: Uuid,
         credential_ref: &str,
         provider_key: &str,
+        provider_type: &str,
         base_url: &str,
         operations: &[String],
     ) -> bool {
         !operations.is_empty()
             && self
-                .resolve(tenant_id, credential_ref, provider_key, base_url)
+                .resolve(
+                    tenant_id,
+                    credential_ref,
+                    provider_key,
+                    provider_type,
+                    base_url,
+                )
                 .is_ok_and(|profile| {
                     operations.iter().all(|operation| {
                         GatewayOperation::parse(operation)
@@ -438,6 +565,8 @@ pub struct ModelMetadata {
     pub supports_images: bool,
     pub supports_structured_output: bool,
     pub provider_key: String,
+    #[serde(skip)]
+    provider_type: String,
     #[serde(skip)]
     base_url: String,
     #[serde(skip)]
@@ -475,6 +604,7 @@ struct SelectionRow {
     provider_id: Uuid,
     provider_version: i64,
     provider_key: String,
+    provider_type: String,
     base_url: String,
     credential_ref: String,
     supports_streaming: bool,
@@ -530,6 +660,7 @@ impl ModelRegistry {
                     supports_images: false,
                     supports_structured_output: false,
                     provider_key: "gateway".to_owned(),
+                    provider_type: String::new(),
                     base_url: String::new(),
                     credential_ref: String::new(),
                 })
@@ -545,7 +676,7 @@ impl ModelRegistry {
                    m.supports_streaming,
                    m.supports_tools, m.supports_reasoning, m.supports_images,
                    m.supports_structured_output, p.provider_key, p.base_url,
-                   p.credential_ref
+                   p.credential_ref, p.provider_type
             FROM models m
             JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
             WHERE m.tenant_id = $1 AND m.lifecycle_state = 'active'
@@ -564,6 +695,7 @@ impl ModelRegistry {
                             tenant_id,
                             &model.credential_ref,
                             &model.provider_key,
+                            &model.provider_type,
                             &model.base_url,
                         )
                         .is_ok_and(|profile| profile.operations.contains(&operation))
@@ -675,6 +807,7 @@ impl ModelRegistry {
             tenant_id,
             &row.credential_ref,
             &row.provider_key,
+            &row.provider_type,
             &row.base_url,
         )?;
         let model_supported_operations = parse_operations(&row.model_supported_operations)?;
@@ -856,7 +989,7 @@ const SELECTION_SQL: &str = r#"
           AND m.lifecycle_state = 'active'
     )
     SELECT c.*, p.version AS provider_version, p.provider_key,
-           p.base_url, p.credential_ref,
+           p.base_url, p.credential_ref, p.provider_type,
            p.supported_operations AS provider_supported_operations
     FROM candidate c
     JOIN providers p ON (p.tenant_id, p.id) = ($1, c.provider_id)
@@ -873,7 +1006,7 @@ const QUALITY_CANDIDATES_SQL: &str = r#"
            m.supports_images, m.supports_structured_output,
            m.max_output_tokens, m.cost_metadata,
            p.version AS provider_version, p.provider_key,
-           p.base_url, p.credential_ref,
+           p.base_url, p.credential_ref, p.provider_type,
            m.supported_operations AS model_supported_operations,
            p.supported_operations AS provider_supported_operations
     FROM model_aliases a
@@ -949,6 +1082,7 @@ mod tests {
             tenant_id,
             "env://PROVIDER_KEY",
             "provider-one",
+            "openai",
             "https://provider.example",
             &["openai_responses".to_owned()],
         ));
@@ -956,6 +1090,7 @@ mod tests {
             tenant_id,
             "env://PROVIDER_KEY",
             "provider-one",
+            "openai",
             "https://attacker.example",
             &["openai_responses".to_owned()],
         ));
@@ -963,6 +1098,7 @@ mod tests {
             Uuid::new_v4(),
             "env://PROVIDER_KEY",
             "provider-one",
+            "openai",
             "https://provider.example",
             &["openai_responses".to_owned()],
         ));
@@ -970,6 +1106,7 @@ mod tests {
             tenant_id,
             "env://PROVIDER_KEY",
             "provider-one",
+            "openai",
             "https://provider.example",
             &["anthropic_messages".to_owned()],
         ));

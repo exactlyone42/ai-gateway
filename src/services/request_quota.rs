@@ -197,6 +197,7 @@ fn requested_output_tokens(operation: GatewayOperation, body: &Value) -> Option<
             .get("max_completion_tokens")
             .or_else(|| body.get("max_tokens"))
             .and_then(Value::as_u64),
+        GatewayOperation::GeminiGenerateContent => None,
     }
 }
 
