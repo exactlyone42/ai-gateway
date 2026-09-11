@@ -31,6 +31,8 @@ pub enum GatewayError {
     QueueExpired,
     #[error("scheduler is shutting down")]
     SchedulerClosed,
+    #[error("no provider is currently available")]
+    ProviderUnavailable,
     #[error("model cannot satisfy required capability: {0}")]
     CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
@@ -89,6 +91,7 @@ impl GatewayError {
             Self::QueueFull => "scheduler_queue_full",
             Self::QueueExpired => "scheduler_queue_expired",
             Self::SchedulerClosed => "scheduler_closed",
+            Self::ProviderUnavailable => "provider_unavailable",
             Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
@@ -121,6 +124,7 @@ impl GatewayError {
             | Self::QueueFull
             | Self::QueueExpired
             | Self::SchedulerClosed
+            | Self::ProviderUnavailable
             | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
@@ -155,6 +159,7 @@ impl IntoResponse for GatewayError {
             Self::QueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::QueueExpired => StatusCode::REQUEST_TIMEOUT,
             Self::SchedulerClosed => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,

@@ -10,6 +10,7 @@ use crate::{
     model_registry::{CapabilityRequirements, GatewayOperation},
     policy::value_text,
     quota::{QuotaAdmission, QuotaEstimate, QuotaOutcome, QuotaRejection},
+    routing::HalfOpenClaim,
     services::request_policy::PreparedPolicy,
     state::AppState,
 };
@@ -17,6 +18,8 @@ use crate::{
 pub struct PreparedQuota {
     pub admission: QuotaAdmission,
     pub translation: ValidatedTranslationPlan,
+    pub routing_reason: &'static str,
+    pub routing_claim: Option<HalfOpenClaim>,
 }
 
 pub async fn admit(
@@ -57,6 +60,23 @@ pub async fn admit(
             GatewayError::ModelForbidden
         });
     }
+    let policy_reference = candidates
+        .first()
+        .cloned()
+        .ok_or(GatewayError::ModelForbidden)?;
+    candidates.retain(|candidate| prepared.policy.allows_model(&candidate.public_model_id));
+    if candidates.is_empty() {
+        super::request_policy::enforce_selected_model(
+            state,
+            prepared,
+            &policy_reference.public_model_id,
+            policy_reference.ledger_snapshot(),
+        )
+        .await?;
+        return Err(GatewayError::ModelForbidden);
+    }
+    let mut ranked = state.routing.rank(candidates)?;
+    let candidates = ranked.candidates.clone();
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
     super::request_policy::enforce_selected_model(
         state,
@@ -65,7 +85,6 @@ pub async fn admit(
         first.ledger_snapshot(),
     )
     .await?;
-    candidates.retain(|candidate| prepared.policy.allows_model(&candidate.public_model_id));
     let output_limit = requested_output_tokens(operation, body);
     let output_multiplier = output_multiplier(operation, body)?;
     let billable = operation != GatewayOperation::AnthropicCountTokens;
@@ -81,7 +100,11 @@ pub async fn admit(
             .ok_or(GatewayError::ModelForbidden)?;
         selection.record_selected();
         let translation = validate_for_provider(request, &selection)?;
+        let routing_reason = ranked.reason_for(&selection, state.routing.quota_aware());
+        let routing_claim = ranked.take_claim_for(&selection);
         return Ok(PreparedQuota {
+            routing_reason,
+            routing_claim,
             admission: QuotaAdmission {
                 selection,
                 estimated_usage: TokenUsage {
@@ -97,7 +120,7 @@ pub async fn admit(
     }
     match state
         .quotas
-        .admit(
+        .admit_with_soft_routing(
             gateway_request_id,
             &prepared.rejection.principal,
             candidates,
@@ -111,13 +134,19 @@ pub async fn admit(
                 unsupported_cost_features: required.tools || body.get("service_tier").is_some(),
             },
             Utc::now(),
+            state.routing.quota_aware(),
         )
         .await?
     {
         QuotaOutcome::Allowed(admission) => {
             admission.selection.record_selected();
             let translation = validate_for_provider(request, &admission.selection)?;
+            let routing_reason =
+                ranked.reason_for(&admission.selection, state.routing.quota_aware());
+            let routing_claim = ranked.take_claim_for(&admission.selection);
             Ok(PreparedQuota {
+                routing_reason,
+                routing_claim,
                 admission: *admission,
                 translation,
             })

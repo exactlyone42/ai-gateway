@@ -162,7 +162,8 @@ export function RequestsPage() {
           ? <pre className="decision-json">{JSON.stringify(data.request.quota_decision, null, 2)}</pre>
           : <Unavailable reason="No quota applied to this request." />}
         <h3>Provider attempts</h3><DataTable rows={data.attempts} columns={[{ key: 'attempt_number', label: '#' }, { key: 'provider', label: 'Provider' }, { key: 'model', label: 'Model' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />
-        <Unavailable reason={data.retry_fallback_history?.unavailable_reason} /><Unavailable reason={data.trace_spans?.unavailable_reason} /></>}</QueryBody>
+        <h3>Routing history</h3><DataTable rows={data.retry_fallback_history?.events ?? []} columns={[{ key: 'attempt_number', label: '#' }, { key: 'attempt_kind', label: 'Kind' }, { key: 'routing_reason', label: 'Reason' }, { key: 'provider', label: 'Provider' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />
+        <Unavailable reason={data.trace_spans?.unavailable_reason} /></>}</QueryBody>
     </aside></div>}
   </Page>
 }

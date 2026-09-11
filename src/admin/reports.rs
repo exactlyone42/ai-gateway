@@ -219,6 +219,7 @@ impl AdminService {
                 'status', gr.status, 'operation', gr.operation,
                 'requested_model', gr.requested_model, 'selected_model', gr.selected_model,
                 'selected_provider', gr.selected_provider, 'workload_class', gr.workload_class,
+                'routing_reason', COALESCE(gr.policy_decision->'routing'->>'reason', 'registry'),
                 'created_at', gr.created_at, 'completed_at', gr.completed_at,
                 'total_latency_ms', extract(epoch FROM gr.total_latency) * 1000,
                 'principal', jsonb_build_object(
@@ -288,8 +289,21 @@ impl AdminService {
                     to_jsonb(ru) - ARRAY['tenant_id', 'preference']::text[] ORDER BY ru.recorded_at, ru.id)
                     FROM ranked_usage ru WHERE ru.preference = 1), '[]'::jsonb),
                 'retry_fallback_history', jsonb_build_object(
-                    'available', false,
-                    'unavailable_reason', 'retry and fallback routing are not implemented until W17'
+                    'available', true,
+                    'same_request_retry', false,
+                    'policy', 'one logical request makes one provider call',
+                    'events', COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                        'attempt_number', pa.attempt_number,
+                        'attempt_kind', 'initial',
+                        'provider', pa.provider,
+                        'model', pa.model,
+                        'status', pa.status,
+                        'error_type', pa.error_type,
+                        'routing_reason', COALESCE(
+                            gr.policy_decision->'routing'->>'reason', 'registry')
+                    ) ORDER BY pa.attempt_number)
+                    FROM provider_attempts pa
+                    WHERE pa.tenant_id = $1 AND pa.gateway_request_id = $2), '[]'::jsonb)
                 ),
                 'trace_spans', jsonb_build_object(
                     'available', false,
@@ -1007,6 +1021,14 @@ mod tests {
         assert_eq!(detail["attempts"].as_array().unwrap().len(), 1);
         assert_eq!(detail["usage"].as_array().unwrap().len(), 1);
         assert_eq!(detail["usage"][0]["input_tokens"], 10);
+        assert_eq!(
+            detail["retry_fallback_history"]["same_request_retry"],
+            false
+        );
+        assert_eq!(
+            detail["retry_fallback_history"]["events"][0]["attempt_kind"],
+            "initial"
+        );
         assert!(matches!(
             service.request_report(&context, Uuid::from_u128(103)).await,
             Err(AdminError::NotFound)

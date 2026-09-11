@@ -44,7 +44,7 @@ tenant-scoped runtime active/queued state plus durable P50/P95, rejected and exp
 | 10 | Which credential was involved? | Credential UUID/prefix and request principal |
 | 11 | Which model and provider handled a request? | Requests detail and Catalog |
 | 12 | What provider attempts are persisted? | Request detail, ordered by attempt number |
-| 13 | Can retry/fallback history be inspected? | Explicit unavailable state until W17 |
+| 13 | Can retry/fallback history be inspected? | Routing History shows the single initial attempt and durable pre-call reason; same-request retry is explicitly disabled |
 | 14 | What policy, quota and scheduler state is active? | Active policy and quota revisions; current quota windows and UTC resets; tenant-scoped scheduler runtime |
 | 15 | Are gateway, database and telemetry configured? | System Health component status |
 | 16 | Who changed control-plane state? | Tenant-scoped, redacted Audit rows |

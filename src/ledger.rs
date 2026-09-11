@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::{
     identity::PrincipalContext,
     quota::{cost_for_usage, total_tokens},
+    routing::RoutingLease,
     scheduler::SchedulerLease,
 };
 
@@ -83,6 +84,22 @@ pub struct RequestPolicySnapshot {
     pub deadline_at: Option<DateTime<Utc>>,
     pub max_queue_time_ms: Option<i64>,
     pub decision: Value,
+}
+
+impl RequestPolicySnapshot {
+    pub fn with_routing(mut self, reason: &str) -> Self {
+        if let Value::Object(decision) = &mut self.decision {
+            decision.insert(
+                "routing".to_owned(),
+                serde_json::json!({
+                    "attempt_kind": "initial",
+                    "reason": bounded_text(reason.to_owned()),
+                    "same_request_retry": false,
+                }),
+            );
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -157,6 +174,7 @@ pub struct Reservation {
     id: Option<Uuid>,
     envelope: RequestEnvelope,
     _scheduler_lease: Option<SchedulerLease>,
+    routing_lease: Option<RoutingLease>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -358,6 +376,7 @@ impl Ledger {
             id: Some(id),
             envelope,
             _scheduler_lease: None,
+            routing_lease: None,
         })
     }
 
@@ -495,6 +514,10 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn attach_routing_lease(&mut self, lease: RoutingLease) {
+        self.routing_lease = Some(lease);
+    }
+
     pub fn attach_scheduler_lease(&mut self, lease: SchedulerLease) {
         self._scheduler_lease = Some(lease);
     }
@@ -601,6 +624,17 @@ impl Reservation {
     }
 
     pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
+        if let Some(lease) = self.routing_lease.as_mut() {
+            let error_type = completion
+                .attempts
+                .last()
+                .and_then(|attempt| attempt.error_type.as_deref());
+            lease.conclude(
+                completion.completed_at,
+                completion.status == "completed",
+                error_type,
+            );
+        }
         // Keep ownership while the final envelope becomes the durable
         // checkpoint. Cancellation during that write still publishes a
         // cancellation record; after it returns, recovery can always promote
@@ -1480,6 +1514,40 @@ mod tests {
             spool.reserve(second.request.id, &second),
             Err(LedgerError::SpoolFull)
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn initial_reservation_durably_contains_the_routing_reason() {
+        let directory = test_directory("initial-routing");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut start = request_start("routing-before-provider");
+        start.policy = Some(
+            RequestPolicySnapshot {
+                deadline_at: None,
+                max_queue_time_ms: None,
+                decision: serde_json::json!({"allowed": true}),
+            }
+            .with_routing("health"),
+        );
+        let envelope = RequestEnvelope::started(start);
+        spool.reserve(envelope.request.id, &envelope).unwrap();
+
+        let bytes = fs::read(spool.path(envelope.request.id, "reserved")).unwrap();
+        let end = bytes
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .map_or(0, |index| index + 1);
+        let stored: RequestEnvelope = serde_json::from_slice(&bytes[..end]).unwrap();
+        assert_eq!(
+            stored.request.policy_decision.unwrap()["routing"]["reason"],
+            "health"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

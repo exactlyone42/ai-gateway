@@ -242,6 +242,7 @@ impl QuotaEngine {
     }
 
     #[tracing::instrument(name = "quota.admit", skip_all)]
+    #[cfg(test)]
     pub async fn admit(
         &self,
         gateway_request_id: Uuid,
@@ -249,6 +250,26 @@ impl QuotaEngine {
         candidates: Vec<ModelSelection>,
         estimate: QuotaEstimate,
         at: DateTime<Utc>,
+    ) -> Result<QuotaOutcome, QuotaError> {
+        self.admit_with_soft_routing(
+            gateway_request_id,
+            principal,
+            candidates,
+            estimate,
+            at,
+            true,
+        )
+        .await
+    }
+
+    pub async fn admit_with_soft_routing(
+        &self,
+        gateway_request_id: Uuid,
+        principal: &PrincipalContext,
+        candidates: Vec<ModelSelection>,
+        estimate: QuotaEstimate,
+        at: DateTime<Utc>,
+        route_on_soft_limit: bool,
     ) -> Result<QuotaOutcome, QuotaError> {
         let input_upper_bound = estimate.input_upper_bound;
         let requested_output_tokens = estimate.requested_output_tokens;
@@ -353,7 +374,10 @@ impl QuotaEngine {
                     );
                     break;
                 }
-                if !evaluation.soft.is_empty() && index + 1 < candidates.len() {
+                if route_on_soft_limit
+                    && !evaluation.soft.is_empty()
+                    && index + 1 < candidates.len()
+                {
                     skipped_soft.extend(evaluation.soft);
                     continue;
                 }
@@ -1178,6 +1202,109 @@ mod tests {
             decision["prior_soft_violations"].as_array().unwrap().len(),
             2
         );
+    }
+
+    #[sqlx::test]
+    async fn quota_aware_routing_switch_is_independent(pool: PgPool) {
+        let guarded_tenant = Uuid::new_v4();
+        let routed_tenant = Uuid::new_v4();
+        let guarded_model = Uuid::new_v4();
+        let routed_model = Uuid::new_v4();
+        let guarded_provider = Uuid::new_v4();
+        let routed_provider = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_providers AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES
+                    ($5, $1, 'guarded-provider', 'Guarded', 'openai',
+                     'https://guarded.invalid', 'env://GUARDED',
+                     ARRAY['openai_responses'], 'active'),
+                    ($6, $2, 'routed-provider', 'Routed', 'openai',
+                     'https://routed.invalid', 'env://ROUTED',
+                     ARRAY['openai_responses'], 'active')
+                RETURNING id
+            ), inserted_models AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, lifecycle_state
+                ) VALUES
+                    ($3, $1, $5, 'guarded', 'guarded', 'Guarded',
+                     ARRAY['openai_responses'], 'active'),
+                    ($4, $2, $6, 'guarded', 'guarded', 'Guarded',
+                     ARRAY['openai_responses'], 'active')
+                RETURNING id
+            )
+            INSERT INTO quotas (
+                id, tenant_id, quota_key, revision, model_id, configuration, lifecycle_state
+            ) VALUES
+                (gen_random_uuid(), $1, 'model-soft', 1, $3,
+                 '{"mode":"soft","limits":{"requests_per_minute":0}}', 'active'),
+                (gen_random_uuid(), $2, 'model-soft', 1, $4,
+                 '{"mode":"soft","limits":{"requests_per_minute":0}}', 'active')
+            "#,
+        )
+        .bind(guarded_tenant)
+        .bind(routed_tenant)
+        .bind(guarded_model)
+        .bind(routed_model)
+        .bind(guarded_provider)
+        .bind(routed_provider)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let estimate = QuotaEstimate {
+            input_upper_bound: 10,
+            requested_output_tokens: Some(10),
+            output_multiplier: 1,
+            billable: true,
+            unbounded_input: false,
+            requires_extended_pricing: false,
+            unsupported_cost_features: false,
+        };
+        let guarded = QuotaEngine::new(pool.clone())
+            .admit_with_soft_routing(
+                Uuid::new_v4(),
+                &principal(guarded_tenant),
+                vec![
+                    selection(guarded_tenant, "guarded", guarded_model, guarded_provider),
+                    selection(
+                        guarded_tenant,
+                        "alternate",
+                        Uuid::new_v4(),
+                        guarded_provider,
+                    ),
+                ],
+                estimate,
+                Utc::now(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            guarded,
+            QuotaOutcome::Rejected(_, QuotaRejection::SoftDeferred)
+        ));
+        let routed = QuotaEngine::new(pool)
+            .admit_with_soft_routing(
+                Uuid::new_v4(),
+                &principal(routed_tenant),
+                vec![
+                    selection(routed_tenant, "guarded", routed_model, routed_provider),
+                    selection(routed_tenant, "alternate", Uuid::new_v4(), routed_provider),
+                ],
+                estimate,
+                Utc::now(),
+                true,
+            )
+            .await
+            .unwrap();
+        let QuotaOutcome::Allowed(routed) = routed else {
+            panic!("quota-aware routing did not choose the unguarded candidate");
+        };
+        assert_eq!(routed.selection.public_model_id, "alternate");
     }
 
     #[sqlx::test]
