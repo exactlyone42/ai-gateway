@@ -61,6 +61,23 @@ Provider（Anthropic / OpenAI / Gemini / xAI / Local vLLM・Ollama）
 Provider SSE → Provider Adapter → Canonical Stream Event → Protocol Adapter → Client SSE
 ```
 
+Same-dialect forwarding keeps a short-lived native wire sidecar so request,
+response, and SSE bytes are not re-encoded. The canonical view is still built
+once at ingress and enriched with identity, policy, quota, and trace context.
+Protocol adapters and provider adapters depend only on canonical types, never
+on each other. Each provider adapter selects its native operation, path,
+authentication mode, and header allowlist from a vendor-neutral operation;
+both client routes then use one common HTTP transport. The core dispatcher
+chooses native or canonical payloads. Each provider profile declares a target
+dialect, so provider selection is not inferred from the client endpoint. The
+canonical contract includes neutral tool choice, reasoning, and
+structured-output fields; malformed, conflicting, or vendor-only shapes stay
+source-scoped and cannot be silently translated.
+
+Content-bearing canonical values are in-memory request data. They are not
+serializable, their debug output is redacted, and they never enter the ledger,
+logs, traces, or spool by default.
+
 旁路（不擋主路徑）：
 
 ```text

@@ -1,8 +1,9 @@
 use serde_json::Value;
 
 use crate::{
+    canonical::CanonicalStreamEvent,
     ledger::TokenUsage,
-    services::streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data},
+    services::streaming::{ProtocolError, StreamObserver, event_data},
 };
 
 #[derive(Default)]
@@ -31,16 +32,22 @@ impl StreamObserver for MetadataParser {
                 }
                 if let Some(usage) = value.pointer("/message/usage") {
                     merge_anthropic_usage(&mut self.usage, usage);
-                    events.push(CanonicalStreamEvent::Usage(self.usage.clone()));
+                    events.push(CanonicalStreamEvent::Usage(self.usage.clone().into()));
                 }
             }
             Some("message_delta") => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    events.push(CanonicalStreamEvent::OutputCompleted {
+                        index: 0,
+                        finish_reason: reason.to_owned(),
+                    });
+                }
                 if let Some(usage) = value.get("usage") {
                     merge_anthropic_usage(&mut self.usage, usage);
-                    events.push(CanonicalStreamEvent::Usage(self.usage.clone()));
+                    events.push(CanonicalStreamEvent::Usage(self.usage.clone().into()));
                 }
             }
-            Some("message_stop") => events.push(CanonicalStreamEvent::Completed),
+            Some("message_stop") => events.push(CanonicalStreamEvent::ResponseCompleted),
             _ => {}
         }
         Ok(events)
@@ -66,7 +73,10 @@ fn merge_anthropic_usage(current: &mut TokenUsage, value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::MetadataParser;
-    use crate::services::streaming::{CanonicalStreamEvent, EventDecoder, StreamObserver};
+    use crate::{
+        canonical::CanonicalStreamEvent,
+        services::streaming::{EventDecoder, StreamObserver},
+    };
 
     #[test]
     fn parses_crlf_multiline_and_split_frames() {
@@ -92,7 +102,7 @@ mod tests {
             event,
             CanonicalStreamEvent::Usage(usage) if usage.input_tokens == 7
         )));
-        assert!(canonical.contains(&CanonicalStreamEvent::Completed));
+        assert!(canonical.contains(&CanonicalStreamEvent::ResponseCompleted));
     }
 
     #[test]
@@ -110,7 +120,30 @@ mod tests {
             event,
             CanonicalStreamEvent::Usage(usage) if usage.output_tokens == 9
         )));
-        assert!(canonical.contains(&CanonicalStreamEvent::Completed));
+        assert!(canonical.contains(&CanonicalStreamEvent::ResponseCompleted));
+    }
+
+    #[test]
+    fn preserves_anthropic_stop_reason_before_response_completion() {
+        let raw = b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+        let mut decoder = EventDecoder::default();
+        let mut parser = MetadataParser::default();
+        let canonical = decoder
+            .feed(raw)
+            .unwrap()
+            .into_iter()
+            .flat_map(|event| parser.observe(&event).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            canonical,
+            vec![
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 0,
+                    finish_reason: "tool_use".to_owned(),
+                },
+                CanonicalStreamEvent::ResponseCompleted,
+            ]
+        );
     }
 
     #[test]
@@ -130,6 +163,6 @@ mod tests {
             event,
             CanonicalStreamEvent::Usage(usage) if usage.output_tokens == 9
         )));
-        assert!(canonical.contains(&CanonicalStreamEvent::Completed));
+        assert!(canonical.contains(&CanonicalStreamEvent::ResponseCompleted));
     }
 }

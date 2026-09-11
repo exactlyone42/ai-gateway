@@ -77,7 +77,7 @@
 - `2026-09-11T07:41+08:00` focused re-review（161,913 tokens）通過，0 High／0 Medium；fresh DB
   `check.sh all` 重跑 Rust 150、schema 5、前端 2、關卡自測 29 全綠，0 ignored。
 - `2026-09-11T07:45+08:00` PR #41 required CI 綠後自動合入 `dev`，merge commit `4eca21d`；
-  卡 #40 由 `Closes #40` 隨 merge 關閉。
+  因 `dev` 非預設分支，`Closes #40` 不會生效，已另以收工證據手動關卡。
 
 ## 已確定不可行
 - 規格 §57 的 13 個 OTLP metric 名稱不在 repo；`docs/engineering-standards.md` 明禁自創同義詞，

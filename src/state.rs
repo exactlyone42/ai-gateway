@@ -9,7 +9,9 @@ use crate::{
     identity::CredentialService,
     ledger::{Ledger, LedgerError},
     metrics::Instruments,
-    model_registry::{GatewayOperation, ModelRegistry, ProviderProfile, ProviderProfiles},
+    model_registry::{
+        GatewayOperation, ModelRegistry, ProviderDialect, ProviderProfile, ProviderProfiles,
+    },
     policy::PolicyEngine,
     quota::QuotaEngine,
     scheduler::Scheduler,
@@ -65,6 +67,7 @@ impl AppState {
                 "env://OPENAI_API_KEY",
                 config.openai_provider.clone(),
                 config.openai_base_url.clone(),
+                ProviderDialect::OpenAi,
                 vec![
                     GatewayOperation::OpenAiResponses,
                     GatewayOperation::OpenAiChatCompletions,
@@ -76,6 +79,7 @@ impl AppState {
                 "env://ANTHROPIC_API_KEY",
                 config.anthropic_provider.clone(),
                 config.anthropic_base_url.clone(),
+                ProviderDialect::Anthropic,
                 vec![
                     GatewayOperation::AnthropicMessages,
                     GatewayOperation::AnthropicCountTokens,

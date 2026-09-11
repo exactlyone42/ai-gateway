@@ -2,8 +2,10 @@
 
 ## Anthropic Messages
 
-The gateway exposes and forwards these endpoints directly to the configured
-Anthropic base URL; LiteLLM and canonical conversion are not involved:
+The gateway exposes and forwards these endpoints to the configured Anthropic
+base URL. The protocol adapter creates a canonical semantic view, while a
+short-lived native wire sidecar preserves the same-dialect request bytes;
+LiteLLM is not involved:
 
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
@@ -17,6 +19,9 @@ Anthropic base URL; LiteLLM and canonical conversion are not involved:
 - Forward `content-type`, `accept`, and every `anthropic-*` header unchanged.
 - Never forward the client `authorization` or `x-api-key`; inject only the
   server-side `ANTHROPIC_API_KEY` as upstream `x-api-key`.
+- The target provider adapter owns the native endpoint, authentication mode,
+  and request-header allowlist. A shared transport sends the prepared request;
+  client routes do not select provider authentication or upstream paths.
 - Client authentication accepts Bearer or `x-api-key`. If both are present,
   they must name the same secret.
 
@@ -56,8 +61,9 @@ Sources: Anthropic Messages API and Claude Code LLM gateway protocol, verified
 
 ## OpenAI Responses and Chat Completions
 
-The gateway exposes and forwards these endpoints directly to
-`OPENAI_BASE_URL`; canonical request conversion is not involved:
+The gateway exposes and forwards these endpoints to `OPENAI_BASE_URL`. The
+protocol adapter creates a canonical semantic view, while a short-lived native
+wire sidecar preserves the same-dialect request bytes:
 
 - `POST /v1/responses`, used by Codex CLI.
 - `POST /v1/chat/completions`, used by other OpenAI-compatible clients.
@@ -70,6 +76,8 @@ The gateway exposes and forwards these endpoints directly to
 - Forward `content-type`, `accept`, `openai-beta`, `originator`, `session_id`,
   and `x-stainless-*` headers. Never forward client `authorization` or
   `x-api-key`; inject only the server-side `OPENAI_API_KEY` bearer token.
+- The target provider adapter owns the native endpoint, authentication mode,
+  and request-header allowlist. A shared transport sends the prepared request.
 - Preserve upstream status and body bytes. Forward `content-type`,
   `content-encoding`, `retry-after`, `request-id`, `x-request-id`, and
   `openai-*` response headers.
@@ -81,6 +89,12 @@ The gateway exposes and forwards these endpoints directly to
 - The shared relay frames one complete bounded SSE event without rewriting its
   bytes. Provider observers emit `CanonicalStreamEvent` values for lifecycle,
   response ID, usage, completion hints, and failures.
+- The canonical event vocabulary defines ordered message/content starts and
+  completions, text and reasoning deltas, tool-call argument deltas, one
+  response completion event, and one canonical error event. The accounting
+  relay consumes those same terminal events. Native forwarding does not
+  synthesize semantic deltas; W15 activates them only when a response crosses
+  protocol dialects.
 - Responses requires an explicit `response.completed`. `response.failed`,
   `response.incomplete`, or `error` fails the ledger and the response body.
 - Chat Completions accepts `[DONE]` after `finish_reason`, or clean EOF after

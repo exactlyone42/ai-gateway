@@ -1301,20 +1301,21 @@ mod tests {
 
     #[tokio::test]
     async fn openai_upstream_rejection_preserves_status_code_body_and_retry_header() {
+        let raw = Bytes::from_static(
+            br#"{ "error": {"code":"rate_limit_exceeded","message":"try later","type":"rate_limit_error"}, "vendor_number":123456789012345678901234567890 }"#,
+        );
+        let raw_by_server = raw.clone();
         let upstream = Router::new().route(
             "/v1/responses",
-            post(|| async {
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    [("content-type", "application/json"), ("retry-after", "11")],
-                    Json(json!({
-                        "error": {
-                            "code": "rate_limit_exceeded",
-                            "message": "try later",
-                            "type": "rate_limit_error"
-                        }
-                    })),
-                )
+            post(move || {
+                let raw = raw_by_server.clone();
+                async move {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("content-type", "application/json"), ("retry-after", "11")],
+                        raw,
+                    )
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1341,9 +1342,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["retry-after"], "11");
-        let body: serde_json::Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), raw);
 
         state.ledger.wait_for_idle().await;
         upstream_task.abort();

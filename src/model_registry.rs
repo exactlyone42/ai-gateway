@@ -24,7 +24,35 @@ pub enum GatewayOperation {
     OpenAiChatCompletions,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderDialect {
+    Anthropic,
+    OpenAi,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanonicalOperation {
+    Generate,
+    CountTokens,
+}
+
 impl GatewayOperation {
+    pub fn dialect(self) -> ProviderDialect {
+        match self {
+            Self::AnthropicMessages | Self::AnthropicCountTokens => ProviderDialect::Anthropic,
+            Self::OpenAiResponses | Self::OpenAiChatCompletions => ProviderDialect::OpenAi,
+        }
+    }
+
+    pub fn canonical(self) -> CanonicalOperation {
+        match self {
+            Self::AnthropicMessages | Self::OpenAiResponses | Self::OpenAiChatCompletions => {
+                CanonicalOperation::Generate
+            }
+            Self::AnthropicCountTokens => CanonicalOperation::CountTokens,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AnthropicMessages => "anthropic_messages",
@@ -267,6 +295,7 @@ pub struct ProviderProfile {
     pub provider_key: String,
     pub base_url: String,
     pub operations: Vec<GatewayOperation>,
+    pub target_dialect: ProviderDialect,
     allowed_tenants: Arc<HashSet<Uuid>>,
     authorization: ProviderAuthorization,
 }
@@ -282,6 +311,7 @@ impl ProviderProfile {
         credential_ref: impl Into<String>,
         provider_key: impl Into<String>,
         base_url: impl Into<String>,
+        target_dialect: ProviderDialect,
         operations: Vec<GatewayOperation>,
         allowed_tenants: Vec<Uuid>,
         secret: impl Into<Arc<str>>,
@@ -291,6 +321,7 @@ impl ProviderProfile {
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
             operations,
+            target_dialect,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::Bearer(secret.into()),
         }
@@ -300,6 +331,7 @@ impl ProviderProfile {
         credential_ref: impl Into<String>,
         provider_key: impl Into<String>,
         base_url: impl Into<String>,
+        target_dialect: ProviderDialect,
         operations: Vec<GatewayOperation>,
         allowed_tenants: Vec<Uuid>,
         secret: impl Into<Arc<str>>,
@@ -309,6 +341,7 @@ impl ProviderProfile {
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
             operations,
+            target_dialect,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::ApiKey(secret.into()),
         }
@@ -882,6 +915,7 @@ mod tests {
             "env://PROVIDER_KEY",
             "provider-one",
             "https://provider.example",
+            ProviderDialect::OpenAi,
             vec![GatewayOperation::OpenAiResponses],
             vec![tenant_id],
             Arc::<str>::from("secret"),
@@ -994,6 +1028,7 @@ mod tests {
             "env://PROVIDER_ONE_KEY",
             "provider-one",
             "https://provider.example",
+            ProviderDialect::OpenAi,
             vec![
                 GatewayOperation::OpenAiResponses,
                 GatewayOperation::OpenAiChatCompletions,
@@ -1207,6 +1242,7 @@ mod tests {
             "env://FALLBACK_KEY",
             "fallback-provider",
             "https://fallback.example",
+            ProviderDialect::OpenAi,
             vec![GatewayOperation::OpenAiResponses],
             vec![tenant_id],
             Arc::<str>::from("server-secret"),
@@ -1278,6 +1314,7 @@ mod tests {
             "env://PROVIDER_ONE_KEY",
             "provider-one",
             "https://provider.example",
+            ProviderDialect::OpenAi,
             vec![GatewayOperation::OpenAiResponses],
             vec![tenant_id],
             Arc::<str>::from("server-secret"),
