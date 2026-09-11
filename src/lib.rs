@@ -7,6 +7,8 @@ mod db;
 mod error;
 pub mod identity;
 pub mod ledger;
+#[cfg(test)]
+mod load_harness;
 mod logging;
 mod metrics;
 mod middleware;

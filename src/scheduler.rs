@@ -674,14 +674,21 @@ fn weight(workload: WorkloadClass) -> u32 {
 }
 
 fn effective_weight(config: &SchedulerConfig, waiter: &Waiter, now: DateTime<Utc>) -> u32 {
-    let base = weight(waiter.request.workload);
+    let interval_ms = config.aging_interval.as_millis().max(1);
+    let waited_ms = (now - waiter.entered_at).num_milliseconds().max(0) as u128;
+    effective_workload_weight(config, waiter.request.workload, waited_ms / interval_ms)
+}
+
+pub(crate) fn effective_workload_weight(
+    config: &SchedulerConfig,
+    workload: WorkloadClass,
+    aging_intervals: u128,
+) -> u32 {
+    let base = weight(workload);
     if !config.aging_enabled {
         return base;
     }
-    let interval_ms = config.aging_interval.as_millis().max(1);
-    let waited_ms = (now - waiter.entered_at).num_milliseconds().max(0) as u128;
-    base.saturating_add((waited_ms / interval_ms) as u32)
-        .min(WEIGHTS[0])
+    base.saturating_add(aging_intervals as u32).min(WEIGHTS[0])
 }
 
 fn queue_pool(
