@@ -111,6 +111,9 @@ wire sidecar preserves the same-dialect request bytes:
   active long-running stream is not capped by total lifetime. An idle timeout
   closes the attempt and returns the gateway's upstream failure response; it
   never retries the same logical request.
+- `PROVIDER_CONNECT_TIMEOUT_MS` separately limits provider DNS, TCP connect and
+  TLS setup, and defaults to 10 seconds. It applies to every shared provider
+  transport path, including health probes, and never causes an automatic retry.
 - Estimated and provider-reported usage remain separate. Responses and Chat
   token fields map to input, output, cached input, and reasoning ledger fields.
 

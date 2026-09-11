@@ -55,6 +55,38 @@ disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
 gateway once; startup applies migrations and performs one batched recovery
 before accepting traffic.
 
+## Process shutdown
+
+`SIGTERM` and Ctrl-C start the same bounded shutdown sequence:
+
+1. Mark the process as draining. New data-plane requests return `503` with
+   `Retry-After`; `/ready` returns `503`, while `/health` remains `200` on the
+   same listener.
+2. Close scheduler admission and let requests that already own a lifecycle
+   lease continue, including SSE response bodies.
+3. When active requests reach zero, close the listener. If
+   `DRAIN_TIMEOUT_MS` elapses first, cancel the process token and hard-close
+   connections. Interrupted reservations are finalized as `cancelled` with
+   `shutdown_timeout`, provider/request progress and separate estimated or
+   partial provider-reported usage. Partial usage never lowers the outstanding
+   quota reservation as if it were final.
+4. Within `SHUTDOWN_FINALIZE_TIMEOUT_MS`, wait for response-body ownership to
+   be released, durable ledger finalizers to finish and the spool worker to
+   become idle. Spans and metrics then each get the same bounded flush window.
+
+Set the deployment platform's termination grace period above
+`DRAIN_TIMEOUT_MS + 3 * SHUTDOWN_FINALIZE_TIMEOUT_MS + 1 second`, plus an
+operational margin. A shorter platform deadline can send `SIGKILL` before the
+gateway's own bounds and durability path finish.
+
+`REQUEST_HEADER_MAX_BYTES` is the aggregate application header limit and
+returns `413`. The HTTP/1 parser has a fixed buffer at twice that value and
+returns `431` before middleware when exceeded. Request bodies retain their
+per-protocol limits. Provider DNS/connect/TLS setup is bounded by
+`PROVIDER_CONNECT_TIMEOUT_MS`; provider headers and each later stream read are
+bounded by `PROVIDER_IDLE_TIMEOUT_MS`. None of these paths retries a provider
+request.
+
 ## Alerts
 
 Pool capacity below reserve, spend velocity anomaly, repeated 401/403 from a

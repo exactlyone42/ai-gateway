@@ -162,8 +162,9 @@ immutable reservations and reconciliation state under that lock.
 
 Concurrency is a request-lifetime RAII lease. W12 deliberately supports one
 gateway process; startup holds a PostgreSQL session advisory lock and a second
-process fails before binding the listener. W19 must move this ownership into a
-distributed durable design before enabling replicas.
+process fails before binding the listener. W19 keeps that contract: enabling
+replicas is separate measured work that must first replace in-memory limits
+with cross-instance durable counters.
 
 ## Rollout
 

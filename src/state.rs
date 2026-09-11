@@ -8,6 +8,7 @@ use crate::{
     config::Config,
     identity::CredentialService,
     ledger::{Ledger, LedgerError},
+    lifecycle::ProcessLifecycle,
     metrics::Instruments,
     model_registry::{
         GatewayOperation, ModelRegistry, ProviderDialect, ProviderKind, ProviderProfile,
@@ -40,6 +41,7 @@ pub struct AppState {
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
+    pub(crate) lifecycle: ProcessLifecycle,
 }
 
 impl AppState {
@@ -172,6 +174,7 @@ impl AppState {
         let models = ModelRegistry::new(pool.clone(), profiles, config.allowed_models.clone());
         let client = Client::builder()
             .redirect(Policy::none())
+            .connect_timeout(config.provider_connect_timeout)
             .read_timeout(config.provider_idle_timeout)
             .build()?;
         Ok(Self {
@@ -188,6 +191,7 @@ impl AppState {
             credentials,
             admin,
             ledger,
+            lifecycle: ProcessLifecycle::default(),
         })
     }
 }

@@ -22,7 +22,7 @@ use tower_http::{
 };
 
 use crate::{
-    middleware::{REQUEST_ID_HEADER, access_log, require_client_key},
+    middleware::{REQUEST_ID_HEADER, access_log, process_gate, require_client_key},
     state::AppState,
 };
 
@@ -74,6 +74,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(admin)
         .merge(admin_ui)
         .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            process_gate,
+        ))
         // Innermost first: the access log needs the id already set and the
         // status already final, so it sits inside the two id layers and
         // outside the handlers. It replaces `TraceLayer`, which reported the
@@ -114,10 +118,13 @@ mod tests {
         response::{IntoResponse as _, Response},
         routing::post,
     };
-    use futures_util::StreamExt as _;
+    use futures_util::{StreamExt as _, TryStreamExt as _, stream};
     use serde_json::json;
     use sqlx::{PgPool, Row as _};
-    use tokio::sync::Notify;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        sync::Notify,
+    };
     use tower::ServiceExt as _;
     use tracing::instrument::WithSubscriber as _;
     use uuid::Uuid;
@@ -133,6 +140,7 @@ mod tests {
         logging,
         model_registry::{GatewayOperation, ProviderKind},
         services::openai::{self, Operation as OpenAiOperation, RequestContext},
+        startup,
         state::AppState,
     };
 
@@ -150,6 +158,10 @@ mod tests {
             extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
             provider_idle_timeout: Duration::from_secs(120),
+            provider_connect_timeout: Duration::from_secs(10),
+            request_header_max_bytes: 64 * 1024,
+            drain_timeout: Duration::from_secs(30),
+            shutdown_finalize_timeout: Duration::from_secs(5),
             bootstrap_client_key: Some("client-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
@@ -3150,6 +3162,486 @@ mod tests {
         );
 
         state.ledger.wait_for_idle().await;
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn app_header_limit_returns_413_over_raw_tcp() {
+        let mut config = test_config();
+        config.request_header_max_bytes = 8 * 1024;
+        config.shutdown_finalize_timeout = Duration::from_millis(100);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_task =
+            tokio::spawn(startup::serve_with_shutdown(listener, state, async move {
+                let _ = signal_rx.await;
+            }));
+
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET /health HTTP/1.1\r\nHost: gateway\r\nX-Fill: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(9 * 1024)
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413"),
+            "the application header limit must reject with 413"
+        );
+
+        signal_tx.send(()).unwrap();
+        gateway_task.await.unwrap().unwrap();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_header_limit_returns_431_over_raw_tcp() {
+        let mut config = test_config();
+        config.request_header_max_bytes = 8 * 1024;
+        config.shutdown_finalize_timeout = Duration::from_millis(100);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_task =
+            tokio::spawn(startup::serve_with_shutdown(listener, state, async move {
+                let _ = signal_rx.await;
+            }));
+
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET /health HTTP/1.1\r\nHost: gateway\r\nX-Fill: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(17 * 1024)
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 431"),
+            "the transport parser must reject oversized headers with 431"
+        );
+
+        signal_tx.send(()).unwrap();
+        gateway_task.await.unwrap().unwrap();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_keeps_health_reachable_and_existing_stream_running() {
+        let release = Arc::new(Notify::new());
+        let release_for_provider = Arc::clone(&release);
+        let first = Bytes::from_static(
+            b": keepalive\n\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_drain\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        );
+        let second = Bytes::from_static(
+            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let expected_second = second.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let release = Arc::clone(&release_for_provider);
+                let first = first.clone();
+                let second = second.clone();
+                async move {
+                    let stream = async_stream::stream! {
+                        yield Ok::<_, std::io::Error>(first);
+                        release.notified().await;
+                        yield Ok::<_, std::io::Error>(second);
+                    };
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("request-id", "provider-drain")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{upstream_address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.drain_timeout = Duration::from_secs(2);
+        config.shutdown_finalize_timeout = Duration::from_millis(100);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let lifecycle = state.lifecycle.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_state = Arc::clone(&state);
+        let gateway_task = tokio::spawn(async move {
+            startup::serve_with_shutdown(listener, gateway_state, async move {
+                let _ = signal_rx.await;
+            })
+            .await
+            .unwrap()
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .header("x-api-key", "client-key")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-test","stream":true}"#)
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        let first_received = body.next().await.unwrap().unwrap();
+        signal_tx.send(()).unwrap();
+        lifecycle.wait_for_draining().await;
+
+        let mut probe = tokio::net::TcpStream::connect(address).await.unwrap();
+        probe
+            .write_all(
+                b"GET /ready HTTP/1.1\r\nHost: gateway\r\n\r\nGET /health HTTP/1.1\r\nHost: gateway\r\n\r\nGET /v1/models HTTP/1.1\r\nHost: gateway\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut probes = Vec::new();
+        probe.read_to_end(&mut probes).await.unwrap();
+        let probes = String::from_utf8(probes).unwrap();
+        assert_eq!(probes.matches("HTTP/1.1 503").count(), 2);
+        assert_eq!(probes.matches("HTTP/1.1 200").count(), 1);
+
+        release.notify_one();
+        let remaining = body.try_collect::<Vec<_>>().await.unwrap().concat();
+        assert!(
+            [first_received.as_ref(), remaining.as_ref()]
+                .concat()
+                .ends_with(expected_second.as_ref())
+        );
+        tokio::time::timeout(Duration::from_secs(1), gateway_task)
+            .await
+            .expect("the process did not exit after its active stream completed")
+            .unwrap();
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_flushes_a_backpressured_non_stream_response() {
+        let provider_body = serde_json::to_vec(&json!({
+            "id": "msg_large",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "a".repeat(8 * 1024 * 1024)}],
+            "model": "claude-test",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }))
+        .unwrap();
+        let expected = provider_body.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let provider_body = provider_body.clone();
+                async move {
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(provider_body))
+                        .unwrap()
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{upstream_address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.drain_timeout = Duration::from_secs(2);
+        config.shutdown_finalize_timeout = Duration::from_millis(100);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let lifecycle = state.lifecycle.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let mut gateway_task =
+            tokio::spawn(startup::serve_with_shutdown(listener, state, async move {
+                let _ = signal_rx.await;
+            }));
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .header("x-api-key", "client-key")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-test","stream":false}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        signal_tx.send(()).unwrap();
+        lifecycle.wait_for_draining().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut gateway_task)
+                .await
+                .is_err(),
+            "the process exited before the paused client resumed reading"
+        );
+        assert_eq!(
+            response.bytes().await.unwrap().as_ref(),
+            expected.as_slice()
+        );
+        tokio::time::timeout(Duration::from_secs(1), gateway_task)
+            .await
+            .expect("the process did not exit after flushing the buffered response")
+            .unwrap()
+            .unwrap();
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn forced_shutdown_closes_a_backpressured_stream_and_records_it() {
+        let provider_started = Arc::new(Notify::new());
+        let provider_started_in_body = Arc::clone(&provider_started);
+        let first = Bytes::from_static(
+            b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_backpressure\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        );
+        let padding = Bytes::from(format!(": {}\n\n", "x".repeat(64 * 1024)));
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let provider_started = Arc::clone(&provider_started_in_body);
+                let first = first.clone();
+                let padding = padding.clone();
+                async move {
+                    let initial = stream::once(async move {
+                        provider_started.notify_one();
+                        Ok::<_, std::convert::Infallible>(first)
+                    });
+                    let repeated = stream::repeat_with(move || {
+                        Ok::<_, std::convert::Infallible>(padding.clone())
+                    });
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("request-id", "provider-backpressure")
+                        .body(Body::from_stream(initial.chain(repeated)))
+                        .unwrap()
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{upstream_address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.drain_timeout = Duration::from_millis(100);
+        config.shutdown_finalize_timeout = Duration::from_secs(2);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_task =
+            tokio::spawn(startup::serve_with_shutdown(listener, state, async move {
+                let _ = signal_rx.await;
+            }));
+
+        let body = r#"{"model":"claude-test","stream":true,"max_tokens":11}"#;
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: gateway\r\nX-Api-Key: client-key\r\nX-Request-Id: w19-backpressure\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), provider_started.notified())
+            .await
+            .expect("the provider stream was never polled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        signal_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), gateway_task)
+            .await
+            .expect("backpressure prevented bounded shutdown")
+            .unwrap()
+            .unwrap();
+
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut received))
+            .await
+            .expect("the backpressured client connection stayed open")
+            .unwrap();
+        let spooled = read_spool(&spool_dir);
+        assert!(spooled.contains(r#""request_id":"w19-backpressure""#));
+        assert!(spooled.contains(r#""provider_request_id":"provider-backpressure""#));
+        assert!(spooled.contains(r#""error_type":"shutdown_timeout""#));
+        assert!(spooled.contains(r#""quota_actual_tokens":null"#));
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn forced_shutdown_before_provider_headers_keeps_the_attempt_checkpoint() {
+        let provider_called = Arc::new(Notify::new());
+        let provider_called_in_handler = Arc::clone(&provider_called);
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let provider_called = Arc::clone(&provider_called_in_handler);
+                async move {
+                    provider_called.notify_one();
+                    std::future::pending::<Response>().await
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{upstream_address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.drain_timeout = Duration::ZERO;
+        config.shutdown_finalize_timeout = Duration::from_secs(2);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_task =
+            tokio::spawn(startup::serve_with_shutdown(listener, state, async move {
+                let _ = signal_rx.await;
+            }));
+
+        let body = r#"{"model":"claude-test","stream":true,"max_tokens":11}"#;
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: gateway\r\nX-Api-Key: client-key\r\nX-Request-Id: w19-before-headers\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), provider_called.notified())
+            .await
+            .expect("the provider was not called");
+        signal_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), gateway_task)
+            .await
+            .expect("the pre-header provider call prevented bounded shutdown")
+            .unwrap()
+            .unwrap();
+
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut received))
+            .await
+            .expect("the pre-header client connection stayed open")
+            .unwrap();
+        let spooled = read_spool(&spool_dir);
+        assert!(spooled.contains(r#""request_id":"w19-before-headers""#));
+        assert!(spooled.contains(r#""provider":"anthropic-test""#));
+        assert!(spooled.contains(r#""provider_request_id":null"#));
+        assert!(spooled.contains(r#""estimated_usage":{"input_tokens""#));
+        assert!(spooled.contains(r#""error_type":"shutdown_timeout""#));
+
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_drain_timeout_forces_a_durable_stream_record() {
+        let first = Bytes::from_static(
+            b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_force\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        );
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let first = first.clone();
+                async move {
+                    let stream = async_stream::stream! {
+                        yield Ok::<_, std::io::Error>(first);
+                        std::future::pending::<()>().await;
+                    };
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("request-id", "provider-force")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{upstream_address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.drain_timeout = Duration::ZERO;
+        config.shutdown_finalize_timeout = Duration::from_secs(3);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        let gateway_task = tokio::spawn(startup::serve_with_shutdown(
+            listener,
+            Arc::clone(&state),
+            async move {
+                let _ = signal_rx.await;
+            },
+        ));
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .header("x-api-key", "client-key")
+            .header("x-request-id", "w19-force")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-test","stream":true,"max_tokens":11}"#)
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        assert!(body.next().await.unwrap().is_ok());
+        signal_tx.send(()).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(1), body.next()).await;
+        tokio::time::timeout(Duration::from_secs(4), gateway_task)
+            .await
+            .expect("the forced process did not exit within its bounded cleanup window")
+            .unwrap()
+            .unwrap();
+
+        let spooled = read_spool(&spool_dir);
+        assert!(spooled.contains(r#""request_id":"w19-force""#));
+        assert!(spooled.contains(r#""provider_request_id":"provider-force""#));
+        assert!(spooled.contains(r#""provider_response_id":"msg_force""#));
+        assert!(spooled.contains(r#""error_type":"shutdown_timeout""#));
+        assert!(spooled.contains(r#""estimated_usage":{"input_tokens""#));
+        assert!(
+            spooled.contains(r#""quota_actual_tokens":null"#),
+            "forced shutdown finalized quota from partial usage"
+        );
+
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
     }

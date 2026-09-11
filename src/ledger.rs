@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -15,6 +15,7 @@ use serde_json::Value;
 use sqlx::{Pool, Postgres, types::Json};
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -60,6 +61,8 @@ struct LedgerInner {
     flush_worker_scheduled: AtomicBool,
     flush_idle: Notify,
     flush_gate: Arc<Semaphore>,
+    finalizations_pending: AtomicUsize,
+    finalizations_idle: Notify,
 }
 
 #[derive(Clone)]
@@ -175,11 +178,14 @@ pub struct Reservation {
     envelope: RequestEnvelope,
     _scheduler_lease: Option<SchedulerLease>,
     routing_lease: Option<RoutingLease>,
+    force_token: Option<CancellationToken>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 struct RequestEnvelope {
     schema_version: u8,
+    #[serde(default)]
+    finalized: Option<bool>,
     request: RequestRecord,
     attempts: Vec<AttemptRecord>,
     usage_records: Vec<UsageRecord>,
@@ -350,6 +356,8 @@ impl Ledger {
                 flush_worker_scheduled: AtomicBool::new(false),
                 flush_idle: Notify::new(),
                 flush_gate: Arc::new(Semaphore::new(1)),
+                finalizations_pending: AtomicUsize::new(0),
+                finalizations_idle: Notify::new(),
             }),
         })
     }
@@ -377,6 +385,7 @@ impl Ledger {
             envelope,
             _scheduler_lease: None,
             routing_lease: None,
+            force_token: None,
         })
     }
 
@@ -420,7 +429,6 @@ impl Ledger {
         self.flush_once().await
     }
 
-    #[cfg(test)]
     pub(crate) async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.flush_idle.notified();
@@ -429,6 +437,20 @@ impl Ledger {
             }
             notified.await;
         }
+    }
+
+    pub(crate) async fn wait_for_finalizations(&self) {
+        loop {
+            let notified = self.inner.finalizations_idle.notified();
+            if self.pending_finalizations() == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn pending_finalizations(&self) -> usize {
+        self.inner.finalizations_pending.load(Ordering::Acquire)
     }
 
     async fn flush_once(&self) -> Result<usize, LedgerError> {
@@ -514,6 +536,26 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn cancel_on_force(&mut self, token: CancellationToken) {
+        self.force_token = Some(token);
+    }
+
+    pub async fn checkpoint_provider_attempt(
+        &mut self,
+        model: String,
+        provider: String,
+        attempt: ProviderAttempt,
+    ) -> Result<(), LedgerError> {
+        self.checkpoint(RequestCompletion {
+            status: "cancelled".to_owned(),
+            selected_model: Some(model),
+            selected_provider: Some(provider),
+            attempts: vec![attempt],
+            completed_at: Utc::now(),
+        })
+        .await
+    }
+
     pub fn attach_routing_lease(&mut self, lease: RoutingLease) {
         self.routing_lease = Some(lease);
     }
@@ -639,6 +681,7 @@ impl Reservation {
         // checkpoint. Cancellation during that write still publishes a
         // cancellation record; after it returns, recovery can always promote
         // the final checkpoint even if publishing `.ready` fails.
+        self.envelope.finalized = Some(true);
         self.checkpoint(completion).await?;
         let id = self.id.take().ok_or(LedgerError::InvalidCapacity)?;
         let spool = Arc::clone(&self.ledger.inner.spool);
@@ -662,21 +705,40 @@ impl Drop for Reservation {
         let Some(id) = self.id.take() else {
             return;
         };
-        self.envelope.cancel(Utc::now());
+        let forced = self
+            .force_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled);
+        self.envelope
+            .cancel(Utc::now(), forced.then_some("shutdown_timeout"));
         let envelope = self.envelope.clone();
         let ledger = self.ledger.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let flush_handle = handle.clone();
-                handle.spawn_blocking(move || match ledger.inner.spool.finish(id, &envelope) {
-                    Ok(()) => {
-                        ledger.schedule_flush(&flush_handle);
+                ledger
+                    .inner
+                    .finalizations_pending
+                    .fetch_add(1, Ordering::AcqRel);
+                handle.spawn_blocking(move || {
+                    match ledger.inner.spool.finish(id, &envelope) {
+                        Ok(()) => {
+                            ledger.schedule_flush(&flush_handle);
+                        }
+                        Err(error) => tracing::error!(
+                            error.type = "ledger_interrupted_request_not_finalized",
+                            exception.message = %error,
+                            "an interrupted request remains reserved in the spool"
+                        ),
                     }
-                    Err(error) => tracing::error!(
-                        error.type = "ledger_interrupted_request_not_finalized",
-                        exception.message = %error,
-                        "an interrupted request remains reserved in the spool"
-                    ),
+                    if ledger
+                        .inner
+                        .finalizations_pending
+                        .fetch_sub(1, Ordering::AcqRel)
+                        == 1
+                    {
+                        ledger.inner.finalizations_idle.notify_waiters();
+                    }
                 });
             }
             Err(error) => tracing::error!(
@@ -711,6 +773,10 @@ impl ProviderAttempt {
             actual_usage: TokenUsage::default(),
             selection: None,
         }
+    }
+
+    pub fn observe_request_id(&mut self, provider_request_id: Option<String>) {
+        self.provider_request_id = bounded(provider_request_id);
     }
 
     pub fn with_selection(mut self, selection: Option<ModelSelectionSnapshot>) -> Self {
@@ -873,6 +939,7 @@ impl RequestEnvelope {
         let policy = start.policy;
         Self {
             schema_version: SCHEMA_VERSION,
+            finalized: Some(false),
             request: RequestRecord {
                 id: request_id,
                 tenant_id: start.principal.tenant_id,
@@ -1047,7 +1114,8 @@ impl RequestEnvelope {
         }
     }
 
-    fn cancel(&mut self, cancelled_at: DateTime<Utc>) {
+    fn cancel(&mut self, cancelled_at: DateTime<Utc>, error_type: Option<&str>) {
+        self.finalized = Some(true);
         self.request.status = "cancelled".to_owned();
         self.request.completed_at = Some(cancelled_at);
         self.request.total_latency_ms = self
@@ -1057,10 +1125,19 @@ impl RequestEnvelope {
         if self.attempts.is_empty() && self.request.quota_reservation_id.is_some() {
             self.request.quota_actual_tokens = Some(0);
             self.request.quota_actual_cost_microusd = Some(0);
+        } else if !self.attempts.is_empty() {
+            // A cancelled provider attempt may contain only an early usage
+            // fragment. Keep that fragment as evidence, but do not reconcile
+            // the conservative quota reservation downward as if it were final.
+            self.request.quota_actual_tokens = None;
+            self.request.quota_actual_cost_microusd = None;
         }
         for attempt in &mut self.attempts {
             if attempt.status == "cancelled" {
                 attempt.completed_at = cancelled_at;
+                if let Some(error_type) = error_type {
+                    attempt.error_type = Some(error_type.to_owned());
+                }
             }
         }
     }
@@ -1408,8 +1485,19 @@ fn finalize_recovered_envelope(path: &Path, entry_max_bytes: u64) -> Result<(), 
     if envelope.schema_version != SCHEMA_VERSION {
         return Err(LedgerError::InvalidCapacity);
     }
-    if envelope.request.completed_at.is_none() {
-        envelope.cancel(Utc::now());
+    let needs_finalization = match envelope.finalized {
+        Some(finalized) => !finalized,
+        None => {
+            envelope.request.completed_at.is_none()
+                || (envelope.request.status == "cancelled"
+                    && envelope
+                        .attempts
+                        .iter()
+                        .any(|attempt| attempt.status == "cancelled"))
+        }
+    };
+    if needs_finalization {
+        envelope.cancel(Utc::now(), Some("process_interrupted"));
     }
     let mut recovered = serde_json::to_vec(&envelope).map_err(LedgerError::Json)?;
     let max = usize::try_from(entry_max_bytes).map_err(|_| LedgerError::InvalidCapacity)?;
@@ -1594,6 +1682,7 @@ mod tests {
             attempts: Vec::new(),
             completed_at: Utc::now(),
         });
+        second.finalized = Some(true);
         let mut bytes = completed.encode(&second).unwrap();
         bytes.resize(MIN_ENTRY_MAX_BYTES as usize, 0);
         fs::write(completed.path(second.request.id, "working"), bytes).unwrap();
@@ -1657,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_prefers_a_complete_stream_checkpoint() {
+    fn startup_refinalizes_a_legacy_provisional_stream_checkpoint_conservatively() {
         let directory = test_directory("stream-checkpoint");
         let spool = Spool::open(
             directory.clone(),
@@ -1666,6 +1755,7 @@ mod tests {
         )
         .unwrap();
         let mut envelope = RequestEnvelope::started(request_start("cancelled-stream"));
+        envelope.request.quota_reservation_id = Some(Uuid::new_v4());
         let id = envelope.request.id;
         spool.reserve(id, &envelope).unwrap();
         let now = Utc::now();
@@ -1696,6 +1786,7 @@ mod tests {
             attempts: vec![attempt],
             completed_at: now,
         });
+        envelope.finalized = None;
         spool.checkpoint(id, &envelope).unwrap();
         drop(spool);
 
@@ -1708,11 +1799,55 @@ mod tests {
         let recovered = reopened.ready().unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].1.request.status, "cancelled");
+        assert_eq!(recovered[0].1.finalized, Some(true));
+        assert_eq!(recovered[0].1.request.quota_actual_tokens, None);
+        assert_eq!(recovered[0].1.request.quota_actual_cost_microusd, None);
         assert_eq!(
             recovered[0].1.attempts[0].provider_response_id.as_deref(),
             Some("msg_checkpoint")
         );
+        assert_eq!(
+            recovered[0].1.attempts[0].error_type.as_deref(),
+            Some("process_interrupted")
+        );
         assert_eq!(recovered[0].1.usage_records.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_preserves_a_final_legacy_envelope_without_the_marker() {
+        let directory = test_directory("legacy-final-marker");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("legacy-final-marker"));
+        let id = envelope.request.id;
+        spool.reserve(id, &envelope).unwrap();
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: Some("claude-test".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        });
+        envelope.finalized = None;
+        spool.checkpoint(id, &envelope).unwrap();
+        spool.publish(id).unwrap();
+        drop(spool);
+
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let recovered = reopened.ready().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].1.request.status, "completed");
+        assert_eq!(recovered[0].1.finalized, None);
         fs::remove_dir_all(directory).unwrap();
     }
 

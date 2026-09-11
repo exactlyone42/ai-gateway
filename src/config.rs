@@ -54,6 +54,10 @@ pub struct Config {
     /// Maximum silence between provider response reads. This does not cap the
     /// total lifetime of an active stream.
     pub provider_idle_timeout: Duration,
+    pub provider_connect_timeout: Duration,
+    pub request_header_max_bytes: usize,
+    pub drain_timeout: Duration,
+    pub shutdown_finalize_timeout: Duration,
     pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
@@ -142,6 +146,14 @@ pub enum ConfigError {
     InvalidStreamEventLimit(String),
     #[error("invalid PROVIDER_IDLE_TIMEOUT_MS: {0}")]
     InvalidProviderIdleTimeout(String),
+    #[error("invalid PROVIDER_CONNECT_TIMEOUT_MS: {0}")]
+    InvalidProviderConnectTimeout(String),
+    #[error("invalid REQUEST_HEADER_MAX_BYTES: {0}")]
+    InvalidRequestHeaderLimit(String),
+    #[error("invalid DRAIN_TIMEOUT_MS: {0}")]
+    InvalidDrainTimeout(String),
+    #[error("invalid SHUTDOWN_FINALIZE_TIMEOUT_MS: {0}")]
+    InvalidShutdownFinalizeTimeout(String),
     #[error("ADMIN_BOOTSTRAP_TOKEN and ADMIN_BOOTSTRAP_TENANT_ID must be configured together")]
     IncompleteAdminBootstrap,
     #[error("ADMIN_BOOTSTRAP_TOKEN must contain at least 32 bytes")]
@@ -221,6 +233,45 @@ impl Config {
             ));
         }
         let provider_idle_timeout = Duration::from_millis(provider_idle_timeout_ms);
+        let provider_connect_timeout_ms = env::var("PROVIDER_CONNECT_TIMEOUT_MS")
+            .unwrap_or_else(|_| "10000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidProviderConnectTimeout(error.to_string()))?;
+        if !(1..=120_000).contains(&provider_connect_timeout_ms) {
+            return Err(ConfigError::InvalidProviderConnectTimeout(
+                "must be between 1 and 120000".to_owned(),
+            ));
+        }
+        let provider_connect_timeout = Duration::from_millis(provider_connect_timeout_ms);
+        let request_header_max_bytes = env::var("REQUEST_HEADER_MAX_BYTES")
+            .unwrap_or_else(|_| (64 * 1024).to_string())
+            .parse::<usize>()
+            .map_err(|error| ConfigError::InvalidRequestHeaderLimit(error.to_string()))?;
+        if !(8192..=256 * 1024).contains(&request_header_max_bytes) {
+            return Err(ConfigError::InvalidRequestHeaderLimit(
+                "must be between 8192 and 262144".to_owned(),
+            ));
+        }
+        let drain_timeout_ms = env::var("DRAIN_TIMEOUT_MS")
+            .unwrap_or_else(|_| "30000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidDrainTimeout(error.to_string()))?;
+        if drain_timeout_ms > 600_000 {
+            return Err(ConfigError::InvalidDrainTimeout(
+                "must be between 0 and 600000".to_owned(),
+            ));
+        }
+        let drain_timeout = Duration::from_millis(drain_timeout_ms);
+        let shutdown_finalize_timeout_ms = env::var("SHUTDOWN_FINALIZE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "5000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidShutdownFinalizeTimeout(error.to_string()))?;
+        if !(1..=60_000).contains(&shutdown_finalize_timeout_ms) {
+            return Err(ConfigError::InvalidShutdownFinalizeTimeout(
+                "must be between 1 and 60000".to_owned(),
+            ));
+        }
+        let shutdown_finalize_timeout = Duration::from_millis(shutdown_finalize_timeout_ms);
         let allowed_models = env::var("ALLOWED_MODELS")
             .unwrap_or_else(|_| "company-default".to_owned())
             .split(',')
@@ -412,6 +463,10 @@ impl Config {
             extra_provider_profiles,
             stream_event_max_bytes,
             provider_idle_timeout,
+            provider_connect_timeout,
+            request_header_max_bytes,
+            drain_timeout,
+            shutdown_finalize_timeout,
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,
@@ -442,6 +497,10 @@ impl Config {
 
     pub fn data_database_max_connections(&self) -> u32 {
         self.database_max_connections - self.admin_database_max_connections
+    }
+
+    pub fn transport_header_max_bytes(&self) -> usize {
+        self.request_header_max_bytes.saturating_mul(2)
     }
 }
 

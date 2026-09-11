@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
+axum-server = "0.8"
 async-stream = "0.3"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -22,6 +23,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors", "fs", "request-id", "set-header"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.33.0"

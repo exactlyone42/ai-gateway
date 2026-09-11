@@ -212,6 +212,7 @@ pub(super) async fn proxy(
             quota_snapshot,
         )
         .await?;
+    reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(
         operation.name(),
         header_text(&headers, "x-claude-code-agent-id"),
@@ -237,6 +238,17 @@ pub(super) async fn proxy(
         provider_request_at,
         routing_claim,
     )?);
+    let mut attempt = ProviderAttempt::begin(
+        provider.clone(),
+        provider_model.clone(),
+        None,
+        provider_request_at,
+        ledger_estimated.unwrap_or_default(),
+    )
+    .with_selection(selection_snapshot);
+    reservation
+        .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
+        .await?;
     let upstream = match provider::send(
         &state.client,
         &profile.base_url,
@@ -249,21 +261,13 @@ pub(super) async fn proxy(
         Ok(value) => value,
         Err(error) => {
             let completed_at = Utc::now();
+            attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
             reservation
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
                     selected_provider: Some(provider.clone()),
-                    attempts: vec![
-                        ProviderAttempt::failed(
-                            provider,
-                            provider_model,
-                            provider_request_at,
-                            completed_at,
-                            error.kind().to_owned(),
-                        )
-                        .with_selection(selection_snapshot.clone()),
-                    ],
+                    attempts: vec![attempt],
                     completed_at,
                 })
                 .await?;
@@ -278,14 +282,7 @@ pub(super) async fn proxy(
         .or_else(|| response_headers.get("x-request-id"))
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
-    let attempt = ProviderAttempt::begin(
-        provider.clone(),
-        provider_model,
-        provider_request_id,
-        provider_request_at,
-        ledger_estimated.unwrap_or_default(),
-    )
-    .with_selection(selection_snapshot);
+    attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
         .get(header::CONTENT_TYPE)
