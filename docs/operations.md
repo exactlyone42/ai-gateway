@@ -140,9 +140,32 @@ request.
 
 ## Alerts
 
-Pool capacity below reserve, spend velocity anomaly, repeated 401/403 from a
-provider, quota-store inconsistency, fallback storm, p95 latency, 5xx rate,
-audit write failure and secret rotation overdue.
+`scripts/alert.sh <severity> <name> <message>` is the single exit for an
+operational failure. It always appends to `ALERT_LOG`, and posts JSON to
+`ALERT_WEBHOOK_URL` when that is set. The log is the part that always works: a
+webhook that is unset, wrong or down must not be why a failure goes unrecorded.
+It never fails its caller, and it makes one delivery attempt -- a retry loop
+against a paging endpoint during an incident turns a small outage into a
+rate-limited one.
+
+`scripts/healthcheck.sh` runs from the host scheduler every 15 minutes and
+raises the first three rows below. The rest are named here but nothing raises
+them yet; each says what is missing.
+
+| Alert | Threshold | What it means | Clearing it | Raised today |
+| --- | --- | --- | --- | --- |
+| `gateway_down` | `/health` does not answer | The process is gone or the port moved | Start the stack; if it will not start, the startup error names the setting | yes |
+| `gateway_not_ready` | `/health` answers, `/ready` does not | The database is unreachable, or the process is draining | Restore the database; a drain clears itself when the deployment finishes | yes |
+| `backup_stale` / `backup_missing` | Newest backup older than `BACKUP_MAX_AGE_HOURS` (30) | The daily backup stopped, so a restore would lose a day or more | Run `./scripts/backup.sh create` and fix the schedule | yes |
+| Provider authentication | Repeated 401/403 from one provider | The provider key is wrong, revoked or out of quota | Rotate the key from its approved source | no: needs a metrics or log reader |
+| Spend anomaly | Spend per hour far above the recent baseline | A runaway client, or a model priced differently than assumed | Suspend the credential, then read the ledger for the source | no: needs a baseline nobody has measured yet |
+| 5xx rate and p95 latency | Above the service level, once one is agreed | The gateway is failing or slow for everyone | Depends on the cause the traces show | no: needs a metrics backend and an agreed service level |
+| Secret rotation overdue | A credential older than the rotation interval | A key has been valid longer than the policy allows | Rotate it; the overlap window keeps the old key working meanwhile | no: needs a rotation interval nobody has set |
+
+Every alert needs someone who receives it. `ALERT_WEBHOOK_URL` is unset, so
+today the alerts reach a file on the host and no person. Naming the owner and
+the destination is a decision for whoever operates this, not a default this
+file can invent.
 
 ## Fail closed
 
