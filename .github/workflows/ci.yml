@@ -2,8 +2,12 @@ name: CI
 
 on:
   pull_request:
+  # `dev` is where segments are integrated, so it is the first branch where a
+  # combination nobody tested can appear. Without it, the state of the
+  # integration branch is only ever checked by whoever remembers to run the
+  # gates locally after a merge.
   push:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
