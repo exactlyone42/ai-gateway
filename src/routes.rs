@@ -895,6 +895,149 @@ mod tests {
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
+    /// The same guarantee for the other reason a request never reaches the
+    /// policy: the model field is there but empty, so there is no name to
+    /// resolve. The ledger has to show which model string was refused.
+    #[sqlx::test]
+    async fn a_request_with_an_unparsable_model_name_is_still_recorded(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let mut config = test_config();
+        let spool_dir = config.ledger_spool_dir.clone();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "selector-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":""}"#),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::ModelForbidden)
+        ));
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'status', gr.status,
+                'reason', gr.policy_decision->'denial_reason',
+                'evaluated', gr.policy_decision->'evaluated'
+            )
+            FROM gateway_requests gr WHERE gr.tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["status"], "rejected");
+        assert_eq!(evidence["reason"], "model_name_unparsable");
+        assert_eq!(evidence["evaluated"], false);
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    /// Recording is best effort: a ledger that cannot write must not change the
+    /// answer to a malformed request, because a 503 makes clients retry the
+    /// requests that are already the problem.
+    #[sqlx::test]
+    async fn an_unwritable_ledger_does_not_change_a_malformed_request_answer(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let mut config = test_config();
+        // A spool with no room at all: every reservation fails.
+        config.ledger_spool_dir = std::env::temp_dir().join(format!(
+            "agent-pool-gateway-full-spool-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let spool_dir = config.ledger_spool_dir.clone();
+        config.ledger_spool_max_bytes = config.ledger_spool_entry_max_bytes * 3;
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let state = AppState::new(config, pool.clone()).unwrap();
+        // Fill the single slot, so the next reservation has nowhere to go.
+        let _held = state
+            .ledger
+            .reserve(crate::ledger::RequestStart {
+                request_id: "holder".to_owned(),
+                session_id: None,
+                trace_id: None,
+                requested_model: None,
+                workload_class: None,
+                urgency: None,
+                quality: None,
+                budget_class: None,
+                estimated_tokens: None,
+                selection: None,
+                policy: None,
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "holder".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "full-spool-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"not json"),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::error::GatewayError::InvalidRequest(_))),
+            "a full spool must not turn a malformed request into a 503"
+        );
+        drop(_held);
+        state.ledger.wait_for_finalizations().await;
+        state.ledger.wait_for_idle().await;
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
     /// A body that does not decode is refused before any policy runs. It still
     /// arrived from a known credential, so Admin has to be able to say it
     /// happened -- "nothing in the ledger" and "the request never reached us"

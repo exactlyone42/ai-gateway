@@ -156,17 +156,21 @@ pub async fn enforce_deadline(
 /// answer "it arrived, and here is why it was refused" instead of nothing at
 /// all. There is no policy to snapshot yet, which is why this does not go
 /// through [`record`].
+/// Best effort on purpose: the answer to a malformed request must not depend
+/// on the ledger being healthy. A failure here is logged and the caller still
+/// returns the 4xx it was going to return -- turning it into a 503 would make
+/// clients retry the very requests that are filling the spool.
 pub async fn record_unprocessable(
     state: &AppState,
     context: &RejectionContext,
     requested_model: Option<String>,
     reason: &str,
-) -> Result<(), GatewayError> {
+) {
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
-    state
+    let recorded = state
         .ledger
         .reject(
             RequestStart {
@@ -188,8 +192,15 @@ pub async fn record_unprocessable(
             context.client_agent_id.clone(),
             context.parent_agent_id.clone(),
         )
-        .await?;
-    Ok(())
+        .await;
+    if let Err(error) = recorded {
+        tracing::warn!(
+            error.type = "unprocessable_request_not_recorded",
+            exception.message = %error,
+            denial_reason = reason,
+            "a request refused before policy evaluation left no ledger row"
+        );
+    }
 }
 
 async fn record(

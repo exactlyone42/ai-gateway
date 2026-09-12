@@ -125,7 +125,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         Ok(decoded) => decoded,
         Err(error) => {
             request_policy::record_unprocessable(state, &rejection, None, "request_undecodable")
-                .await?;
+                .await;
             return Err(GatewayError::InvalidRequest(error));
         }
     };
@@ -142,7 +142,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             Some(decoded.requested_model().to_owned()),
             "background_not_supported",
         )
-        .await?;
+        .await;
         return Err(GatewayError::UnsupportedRequest);
     }
     let selector = match ModelSelector::parse(decoded.requested_model()) {
@@ -154,7 +154,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 Some(decoded.requested_model().to_owned()),
                 "model_name_unparsable",
             )
-            .await?;
+            .await;
             return Err(GatewayError::from(error));
         }
     };

@@ -130,7 +130,7 @@ pub(super) async fn proxy(
         Ok(decoded) => decoded,
         Err(error) => {
             request_policy::record_unprocessable(&state, &rejection, None, "request_undecodable")
-                .await?;
+                .await;
             return Err(GatewayError::InvalidRequest(error));
         }
     };
@@ -143,7 +143,7 @@ pub(super) async fn proxy(
                 Some(decoded.requested_model().to_owned()),
                 "model_name_unparsable",
             )
-            .await?;
+            .await;
             return Err(GatewayError::from(error));
         }
     };
