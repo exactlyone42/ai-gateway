@@ -78,7 +78,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-info,opentelemetry_sdk=warn,opentelemetry_otlp=warn}
     ports:
-      - "127.0.0.1:8080:8080"
+      # The published port is configurable because a host that already runs
+      # something on 8080 must not force a fork of this file. The container
+      # side stays fixed: the health check and the Admin origin use it.
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     volumes:
       - ledger-spool:/var/lib/agent-pool-gateway/ledger-spool
     healthcheck:
