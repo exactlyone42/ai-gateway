@@ -60,6 +60,21 @@ disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
 gateway once; startup applies migrations and performs one batched recovery
 before accepting traffic.
 
+## Backup and restore
+
+`./scripts/backup.sh create [directory]` takes the PostgreSQL dump and the
+ledger spool volume together, because a database restored without its spool
+loses the envelopes that had not reached it yet. `./scripts/backup.sh restore
+<directory>` puts both back: it stops the gateway first, so no process holds
+connections while the schema is dropped and recreated, and it restores the
+spool with the ownership the container needs.
+
+Restore replaces every row in the target database. A restore is only finished
+when the service answers again: `/ready` returns `200` and an admin login token
+issued before the backup still creates a session. Verified on 2026-09-12 by
+deleting both volumes and restoring: the login token returned `401` against the
+empty stack and `201` after the restore.
+
 ## Process shutdown
 
 `SIGTERM` and Ctrl-C start the same bounded shutdown sequence:
