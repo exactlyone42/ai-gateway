@@ -170,6 +170,10 @@ pub enum ConfigError {
         "no tenant may use the providers: set PROVIDER_ALLOWED_TENANT_IDS, or ADMIN_BOOTSTRAP_TENANT_ID with ADMIN_BOOTSTRAP_TOKEN"
     )]
     NoAllowedTenant,
+    #[error(
+        "{0} still holds a value that ships in this repository; set a real secret or run with CREDENTIAL_ENVIRONMENT=dev"
+    )]
+    DevelopmentSecretOutsideDevelopment(&'static str),
     #[error("invalid scheduler setting: {0}")]
     InvalidScheduler(String),
 }
@@ -378,6 +382,17 @@ impl Config {
         if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
             return Err(ConfigError::IncompleteAdminBootstrap);
         }
+        reject_placeholder_secret(
+            &credential_environment,
+            "CREDENTIAL_HASH_KEY",
+            &String::from_utf8_lossy(&credential_hash_key),
+        )?;
+        reject_placeholder_secret(&credential_environment, "OPENAI_API_KEY", &openai_api_key)?;
+        reject_placeholder_secret(
+            &credential_environment,
+            "ANTHROPIC_API_KEY",
+            &anthropic_api_key,
+        )?;
         let provider_allowed_tenant_ids = provider_allowed_tenants(
             env::var("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default(),
             admin_bootstrap_tenant_id,
@@ -666,6 +681,31 @@ fn valid_tag(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// Placeholder secrets that ship in `deploy/docker-compose.yml` and
+/// `.env.example`. Anyone who can read the repository knows them, so a
+/// credential hash key taken from this list makes every credential fingerprint
+/// predictable. They are fine for development and must never reach an
+/// environment that calls itself anything else.
+const REPOSITORY_PLACEHOLDER_SECRETS: [&str; 3] = [
+    "development-only-credential-hash-key",
+    "replace-with-at-least-32-random-bytes",
+    "replace-me",
+];
+
+fn reject_placeholder_secret(
+    environment: &str,
+    name: &'static str,
+    value: &str,
+) -> Result<(), ConfigError> {
+    if environment == "dev" {
+        return Ok(());
+    }
+    if REPOSITORY_PLACEHOLDER_SECRETS.contains(&value.trim()) {
+        return Err(ConfigError::DevelopmentSecretOutsideDevelopment(name));
+    }
+    Ok(())
+}
+
 fn bootstrap_client_key(
     environment: &str,
     enabled: bool,
@@ -901,6 +941,39 @@ mod tests {
             admin_bootstrap_tenant_id(Some(Uuid::nil().to_string())),
             Err(ConfigError::NilTenant)
         ));
+    }
+
+    #[test]
+    fn repository_placeholder_secrets_stay_in_development() {
+        // The exact strings the compose file and .env.example ship with.
+        for placeholder in REPOSITORY_PLACEHOLDER_SECRETS {
+            assert!(
+                reject_placeholder_secret("dev", "CREDENTIAL_HASH_KEY", placeholder).is_ok(),
+                "development must keep working"
+            );
+            assert!(matches!(
+                reject_placeholder_secret("prod", "CREDENTIAL_HASH_KEY", placeholder),
+                Err(ConfigError::DevelopmentSecretOutsideDevelopment(
+                    "CREDENTIAL_HASH_KEY"
+                ))
+            ));
+            assert!(matches!(
+                reject_placeholder_secret(
+                    "staging",
+                    "OPENAI_API_KEY",
+                    &format!("  {placeholder} ")
+                ),
+                Err(ConfigError::DevelopmentSecretOutsideDevelopment(
+                    "OPENAI_API_KEY"
+                ))
+            ));
+        }
+        reject_placeholder_secret(
+            "prod",
+            "CREDENTIAL_HASH_KEY",
+            "a-real-secret-at-least-32-bytes-long",
+        )
+        .unwrap();
     }
 
     #[test]
