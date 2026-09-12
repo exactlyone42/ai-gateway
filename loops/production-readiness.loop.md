@@ -61,7 +61,7 @@
 - 本輪成果：形成一份以目前主機與最新 `dev` 為準的環境基線，明確分出「已存在、缺少、需人決定」。
 - 完成條件：記錄 commit、工作樹與 owner；跑完整檢查與 production image build；用全新可丟棄 DB 驗 migration；盤點部署入口、持久資料、連接埠、秘密來源、Client 與成本上限，不輸出秘密。
 - 最可能推翻方案的假設：目前 Docker／服務設定能在不碰其他專案與共享 DB 的情況下形成持久單實例；先以本機設定與一次有界啟動驗證。
-- 目前動作：讀最新專案規則與本 LOOP，確認 owner 後建立既定分支、推遠端並開 draft PR，再執行 S01。
+- 目前動作：分支 `feature/production-readiness` 與 draft PR #54 已建立。完整檢查已綠。接著依審查意見，用另一組具名磁碟區把 `deploy/docker-compose.yml` 整套拉起來，一次同時證明映像建得出來、11 個資料庫升級步驟從空庫套得完、`/ready` 會綠、重啟後資料還在。
 - 阻塞與解除條件：尚無；正式網址、Provider 帳號或部署權限若確實不可取得，只阻塞對應 step，不阻塞基線與可審查設定。
 - 後續順序：S01 → S02 → S03 → S04 → S05 → S06 → S07。
 
@@ -77,16 +77,18 @@
 | 時間 | 觸發與證據 | 舊版→新版 | 受影響 step | 決定 |
 | --- | --- | --- | --- | --- |
 | 2026-09-12 12:31+08:00 | 建立主 LOOP；目前只有一次性本機預覽，沒有持續服務證據 | 無→1 | S01-S07 | 先做 S01，不宣稱已部署 |
+| 2026-09-12 12:51+08:00 | 開工審查指出：空庫套 migration＋單獨建映像都碰不到 compose 整套能否跑起來；只套到 3/11 的舊開發資料庫不該當基線 | 1→1（不升版，只改 S01 做法） | S01 | S01 改用「另一組具名磁碟區把整套拉起來」當單一證據；放棄研究舊 15432 資料庫如何升級，改為丟棄重建 |
 
 ## 已做
 
+- `2026-09-12 12:51+08:00` S01 進行中：完整檢查第一次跑出**紅燈**（EXIT=101）——`routes::tests::dropping_an_openai_client_closes_the_provider_stream` 在 `src/routes.rs` 清理 spool 目錄時 panic（`DirectoryNotEmpty`）。單獨跑會過，併發跑才紅。直接量測找出原因：中止服務任務後 `pending_finalizations()=1`，等待前目錄是 `.next`／`.reserved`／`.working` 三個保留檔，等待後只剩一個 `.ready`——背景改名與 `remove_dir_all` 互相搶。兩個同型測試改成先 `wait_for_finalizations()` 再清理（commit `355afd9`）。重跑 `./scripts/check.sh all` EXIT=0：226 passed／0 failed／0 ignored，整合測試 3＋2 通過，gate 自我測試 29/29。
 - `2026-09-12 12:42+08:00` Claude Code 接手：重查 owner 與重複工作——issue #19 仍 OPEN（assignee DnaBoss，label `status:backlog`）、GitHub open PR 為 0、遠端只有 `dev`／`main`／`feat/T-06-virtual-key-store`，沒有 `feature/production-readiness`。確認無重複後從 `dev`（`7ae94af`）建立 `feature/production-readiness`。工作樹的未追蹤 `AGENTS.md` 保持原狀，未加入提交。
 - `2026-09-12 12:31+08:00` Codex 依新版 cashloop 建立 W20 主 LOOP；查得 open issue #19 可沿用，沒有同名 LOOP、分支或開放 PR。只建立交接計畫，尚未實作或部署。
 
 ## 已確定不可行
 
 - 把已停止的臨時 `18080` Gateway 與可丟棄 DB 當正式環境：重啟後不存在，也沒有真 Provider 憑證。
-- 為了沿用既有 `15432` DB 而修改 migration checksum 或 migration 歷史：會破壞共享資料可信度；改用正確環境與可驗證升級路徑。
+- 為了沿用既有 `15432` DB 而修改 migration checksum 或 migration 歷史：會破壞共享資料可信度；改用正確環境與可驗證升級路徑。`2026-09-12` 實查：該資料庫只套用 11 個 migration 中的前 3 個，不具代表性，基線改用全新資料庫。
 - 用 placeholder Provider key、把秘密寫進 `.env` 後提交，或在 LOOP 留明文：無法安全交付。
 - 尚有單實例鎖與單機 spool 時直接宣稱 HA：證據不支持；先完成可用單實例，HA 依量測與共享耐久設計另行規劃。
 - 只看 `/health`、HTTP 200、截圖或 build 成功就宣布可用：必須走 Client → Gateway → Provider → ledger → Admin 的真實流程。
@@ -97,6 +99,8 @@
 - `docs/operations.md`：定義環境隔離、分階段推出、migration、spool、關機與告警；證明已有操作契約，不能證明目標環境已照做。
 - `AGENTS.md`／`CLAUDE.md`：`dev` 是整合分支、`main` 是正式；證明部署關卡，不代表本 LOOP 自動取得合併或部署授權。
 - `2026-09-12` 查重：GitHub open issue #19；open PR 為 0；同名本機／遠端分支為 0。這只證明當時未發現重複工作，接手仍須再查 owner 與最新遠端狀態。
+- `2026-09-12` 完整檢查兩次紀錄：第一次 EXIT=101（1 個測試紅）、修正後 EXIT=0（226 passed／0 failed／0 ignored／0 skipped）。這證明目前 `dev` 加上該修正可通過全部既有 gate，不證明服務在任何主機上跑得起來。
+- `2026-09-12` spool 競態的直接量測（`pending_finalizations()=1`、三個保留檔改名成一個 `.ready`）。這證明失敗原因是測試清理與背景改名搶同一個目錄，不證明正式路徑上的 ledger 有問題——正式路徑不會在改名中途刪掉 spool 目錄。
 - `2026-09-11` Admin 預覽曾回 200 且 login session 建立成功，之後 `18080` 已無服務。這證明 UI 流程曾可操作，不能證明持久部署或真模型請求。
 
 ## 來源
