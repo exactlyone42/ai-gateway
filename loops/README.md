@@ -39,7 +39,7 @@
 | [advanced-routing](./advanced-routing.loop.md) | W17 | 已交付 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
-| [production-readiness](./production-readiness.loop.md) | W20 | 進行中（S01-S03、S05 完成；S04／S06／S07 待外部條件） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
+| [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
 
 ## 現在該做哪一個
 
