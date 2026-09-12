@@ -8,9 +8,9 @@
 | 狀態 | 進行中（S01） |
 | 優先度 | P0 |
 | 前置 | W00-W19 已交付 |
-| 開始 | 2026-09-12 12:42+08:00（Claude Code 接手；Codex 2026-09-12 12:31 建檔） |
+| 開始 | 2026-09-12T12:42+08:00 |
 | 結束 | 待完成 |
-| Token | 來源 `./scripts/token-ledger.sh --slug production-readiness`（讀 Claude Code transcript）；基準＝本 LOOP 開始欄時間，結束時讀同一來源 |
+| Token | 來源 `./scripts/token-ledger.sh --slug production-readiness`。截至 `2026-09-12T15:54+08:00`（經過 3 小時 12 分）：452 次呼叫、計費 143,164,195（其中快取讀取 142,007,730）。Codex 12:31 建檔那段不在本視窗內。 |
 
 ## 目的
 
