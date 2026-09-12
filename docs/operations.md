@@ -162,6 +162,12 @@ them yet; each says what is missing.
 | 5xx rate and p95 latency | Above the service level, once one is agreed | The gateway is failing or slow for everyone | Depends on the cause the traces show | no: needs a metrics backend and an agreed service level |
 | Secret rotation overdue | A credential older than the rotation interval | A key has been valid longer than the policy allows | Rotate it; the overlap window keeps the old key working meanwhile | no: needs a rotation interval nobody has set |
 
+A passing check stamps `HEALTHCHECK_STATUS_FILE` with the time. A check that
+stopped running looks exactly like one that keeps passing -- both are silent --
+and a stale stamp is the only thing here that tells them apart. Verified on
+2026-09-12: a failing check leaves the stamp untouched and raises its alert; the
+next passing check moves it.
+
 Every alert needs someone who receives it. `ALERT_WEBHOOK_URL` is unset, so
 today the alerts reach a file on the host and no person. Naming the owner and
 the destination is a decision for whoever operates this, not a default this
