@@ -5,8 +5,13 @@
 # database yet. docs/operations.md says to back them up together, so this
 # takes and restores them as one unit.
 #
-#   ./scripts/backup.sh create [directory]   # default: ./backups/<utc stamp>
+#   ./scripts/backup.sh create [root]        # default root: ./backups
 #   ./scripts/backup.sh restore <directory>
+#
+# `create` writes one dated directory under the root and then keeps the newest
+# BACKUP_KEEP of them (default 14), so a scheduled run does not fill the disk
+# and does not need anyone to prune it by hand. Only directories this script
+# named are ever removed.
 #
 # COMPOSE_PROJECT (default: apg) selects the running stack. The restore stops
 # the gateway first: a process holding open connections while the schema is
@@ -29,8 +34,26 @@ require_container() {
     fail "container $1 is not there; set COMPOSE_PROJECT to the running stack"
 }
 
+# Removes every dated directory beyond the newest `keep`. The name pattern is
+# the guard: a root that also holds notes or a symlink keeps them.
+prune() {
+  local root="$1" keep="$2" dated
+  dated=$(find "$root" -maxdepth 1 -type d -printf '%f\n' 2>/dev/null |
+    grep -E '^[0-9]{8}T[0-9]{6}Z$' | sort)
+  [ -n "$dated" ] || return 0
+  local total
+  total=$(printf '%s\n' "$dated" | wc -l)
+  [ "$total" -gt "$keep" ] || return 0
+  printf '%s\n' "$dated" | head -n "$((total - keep))" | while IFS= read -r old; do
+    rm -rf "${root:?}/${old:?}"
+    echo "removed old backup $old"
+  done
+}
+
 create() {
-  local directory="${1:-backups/$(date -u +%Y%m%dT%H%M%SZ)}"
+  local root="${1:-backups}"
+  local keep="${BACKUP_KEEP:-14}"
+  local directory="$root/$(date -u +%Y%m%dT%H%M%SZ)"
   require_container "$postgres"
   mkdir -p "$directory"
   chmod 700 "$directory"
@@ -47,6 +70,7 @@ create() {
 
   echo "backup written to $directory"
   ls -l "$directory"
+  prune "$root" "$keep"
 }
 
 restore() {

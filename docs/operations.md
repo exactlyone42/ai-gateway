@@ -93,6 +93,19 @@ issued before the backup still creates a session. Verified on 2026-09-12 by
 deleting both volumes and restoring: the login token returned `401` against the
 empty stack and `201` after the restore.
 
+`create` keeps the newest `BACKUP_KEEP` dated directories (default 14) and
+removes older ones, so a scheduled run neither fills the disk nor waits for
+someone to prune it. Only directories it named are removed; anything else in
+the backup root is left alone.
+
+Run it daily from the host scheduler. On the current host that is 05:30
+Asia/Taipei, held by a lock file so a slow run cannot overlap the next one,
+with output appended to `backup.log`. Verified on 2026-09-12 by running the
+scheduled command in a stripped environment like the scheduler's own.
+
+A failed backup is currently visible only in that log. Nothing alerts on it
+yet; that belongs with the rest of the alerting work.
+
 ## Process shutdown
 
 `SIGTERM` and Ctrl-C start the same bounded shutdown sequence:
