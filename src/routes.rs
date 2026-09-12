@@ -895,6 +895,69 @@ mod tests {
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
+    /// The rejection an operator meets most often: the registry has nothing to
+    /// offer yet. Every other rejection leaves a row, so this one must too --
+    /// otherwise "my request fails" has no trace in Admin at all.
+    #[sqlx::test]
+    async fn a_request_with_no_model_available_is_still_recorded(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let mut config = test_config();
+        let spool_dir = config.ledger_spool_dir.clone();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let state = AppState::new(config, pool.clone()).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: PrincipalContext {
+                    tenant_id,
+                    credential_id: Uuid::nil(),
+                    credential_name: "registry-test".to_owned(),
+                    user_id: None,
+                    user_name: None,
+                    device_id: None,
+                    device_name: None,
+                    client_id: None,
+                    client_name: None,
+                    agent_id: None,
+                    agent_name: None,
+                },
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"nothing-is-registered"}"#),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::GatewayError::ModelForbidden)
+        ));
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let evidence: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'status', gr.status,
+                'requested', gr.requested_model,
+                'reason', gr.policy_decision->'denial_reason',
+                'attempts', (SELECT count(*) FROM provider_attempts pa
+                    WHERE (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id))
+            )
+            FROM gateway_requests gr WHERE gr.tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence["status"], "rejected");
+        assert_eq!(evidence["requested"], "nothing-is-registered");
+        assert_eq!(evidence["reason"], "no_model_available");
+        assert_eq!(evidence["attempts"], 0, "the provider was never called");
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
     #[sqlx::test]
     async fn hard_quota_is_a_durable_429_before_the_provider_call(pool: PgPool) {
         let tenant_id = Uuid::new_v4();

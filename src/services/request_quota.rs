@@ -32,7 +32,7 @@ pub async fn admit(
 ) -> Result<PreparedQuota, GatewayError> {
     let operation = request.source_operation();
     let body = request.source_document();
-    let mut candidates = state
+    let mut candidates = match state
         .models
         .candidates(
             prepared.rejection.principal.tenant_id,
@@ -41,7 +41,23 @@ pub async fn admit(
             prepared.selector.clone(),
             required,
         )
-        .await?;
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            let error = GatewayError::from(error);
+            // "The registry has nothing for this request" is the rejection an
+            // operator meets most often, and every other rejection already
+            // leaves a row. A registry that is unavailable is a different
+            // thing: that is the gateway failing, not the request, and it
+            // keeps its own error rather than a denial reason.
+            if matches!(error, GatewayError::ModelForbidden) {
+                super::request_policy::record_rejected(state, prepared, "no_model_available")
+                    .await?;
+            }
+            return Err(error);
+        }
+    };
     let mut had_unsupported_translation = false;
     candidates.retain(
         |candidate| match validate_for_provider(request, candidate) {
@@ -54,11 +70,16 @@ pub async fn admit(
         },
     );
     if candidates.is_empty() {
-        return Err(if had_unsupported_translation {
-            GatewayError::UnsupportedRequest
+        // Two different outcomes, so two different reasons: an operator
+        // reading the ledger needs to know whether the registry had nothing
+        // at all or had something this request could not be translated for.
+        let (reason, error) = if had_unsupported_translation {
+            ("unsupported_translation", GatewayError::UnsupportedRequest)
         } else {
-            GatewayError::ModelForbidden
-        });
+            ("no_model_for_request", GatewayError::ModelForbidden)
+        };
+        super::request_policy::record_rejected(state, prepared, reason).await?;
+        return Err(error);
     }
     let policy_reference = candidates
         .first()
