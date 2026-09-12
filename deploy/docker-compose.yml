@@ -55,6 +55,15 @@ services:
       ANTHROPIC_PROVIDER: ${ANTHROPIC_PROVIDER:-anthropic}
       ANTHROPIC_REQUEST_MAX_BYTES: ${ANTHROPIC_REQUEST_MAX_BYTES:-33554432}
       STREAM_EVENT_MAX_BYTES: ${STREAM_EVENT_MAX_BYTES:-33554432}
+      # Deployment has to be able to tune these. docs/operations.md requires
+      # the platform termination grace period to be derived from the two
+      # shutdown values, which is impossible if the container fixes them.
+      # Defaults match src/config.rs.
+      PROVIDER_IDLE_TIMEOUT_MS: ${PROVIDER_IDLE_TIMEOUT_MS:-120000}
+      PROVIDER_CONNECT_TIMEOUT_MS: ${PROVIDER_CONNECT_TIMEOUT_MS:-10000}
+      REQUEST_HEADER_MAX_BYTES: ${REQUEST_HEADER_MAX_BYTES:-65536}
+      DRAIN_TIMEOUT_MS: ${DRAIN_TIMEOUT_MS:-30000}
+      SHUTDOWN_FINALIZE_TIMEOUT_MS: ${SHUTDOWN_FINALIZE_TIMEOUT_MS:-5000}
       ENABLE_DEVELOPMENT_BOOTSTRAP: ${ENABLE_DEVELOPMENT_BOOTSTRAP:-false}
       BOOTSTRAP_CLIENT_KEY: ${BOOTSTRAP_CLIENT_KEY:-}
       CREDENTIAL_HASH_KEY: ${CREDENTIAL_HASH_KEY:-development-only-credential-hash-key}
