@@ -13,6 +13,12 @@
 # COMPOSE_PROJECT (default: apg) selects the stack. The revision is required:
 # without it the check after the deployment cannot tell the new build from the
 # old one, which is the only thing that makes this more than a restart.
+#
+# What a rollback can and cannot fix: it restores the previous BUILD, so it
+# recovers from a bad release. It does not touch .env, so a broken setting
+# breaks the previous image too -- measured 2026-09-12. In that case the script
+# says the previous image did not come back and stops, rather than reporting a
+# rollback that did not restore the service.
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

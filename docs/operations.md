@@ -60,6 +60,24 @@ disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
 gateway once; startup applies migrations and performs one batched recovery
 before accepting traffic.
 
+## Deployment
+
+`BUILD_REVISION=<id> ./scripts/deploy.sh` keeps the image that is serving,
+builds and starts the new one, then confirms the running gateway reports that
+revision on `/health`. Any failure restores the kept image. Migrations run
+inside the process at startup, so a failing migration stops the container and
+never serves.
+
+A rollback restores the previous build, not the previous settings: a broken
+value in `.env` breaks the previous image as well. The script then says the
+previous image did not come back and stops, because a rollback that did not
+restore the service must not be reported as one.
+
+Verified on 2026-09-12: a build whose `/health` was deliberately broken passed
+the container health check, which polls `/ready`, and was caught by the check
+after the deployment instead. The previous revision was serving again when the
+script returned.
+
 ## Backup and restore
 
 `./scripts/backup.sh create [directory]` takes the PostgreSQL dump and the
