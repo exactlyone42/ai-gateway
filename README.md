@@ -74,16 +74,24 @@ Migrations run during startup, so a database is required to boot. A failing
 migration stops the process rather than serving against a half-migrated schema.
 
 The whole stack, including the gateway image. It runs without the development
-bootstrap, so it needs one tenant that may use the server-side provider
-credentials:
+bootstrap, so it needs a tenant that may use the server-side provider
+credentials. Setting the admin bootstrap pair covers that and gives you a way
+in; export the token from your own secret store instead of typing it:
 
 ```bash
-PROVIDER_ALLOWED_TENANT_IDS=<tenant uuid> \
+ADMIN_BOOTSTRAP_TOKEN="$MY_BOOTSTRAP_TOKEN" \
+ADMIN_BOOTSTRAP_TENANT_ID=<tenant uuid> \
   docker compose -f deploy/docker-compose.yml up --build
 ```
 
-Without it the gateway refuses to start and says which setting is missing,
-rather than serving providers no tenant may use.
+Without either that pair or `PROVIDER_ALLOWED_TENANT_IDS`, the gateway refuses
+to start and says which setting is missing, rather than serving providers no
+tenant may use.
+
+A started stack still serves nobody: `POST /admin/v1/bootstrap` creates the
+first admin, and identities and keys are issued from there. `docs/admin.md` has
+that flow. Provider credentials also stay at their `replace-me` defaults until
+you supply real ones.
 
 The Admin Web UI is served by the gateway at `http://127.0.0.1:8080/admin/` and uses the
 short-lived Admin session flow documented in `docs/admin.md`.

@@ -378,22 +378,11 @@ impl Config {
         if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
             return Err(ConfigError::IncompleteAdminBootstrap);
         }
-        let mut provider_allowed_tenant_ids =
-            provider_tenant_ids(env::var("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default())?;
-        if let Some(tenant_id) = admin_bootstrap_tenant_id
-            && !provider_allowed_tenant_ids.contains(&tenant_id)
-        {
-            provider_allowed_tenant_ids.push(tenant_id);
-        }
-        if bootstrap_client_key.is_some() {
-            provider_allowed_tenant_ids.push(Uuid::nil());
-        }
-        // Fail closed, but say which setting is missing. An empty list builds
-        // provider profiles nobody may use, and the registry then rejects them
-        // with an error that names no environment variable at all.
-        if provider_allowed_tenant_ids.is_empty() {
-            return Err(ConfigError::NoAllowedTenant);
-        }
+        let provider_allowed_tenant_ids = provider_allowed_tenants(
+            env::var("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default(),
+            admin_bootstrap_tenant_id,
+            bootstrap_client_key.is_some(),
+        )?;
         if admin_bootstrap_token
             .as_ref()
             .is_some_and(|value| value.len() < 32)
@@ -725,6 +714,33 @@ fn retiring_hash_keys(
         .collect()
 }
 
+/// Collects every tenant that may use the server-side provider credentials:
+/// the operator's own list, the admin bootstrap tenant, and the nil tenant that
+/// belongs to the development bootstrap key.
+///
+/// Fails closed when the result is empty, and says which setting is missing.
+/// An empty list still builds provider profiles, which the registry then
+/// rejects with an error that names no environment variable at all.
+fn provider_allowed_tenants(
+    configured: String,
+    bootstrap_tenant: Option<Uuid>,
+    has_bootstrap_client_key: bool,
+) -> Result<Vec<Uuid>, ConfigError> {
+    let mut tenants = provider_tenant_ids(configured)?;
+    if let Some(tenant_id) = bootstrap_tenant
+        && !tenants.contains(&tenant_id)
+    {
+        tenants.push(tenant_id);
+    }
+    if has_bootstrap_client_key {
+        tenants.push(Uuid::nil());
+    }
+    if tenants.is_empty() {
+        return Err(ConfigError::NoAllowedTenant);
+    }
+    Ok(tenants)
+}
+
 /// An empty value means "not set", the same as `ADMIN_BOOTSTRAP_TOKEN`. A
 /// deployment template that forwards both variables unconditionally would
 /// otherwise refuse to start instead of running without admin bootstrap.
@@ -885,6 +901,34 @@ mod tests {
             admin_bootstrap_tenant_id(Some(Uuid::nil().to_string())),
             Err(ConfigError::NilTenant)
         ));
+    }
+
+    #[test]
+    fn providers_need_at_least_one_tenant() {
+        let tenant = Uuid::new_v4();
+        let bootstrap = Uuid::new_v4();
+        // What the shipped compose file passes when the operator set nothing.
+        assert!(matches!(
+            provider_allowed_tenants(String::new(), None, false),
+            Err(ConfigError::NoAllowedTenant)
+        ));
+        assert_eq!(
+            provider_allowed_tenants(tenant.to_string(), None, false).unwrap(),
+            vec![tenant]
+        );
+        assert_eq!(
+            provider_allowed_tenants(String::new(), Some(bootstrap), false).unwrap(),
+            vec![bootstrap]
+        );
+        assert_eq!(
+            provider_allowed_tenants(String::new(), None, true).unwrap(),
+            vec![Uuid::nil()]
+        );
+        // The bootstrap tenant is not added twice when it is already listed.
+        assert_eq!(
+            provider_allowed_tenants(tenant.to_string(), Some(tenant), false).unwrap(),
+            vec![tenant]
+        );
     }
 
     #[test]

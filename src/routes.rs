@@ -2697,12 +2697,7 @@ mod tests {
 
         upstream_task.abort();
         gateway_task.abort();
-        // A dropped client finalizes on a background task, which renames the
-        // reserved spool files into one ready envelope. Cleaning up while that
-        // rename is still in flight makes `remove_dir_all` fail with
-        // `DirectoryNotEmpty` for a reason unrelated to the provider stream.
-        ledger.wait_for_finalizations().await;
-        ledger.wait_for_idle().await;
+        wait_for_finalized_spool(&ledger, &spool_dir).await;
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
@@ -2763,8 +2758,7 @@ mod tests {
 
         upstream_task.abort();
         gateway_task.abort();
-        ledger.wait_for_finalizations().await;
-        ledger.wait_for_idle().await;
+        wait_for_finalized_spool(&ledger, &spool_dir).await;
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
@@ -3654,6 +3648,35 @@ mod tests {
 
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    /// A dropped client finalizes on a background task, which turns the three
+    /// reserved spool files into one ready envelope. Removing the directory
+    /// while that is in flight fails with `DirectoryNotEmpty` for a reason that
+    /// has nothing to do with the provider stream. Waiting on the counters
+    /// alone is not enough: the reservation may not have been dropped yet when
+    /// the upstream reports the closed connection.
+    async fn wait_for_finalized_spool(ledger: &Ledger, directory: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                ledger.wait_for_finalizations().await;
+                ledger.wait_for_idle().await;
+                let finalized = std::fs::read_dir(directory).unwrap().all(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        == Some("ready")
+                });
+                if finalized {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the cancelled request was never finalized");
     }
 
     fn spool_files(directory: &std::path::Path) -> usize {
