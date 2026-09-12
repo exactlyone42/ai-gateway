@@ -14,6 +14,11 @@ COPY src ./src
 # The migration runner reads this directory at compile time, so it has to be
 # present in the build context even while it is empty.
 COPY migrations ./migrations
+# The build context has no .git, so the revision the image reports comes from
+# the caller. Without it the running process answers "unknown", which is
+# honest but useless for confirming a deployment.
+ARG BUILD_REVISION
+ENV BUILD_REVISION=$BUILD_REVISION
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
