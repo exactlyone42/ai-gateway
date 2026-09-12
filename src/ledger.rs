@@ -1232,6 +1232,14 @@ impl Spool {
             .and_then(|value| value.sync_all())
             .map_err(LedgerError::Io)?;
 
+        // The spool is the durability guarantee for every accepted request, so
+        // a directory this process cannot write is a broken deployment. Prove
+        // it at startup: a container that mounts the volume as another user
+        // stays healthy on every later check and only loses the ledger.
+        let probe = directory.join("startup.tmp");
+        fs::write(&probe, b"").map_err(LedgerError::Io)?;
+        remove_if_present(&probe)?;
+
         // One accepted request reserves its interrupted record and two
         // checkpoint workspaces. One remains the last good checkpoint while
         // the other is overwritten, so a torn write cannot destroy both.
@@ -2342,6 +2350,43 @@ mod tests {
                 entry.path().extension().and_then(|value| value.to_str()) == Some("ready")
             })
             .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spool_directory_the_process_cannot_write_is_refused_at_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = test_directory("readonly");
+        fs::create_dir_all(&directory).unwrap();
+        let mut mode = fs::metadata(&directory).unwrap().permissions();
+        mode.set_mode(0o555);
+        fs::set_permissions(&directory, mode).unwrap();
+        // root ignores the mode bits, so state which case this run exercises
+        // instead of passing for the wrong reason.
+        let writable = fs::write(directory.join("who.tmp"), b"").is_ok();
+
+        let opened = Spool::open(directory.clone(), 1024 * 1024, MIN_ENTRY_MAX_BYTES);
+
+        let mut mode = fs::metadata(&directory).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&directory, mode).unwrap();
+        let left_behind: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        fs::remove_dir_all(&directory).unwrap();
+
+        if writable {
+            opened.unwrap();
+            assert_eq!(left_behind, ["who.tmp"], "the probe file was left behind");
+        } else {
+            assert!(
+                matches!(opened, Err(LedgerError::Io(_))),
+                "an unwritable spool must not open"
+            );
+            assert!(left_behind.is_empty());
+        }
     }
 
     fn test_directory(name: &str) -> PathBuf {
