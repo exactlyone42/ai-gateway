@@ -2673,6 +2673,7 @@ mod tests {
         let spool_dir = config.ledger_spool_dir.clone();
         let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
         let state = Arc::new(AppState::new(config, pool).unwrap());
+        let ledger = state.ledger.clone();
         let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway_address = gateway_listener.local_addr().unwrap();
         let gateway_task =
@@ -2696,6 +2697,12 @@ mod tests {
 
         upstream_task.abort();
         gateway_task.abort();
+        // A dropped client finalizes on a background task, which renames the
+        // reserved spool files into one ready envelope. Cleaning up while that
+        // rename is still in flight makes `remove_dir_all` fail with
+        // `DirectoryNotEmpty` for a reason unrelated to the provider stream.
+        ledger.wait_for_finalizations().await;
+        ledger.wait_for_idle().await;
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
@@ -2732,6 +2739,7 @@ mod tests {
         let spool_dir = config.ledger_spool_dir.clone();
         let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
         let state = Arc::new(AppState::new(config, pool).unwrap());
+        let ledger = state.ledger.clone();
         let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway_address = gateway_listener.local_addr().unwrap();
         let gateway_task =
@@ -2755,6 +2763,8 @@ mod tests {
 
         upstream_task.abort();
         gateway_task.abort();
+        ledger.wait_for_finalizations().await;
+        ledger.wait_for_idle().await;
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
