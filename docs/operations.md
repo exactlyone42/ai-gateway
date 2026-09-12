@@ -5,6 +5,11 @@
 Use separate development, staging and production databases, keys, provider
 accounts and model aliases. A client key is valid in exactly one environment.
 
+Outside the development bootstrap, every environment must name the tenants that
+may use the server-side provider credentials. Set `PROVIDER_ALLOWED_TENANT_IDS`,
+or `ADMIN_BOOTSTRAP_TENANT_ID` together with `ADMIN_BOOTSTRAP_TOKEN`. The
+gateway fails closed at startup when neither is present.
+
 ## Rollout
 
 1. Threat model and provider-contract review.

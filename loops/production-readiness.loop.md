@@ -81,6 +81,11 @@
 
 ## 已做
 
+- `2026-09-12 13:04+08:00` **照文件的一鍵啟動其實起不來，已修好並實測**。依審查意見改用「另一組具名磁碟區把 `deploy/docker-compose.yml` 整套拉起來」當單一證據，連續撞到三個缺陷：
+  1. `ADMIN_BOOTSTRAP_TENANT_ID` 未設定時，compose 仍送出空字串，設定解析把空字串拿去解 UUID 就失敗，容器無限重啟。同組的 `ADMIN_BOOTSTRAP_TOKEN` 早就把空字串當未設定，兩者不對稱。已改成一致（commit `7fad281`），並補上「拿掉修正就會變紅」的測試（實測還原舊行為後 FAILED）。
+  2. compose 從未轉送 `PROVIDER_ALLOWED_TENANT_IDS`，而 compose 預設關閉開發用 bootstrap，於是沒有任何租戶可用 Provider 憑證，啟動被擋——這個「擋下來」是對的（fail closed），錯的是沒有可設定的入口。已在 compose 補上該變數。
+  3. 啟動失敗只印出變數名稱（`Error: Registry(InvalidProviderProfile)`、`Error: NoAllowedTenant`），維運看不出要改什麼。`main` 改為印出可讀訊息與整串成因；設定層也補上直接點名要設哪個變數的錯誤。
+  實測（同一個映像、同一組設定）：不設租戶 → `agent-pool-gateway stopped with an error: no tenant may use the providers: set PROVIDER_ALLOWED_TENANT_IDS, or ADMIN_BOOTSTRAP_TENANT_ID with ADMIN_BOOTSTRAP_TOKEN`；設了租戶 → 兩個容器都 healthy、`/health` 200、`/ready` 200、`/admin/` 200。空資料庫從零套用 **11/11** 個升級步驟成功（`_sqlx_migrations` 11 筆全部 success，public schema 22 張表）。整套 restart 後 migration 指紋不變（`750a74d7…`）、`/ready` 回 200，證明資料在具名磁碟區上活得過重啟。連接埠只綁 `127.0.0.1`（8080 與 15434），沒有暴露到區域網路。
 - `2026-09-12 12:51+08:00` S01 進行中：完整檢查第一次跑出**紅燈**（EXIT=101）——`routes::tests::dropping_an_openai_client_closes_the_provider_stream` 在 `src/routes.rs` 清理 spool 目錄時 panic（`DirectoryNotEmpty`）。單獨跑會過，併發跑才紅。直接量測找出原因：中止服務任務後 `pending_finalizations()=1`，等待前目錄是 `.next`／`.reserved`／`.working` 三個保留檔，等待後只剩一個 `.ready`——背景改名與 `remove_dir_all` 互相搶。兩個同型測試改成先 `wait_for_finalizations()` 再清理（commit `355afd9`）。重跑 `./scripts/check.sh all` EXIT=0：226 passed／0 failed／0 ignored，整合測試 3＋2 通過，gate 自我測試 29/29。
 - `2026-09-12 12:42+08:00` Claude Code 接手：重查 owner 與重複工作——issue #19 仍 OPEN（assignee DnaBoss，label `status:backlog`）、GitHub open PR 為 0、遠端只有 `dev`／`main`／`feat/T-06-virtual-key-store`，沒有 `feature/production-readiness`。確認無重複後從 `dev`（`7ae94af`）建立 `feature/production-readiness`。工作樹的未追蹤 `AGENTS.md` 保持原狀，未加入提交。
 - `2026-09-12 12:31+08:00` Codex 依新版 cashloop 建立 W20 主 LOOP；查得 open issue #19 可沿用，沒有同名 LOOP、分支或開放 PR。只建立交接計畫，尚未實作或部署。
@@ -101,6 +106,8 @@
 - `2026-09-12` 查重：GitHub open issue #19；open PR 為 0；同名本機／遠端分支為 0。這只證明當時未發現重複工作，接手仍須再查 owner 與最新遠端狀態。
 - `2026-09-12` 完整檢查兩次紀錄：第一次 EXIT=101（1 個測試紅）、修正後 EXIT=0（226 passed／0 failed／0 ignored／0 skipped）。這證明目前 `dev` 加上該修正可通過全部既有 gate，不證明服務在任何主機上跑得起來。
 - `2026-09-12` spool 競態的直接量測（`pending_finalizations()=1`、三個保留檔改名成一個 `.ready`）。這證明失敗原因是測試清理與背景改名搶同一個目錄，不證明正式路徑上的 ledger 有問題——正式路徑不會在改名中途刪掉 spool 目錄。
+- `2026-09-12` 一鍵啟動的雙向對照：不設租戶時啟動被擋且訊息點名要設哪個變數；設了租戶則整套 healthy。這證明「擋得住」與「起得來」兩邊都成立，不證明真 Provider 請求可用——目前金鑰仍是 `replace-me`。
+- `2026-09-12` 空資料庫 11/11 migration 成功、重啟後指紋不變。這證明資料結構升級與單機持久化可行，不證明備份、還原或跨主機搬遷（S05 才驗）。
 - `2026-09-11` Admin 預覽曾回 200 且 login session 建立成功，之後 `18080` 已無服務。這證明 UI 流程曾可操作，不能證明持久部署或真模型請求。
 
 ## 來源

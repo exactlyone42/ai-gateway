@@ -166,6 +166,10 @@ pub enum ConfigError {
     InvalidAdminOrigin,
     #[error("invalid ADMIN_TRUSTED_PROXY_IPS: {0}")]
     InvalidAdminTrustedProxy(String),
+    #[error(
+        "no tenant may use the providers: set PROVIDER_ALLOWED_TENANT_IDS, or ADMIN_BOOTSTRAP_TENANT_ID with ADMIN_BOOTSTRAP_TOKEN"
+    )]
+    NoAllowedTenant,
     #[error("invalid scheduler setting: {0}")]
     InvalidScheduler(String),
 }
@@ -383,6 +387,12 @@ impl Config {
         }
         if bootstrap_client_key.is_some() {
             provider_allowed_tenant_ids.push(Uuid::nil());
+        }
+        // Fail closed, but say which setting is missing. An empty list builds
+        // provider profiles nobody may use, and the registry then rejects them
+        // with an error that names no environment variable at all.
+        if provider_allowed_tenant_ids.is_empty() {
+            return Err(ConfigError::NoAllowedTenant);
         }
         if admin_bootstrap_token
             .as_ref()

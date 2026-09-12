@@ -73,11 +73,17 @@ curl http://127.0.0.1:8080/ready    # readiness: the database answers too
 Migrations run during startup, so a database is required to boot. A failing
 migration stops the process rather than serving against a half-migrated schema.
 
-The whole stack, including the gateway image:
+The whole stack, including the gateway image. It runs without the development
+bootstrap, so it needs one tenant that may use the server-side provider
+credentials:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+PROVIDER_ALLOWED_TENANT_IDS=<tenant uuid> \
+  docker compose -f deploy/docker-compose.yml up --build
 ```
+
+Without it the gateway refuses to start and says which setting is missing,
+rather than serving providers no tenant may use.
 
 The Admin Web UI is served by the gateway at `http://127.0.0.1:8080/admin/` and uses the
 short-lived Admin session flow documented in `docs/admin.md`.
