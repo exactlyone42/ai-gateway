@@ -5,6 +5,11 @@
 Use separate development, staging and production databases, keys, provider
 accounts and model aliases. A client key is valid in exactly one environment.
 
+Outside the development bootstrap, every environment must name the tenants that
+may use the server-side provider credentials. Set `PROVIDER_ALLOWED_TENANT_IDS`,
+or `ADMIN_BOOTSTRAP_TENANT_ID` together with `ADMIN_BOOTSTRAP_TOKEN`. The
+gateway fails closed at startup when neither is present.
+
 ## Rollout
 
 1. Threat model and provider-contract review.
@@ -55,6 +60,52 @@ disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
 gateway once; startup applies migrations and performs one batched recovery
 before accepting traffic.
 
+## Deployment
+
+`BUILD_REVISION=<id> ./scripts/deploy.sh` keeps the image that is serving,
+builds and starts the new one, then confirms the running gateway reports that
+revision on `/health`. Any failure restores the kept image. Migrations run
+inside the process at startup, so a failing migration stops the container and
+never serves.
+
+A rollback restores the previous build, not the previous settings: a broken
+value in `.env` breaks the previous image as well. The script then says the
+previous image did not come back and stops, because a rollback that did not
+restore the service must not be reported as one.
+
+Verified on 2026-09-12: a build whose `/health` was deliberately broken passed
+the container health check, which polls `/ready`, and was caught by the check
+after the deployment instead. The previous revision was serving again when the
+script returned.
+
+## Backup and restore
+
+`./scripts/backup.sh create [directory]` takes the PostgreSQL dump and the
+ledger spool volume together, because a database restored without its spool
+loses the envelopes that had not reached it yet. `./scripts/backup.sh restore
+<directory>` puts both back: it stops the gateway first, so no process holds
+connections while the schema is dropped and recreated, and it restores the
+spool with the ownership the container needs.
+
+Restore replaces every row in the target database. A restore is only finished
+when the service answers again: `/ready` returns `200` and an admin login token
+issued before the backup still creates a session. Verified on 2026-09-12 by
+deleting both volumes and restoring: the login token returned `401` against the
+empty stack and `201` after the restore.
+
+`create` keeps the newest `BACKUP_KEEP` dated directories (default 14) and
+removes older ones, so a scheduled run neither fills the disk nor waits for
+someone to prune it. Only directories it named are removed; anything else in
+the backup root is left alone.
+
+Run it daily from the host scheduler. On the current host that is 05:30
+Asia/Taipei, held by a lock file so a slow run cannot overlap the next one,
+with output appended to `backup.log`. Verified on 2026-09-12 by running the
+scheduled command in a stripped environment like the scheduler's own.
+
+A failed backup is currently visible only in that log. Nothing alerts on it
+yet; that belongs with the rest of the alerting work.
+
 ## Process shutdown
 
 `SIGTERM` and Ctrl-C start the same bounded shutdown sequence:
@@ -89,9 +140,32 @@ request.
 
 ## Alerts
 
-Pool capacity below reserve, spend velocity anomaly, repeated 401/403 from a
-provider, quota-store inconsistency, fallback storm, p95 latency, 5xx rate,
-audit write failure and secret rotation overdue.
+`scripts/alert.sh <severity> <name> <message>` is the single exit for an
+operational failure. It always appends to `ALERT_LOG`, and posts JSON to
+`ALERT_WEBHOOK_URL` when that is set. The log is the part that always works: a
+webhook that is unset, wrong or down must not be why a failure goes unrecorded.
+It never fails its caller, and it makes one delivery attempt -- a retry loop
+against a paging endpoint during an incident turns a small outage into a
+rate-limited one.
+
+`scripts/healthcheck.sh` runs from the host scheduler every 15 minutes and
+raises the first three rows below. The rest are named here but nothing raises
+them yet; each says what is missing.
+
+| Alert | Threshold | What it means | Clearing it | Raised today |
+| --- | --- | --- | --- | --- |
+| `gateway_down` | `/health` does not answer | The process is gone or the port moved | Start the stack; if it will not start, the startup error names the setting | yes |
+| `gateway_not_ready` | `/health` answers, `/ready` does not | The database is unreachable, or the process is draining | Restore the database; a drain clears itself when the deployment finishes | yes |
+| `backup_stale` / `backup_missing` | Newest backup older than `BACKUP_MAX_AGE_HOURS` (30) | The daily backup stopped, so a restore would lose a day or more | Run `./scripts/backup.sh create` and fix the schedule | yes |
+| Provider authentication | Repeated 401/403 from one provider | The provider key is wrong, revoked or out of quota | Rotate the key from its approved source | no: needs a metrics or log reader |
+| Spend anomaly | Spend per hour far above the recent baseline | A runaway client, or a model priced differently than assumed | Suspend the credential, then read the ledger for the source | no: needs a baseline nobody has measured yet |
+| 5xx rate and p95 latency | Above the service level, once one is agreed | The gateway is failing or slow for everyone | Depends on the cause the traces show | no: needs a metrics backend and an agreed service level |
+| Secret rotation overdue | A credential older than the rotation interval | A key has been valid longer than the policy allows | Rotate it; the overlap window keeps the old key working meanwhile | no: needs a rotation interval nobody has set |
+
+Every alert needs someone who receives it. `ALERT_WEBHOOK_URL` is unset, so
+today the alerts reach a file on the host and no person. Naming the owner and
+the destination is a decision for whoever operates this, not a default this
+file can invent.
 
 ## Fail closed
 

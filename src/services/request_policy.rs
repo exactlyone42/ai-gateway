@@ -107,6 +107,28 @@ pub async fn enforce_selected_model(
     Err(GatewayError::ModelForbidden)
 }
 
+/// Records a request rejected before any model was selected.
+///
+/// The policy and deadline rejections above already leave a row, so without
+/// this one the single case an operator meets most often -- a registry with
+/// nothing to offer, right after a deployment -- is the one case Admin can
+/// tell them nothing about.
+pub async fn record_rejected(
+    state: &AppState,
+    prepared: &PreparedPolicy,
+    reason: &str,
+) -> Result<(), GatewayError> {
+    record(
+        state,
+        &prepared.rejection,
+        prepared.requested_model.clone(),
+        &prepared.policy,
+        prepared.policy.rejection_snapshot(reason),
+        None,
+    )
+    .await
+}
+
 pub async fn enforce_deadline(
     mut reservation: Reservation,
     policy: &EffectivePolicy,

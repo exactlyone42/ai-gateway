@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=29
+EXPECTED_ASSERTS=32
 
 ran=0
 failed=0
@@ -312,6 +312,32 @@ expect_green "declared file is reachable"
 gate_cmd=run_bans
 
 printf '\n'
+# ---- rule 8: configuration reads bypassing `setting` -----------------------
+reset
+fixture a.rs <<'RS'
+fn f() -> Option<String> { env::var("SOME_SETTING").ok() }
+RS
+expect_red "unmarked configuration read" "bypasses"
+
+reset
+fixture a.rs <<'RS'
+fn f() -> Option<String> {
+    // raw-env: empty is a decision here, not an omission.
+    env::var("SOME_SETTING").ok()
+}
+RS
+expect_green "a marked configuration read is allowed"
+
+# The marker only counts on the line above, so a trailing one must not pass.
+reset
+fixture a.rs <<'RS'
+fn f() -> Option<String> {
+    env::var("SOME_SETTING").ok()
+    // raw-env: too late to excuse the line above.
+}
+RS
+expect_red "marker below the read does not excuse it" "bypasses"
+
 if [ "$ran" != "$EXPECTED_ASSERTS" ]; then
   echo "FAIL: $ran assertions ran, expected $EXPECTED_ASSERTS -- the suite did not fully execute"
   exit 1

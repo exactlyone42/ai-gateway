@@ -195,6 +195,21 @@ bans() {
     failed=1
   fi
 
+  # 8. Configuration reads go through `setting`, which treats an empty value
+  #    as unset. That is what lets the deployment template forward every
+  #    variable without holding a second copy of the defaults; a direct
+  #    `env::var` silently opts out and turns a forwarded blank into a parse
+  #    error at startup. Mark a deliberate raw read with `raw-env:` on the line
+  #    above it, saying why empty is not the same as absent there.
+  hits=$(printf '%s\n' "$prod" | awk '
+    { code = $0; sub(/^[^:]*:[0-9]+:/, "", code)
+      if (code ~ /env::var\(/ && previous !~ /raw-env:/) print
+      previous = code }')
+  if [ -n "$hits" ]; then
+    echo "$hits" | sed 's/^/configuration read bypasses `setting` (mark it `raw-env:` if deliberate): /'
+    failed=1
+  fi
+
   # 7. Metric attributes come from an explicit allowlist, because the failure
   #    mode of a wrong one is a metrics backend that falls over days later,
   #    far from the commit that caused it. Rule 5 blocks the ids we already
