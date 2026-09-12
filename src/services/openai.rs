@@ -107,8 +107,28 @@ struct BufferedContext {
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
     let operation = request.operation.gateway();
     let body_len = request.body.len();
-    let decoded =
-        protocol::decode(operation, request.body).map_err(GatewayError::InvalidRequest)?;
+    let session_id = header_text(&request.headers, "x-codex-session-id")
+        .or_else(|| header_text(&request.headers, "x-session-id"));
+    // Built before the body is read, so a request that never decodes still has
+    // an identity and a request id to record itself with.
+    let rejection = RejectionContext {
+        principal: request.principal.clone(),
+        received_at: request.received_at,
+        request_id: ledger_request_id(&request.headers),
+        session_id: session_id.clone(),
+        operation: request.operation.name(),
+        client_agent_id: None,
+        parent_agent_id: None,
+        estimated_tokens: Some(i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+    };
+    let decoded = match protocol::decode(operation, request.body) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            request_policy::record_unprocessable(state, &rejection, None, "request_undecodable")
+                .await;
+            return Err(GatewayError::InvalidRequest(error));
+        }
+    };
     if request.operation == Operation::Responses
         && decoded
             .document()
@@ -116,29 +136,29 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             .and_then(Value::as_bool)
             == Some(true)
     {
+        request_policy::record_unprocessable(
+            state,
+            &rejection,
+            Some(decoded.requested_model().to_owned()),
+            "background_not_supported",
+        )
+        .await;
         return Err(GatewayError::UnsupportedRequest);
     }
-    let selector = ModelSelector::parse(decoded.requested_model())?;
-    let session_id = header_text(&request.headers, "x-codex-session-id")
-        .or_else(|| header_text(&request.headers, "x-session-id"));
-    let prepared = request_policy::prepare(
-        state,
-        &request.headers,
-        selector,
-        RejectionContext {
-            principal: request.principal.clone(),
-            received_at: request.received_at,
-            request_id: ledger_request_id(&request.headers),
-            session_id: session_id.clone(),
-            operation: request.operation.name(),
-            client_agent_id: None,
-            parent_agent_id: None,
-            estimated_tokens: Some(
-                i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX),
-            ),
-        },
-    )
-    .await?;
+    let selector = match ModelSelector::parse(decoded.requested_model()) {
+        Ok(selector) => selector,
+        Err(error) => {
+            request_policy::record_unprocessable(
+                state,
+                &rejection,
+                Some(decoded.requested_model().to_owned()),
+                "model_name_unparsable",
+            )
+            .await;
+            return Err(GatewayError::from(error));
+        }
+    };
+    let prepared = request_policy::prepare(state, &request.headers, selector, rejection).await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(operation, decoded.document());
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;

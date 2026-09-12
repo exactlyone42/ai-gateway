@@ -10,6 +10,9 @@
 #   2. it can serve traffic               -> /ready
 #   3. the last backup is not too old     -> BACKUP_ROOT
 #
+# On success it stamps HEALTHCHECK_STATUS_FILE with the time. A stale stamp is
+# how anyone finds out the check itself stopped running.
+#
 # Exits non-zero if anything failed, so a scheduler that reports failures sees
 # them too. Repeated alerts are the scheduler's interval, not a retry loop: one
 # check, one report.
@@ -51,5 +54,11 @@ else
   fi
 fi
 
-[ "$failed" = 0 ] && echo "ok: gateway answering, ready, and backed up recently"
+# A check that stopped running looks exactly like one that keeps passing: both
+# are silent. This stamp is the difference -- an old stamp says the scheduler
+# stopped, which nothing else here can tell you.
+if [ "$failed" = 0 ]; then
+  date -u +%Y-%m-%dT%H:%M:%SZ > "${HEALTHCHECK_STATUS_FILE:-$HOME/agent-pool-gateway-healthcheck.status}" 2>/dev/null || true
+  echo "ok: gateway answering, ready, and backed up recently"
+fi
 exit "$failed"

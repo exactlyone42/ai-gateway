@@ -149,6 +149,60 @@ pub async fn enforce_deadline(
     Err(GatewayError::PolicyDenied)
 }
 
+/// Records a request rejected before the policy could even be evaluated: the
+/// body did not decode, or the model name is not a name.
+///
+/// These requests already carry an identity and a request id, so Admin can
+/// answer "it arrived, and here is why it was refused" instead of nothing at
+/// all. There is no policy to snapshot yet, which is why this does not go
+/// through [`record`].
+/// Best effort on purpose: the answer to a malformed request must not depend
+/// on the ledger being healthy. A failure here is logged and the caller still
+/// returns the 4xx it was going to return -- turning it into a 503 would make
+/// clients retry the very requests that are filling the spool.
+pub async fn record_unprocessable(
+    state: &AppState,
+    context: &RejectionContext,
+    requested_model: Option<String>,
+    reason: &str,
+) {
+    let trace_id = match logging::current_trace_ids().0 {
+        value if value.is_empty() => None,
+        value => Some(value),
+    };
+    let recorded = state
+        .ledger
+        .reject(
+            RequestStart {
+                request_id: context.request_id.clone(),
+                session_id: context.session_id.clone(),
+                trace_id,
+                requested_model,
+                workload_class: None,
+                urgency: None,
+                quality: None,
+                budget_class: None,
+                estimated_tokens: context.estimated_tokens,
+                selection: None,
+                policy: Some(RequestPolicySnapshot::unevaluated(reason)),
+                principal: context.principal.clone(),
+                created_at: context.received_at,
+            },
+            context.operation,
+            context.client_agent_id.clone(),
+            context.parent_agent_id.clone(),
+        )
+        .await;
+    if let Err(error) = recorded {
+        tracing::warn!(
+            error.type = "unprocessable_request_not_recorded",
+            exception.message = %error,
+            denial_reason = reason,
+            "a request refused before policy evaluation left no ledger row"
+        );
+    }
+}
+
 async fn record(
     state: &AppState,
     context: &RejectionContext,
