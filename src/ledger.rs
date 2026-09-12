@@ -90,6 +90,22 @@ pub struct RequestPolicySnapshot {
 }
 
 impl RequestPolicySnapshot {
+    /// A rejection that happened before any policy was evaluated -- the body
+    /// did not decode, or the model name is not a name. It says so explicitly,
+    /// because an empty decision reads like a policy that allowed the request.
+    pub fn unevaluated(reason: &str) -> Self {
+        Self {
+            deadline_at: None,
+            max_queue_time_ms: None,
+            decision: serde_json::json!({
+                "schema_version": 1,
+                "evaluated": false,
+                "denied": true,
+                "denial_reason": reason,
+            }),
+        }
+    }
+
     pub fn with_routing(mut self, reason: &str) -> Self {
         if let Value::Object(decision) = &mut self.decision {
             decision.insert(

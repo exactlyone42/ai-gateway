@@ -111,28 +111,43 @@ pub(super) async fn proxy(
 ) -> Result<Response, GatewayError> {
     let gateway_operation = operation.gateway();
     let body_len = body.len();
-    let decoded =
-        protocol::decode(gateway_operation, body).map_err(GatewayError::InvalidRequest)?;
-    let selector = ModelSelector::parse(decoded.requested_model())?;
     let session_id = header_text(&headers, "x-claude-code-session-id")
         .or_else(|| header_text(&headers, "x-session-id"));
-    let prepared = request_policy::prepare(
-        &state,
-        &headers,
-        selector,
-        RejectionContext {
-            principal: principal.clone(),
-            received_at,
-            request_id: ledger_request_id(&headers),
-            session_id: session_id.clone(),
-            operation: operation.name(),
-            client_agent_id: header_text(&headers, "x-claude-code-agent-id"),
-            parent_agent_id: header_text(&headers, "x-claude-code-parent-agent-id"),
-            estimated_tokens: matches!(operation, Operation::Messages)
-                .then(|| i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
-        },
-    )
-    .await?;
+    // Built before the body is read, so a request that never decodes still has
+    // an identity and a request id to record itself with.
+    let rejection = RejectionContext {
+        principal: principal.clone(),
+        received_at,
+        request_id: ledger_request_id(&headers),
+        session_id: session_id.clone(),
+        operation: operation.name(),
+        client_agent_id: header_text(&headers, "x-claude-code-agent-id"),
+        parent_agent_id: header_text(&headers, "x-claude-code-parent-agent-id"),
+        estimated_tokens: matches!(operation, Operation::Messages)
+            .then(|| i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+    };
+    let decoded = match protocol::decode(gateway_operation, body) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            request_policy::record_unprocessable(&state, &rejection, None, "request_undecodable")
+                .await?;
+            return Err(GatewayError::InvalidRequest(error));
+        }
+    };
+    let selector = match ModelSelector::parse(decoded.requested_model()) {
+        Ok(selector) => selector,
+        Err(error) => {
+            request_policy::record_unprocessable(
+                &state,
+                &rejection,
+                Some(decoded.requested_model().to_owned()),
+                "model_name_unparsable",
+            )
+            .await?;
+            return Err(GatewayError::from(error));
+        }
+    };
+    let prepared = request_policy::prepare(&state, &headers, selector, rejection).await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(gateway_operation, decoded.document());
     let gateway_request_id = uuid::Uuid::new_v4();
