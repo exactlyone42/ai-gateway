@@ -280,13 +280,8 @@ impl Config {
             ));
         }
         let shutdown_finalize_timeout = Duration::from_millis(shutdown_finalize_timeout_ms);
-        let allowed_models = setting("ALLOWED_MODELS")
-            .unwrap_or_else(|_| "company-default".to_owned())
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+        // raw-env: an explicitly empty list means "allow nothing".
+        let allowed_models = model_allowlist(env::var("ALLOWED_MODELS").ok());
 
         let otlp_endpoint = setting("OTEL_EXPORTER_OTLP_ENDPOINT")
             .ok()
@@ -805,7 +800,24 @@ fn admin_bootstrap_tenant_id(value: Option<String>) -> Result<Option<Uuid>, Conf
 /// instead of leaving them out or copying this file's defaults -- the two
 /// places then drift apart, and a template that forwards a variable it has no
 /// value for hands the process an empty string it has to reject.
+/// The development model allowlist.
+///
+/// This is the one setting where empty is a decision, not an omission: an
+/// explicitly empty list allows nothing, which is not what leaving the variable
+/// out means. So it reads the raw value instead of going through [`setting`].
+fn model_allowlist(raw: Option<String>) -> Vec<String> {
+    raw.unwrap_or_else(|| "company-default".to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The value itself is returned untouched: a secret may legitimately carry
+/// surrounding whitespace, and trimming it would silently change the key.
 fn setting(name: &str) -> Result<String, env::VarError> {
+    // raw-env: this is the wrapper every other read goes through.
     match env::var(name) {
         Ok(value) if value.trim().is_empty() => Err(env::VarError::NotPresent),
         other => other,
@@ -957,11 +969,27 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_empty_model_allowlist_allows_nothing() {
+        assert!(
+            model_allowlist(Some(String::new())).is_empty(),
+            "an empty list must not fall back to a default model"
+        );
+        assert!(model_allowlist(Some(" , ".to_owned())).is_empty());
+        // Leaving the variable out is a different thing entirely.
+        assert_eq!(model_allowlist(None), vec!["company-default".to_owned()]);
+        assert_eq!(
+            model_allowlist(Some(" a , b ".to_owned())),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
     fn an_empty_setting_reads_as_not_set() {
-        // A name no other test touches: these run in one process.
+        // SAFETY: writing an environment variable races with any thread that
+        // reads the environment. Nothing else in this binary reads this name,
+        // and it is removed before the test ends.
         let name = "AGENT_POOL_GATEWAY_EMPTY_SETTING_PROBE";
         // What a deployment template forwards for a variable with no value.
-        // SAFETY: this name belongs to this test alone.
         unsafe { env::set_var(name, "") };
         assert!(
             setting(name).is_err(),
@@ -969,10 +997,11 @@ mod tests {
         );
         unsafe { env::set_var(name, "   ") };
         assert!(setting(name).is_err(), "a blank value must read as not set");
-        unsafe { env::set_var(name, "kept") };
-        assert_eq!(setting(name).unwrap(), "kept");
+        // A real value survives untouched: a secret may carry surrounding
+        // whitespace, so the value is never trimmed on the way out.
+        unsafe { env::set_var(name, " kept ") };
+        assert_eq!(setting(name).unwrap(), " kept ");
         unsafe { env::remove_var(name) };
-        assert!(setting(name).is_err());
     }
 
     #[test]
