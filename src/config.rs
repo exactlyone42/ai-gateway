@@ -369,16 +369,8 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let admin_bootstrap_tenant_id = env::var("ADMIN_BOOTSTRAP_TENANT_ID")
-            .ok()
-            .map(|value| {
-                Uuid::parse_str(value.trim())
-                    .map_err(|error| ConfigError::InvalidAdminBootstrapTenant(error.to_string()))
-            })
-            .transpose()?;
-        if admin_bootstrap_tenant_id.is_some_and(|tenant_id| tenant_id.is_nil()) {
-            return Err(ConfigError::NilTenant);
-        }
+        let admin_bootstrap_tenant_id =
+            admin_bootstrap_tenant_id(env::var("ADMIN_BOOTSTRAP_TENANT_ID").ok())?;
         if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
             return Err(ConfigError::IncompleteAdminBootstrap);
         }
@@ -723,6 +715,24 @@ fn retiring_hash_keys(
         .collect()
 }
 
+/// An empty value means "not set", the same as `ADMIN_BOOTSTRAP_TOKEN`. A
+/// deployment template that forwards both variables unconditionally would
+/// otherwise refuse to start instead of running without admin bootstrap.
+fn admin_bootstrap_tenant_id(value: Option<String>) -> Result<Option<Uuid>, ConfigError> {
+    let Some(value) = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let tenant_id = Uuid::parse_str(&value)
+        .map_err(|error| ConfigError::InvalidAdminBootstrapTenant(error.to_string()))?;
+    if tenant_id.is_nil() {
+        return Err(ConfigError::NilTenant);
+    }
+    Ok(Some(tenant_id))
+}
+
 fn required(name: &'static str) -> Result<String, ConfigError> {
     env::var(name).map_err(|_| ConfigError::Missing(name))
 }
@@ -838,6 +848,33 @@ mod tests {
             bootstrap_client_key("dev", true, Some(" key ".to_owned())).unwrap(),
             Some("key".to_owned())
         );
+    }
+
+    #[test]
+    fn an_empty_admin_bootstrap_tenant_means_no_bootstrap() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(admin_bootstrap_tenant_id(None).unwrap(), None);
+        // What a deployment template forwards when the operator set nothing.
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some("  ".to_owned())).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some(format!(" {tenant} "))).unwrap(),
+            Some(tenant)
+        );
+        assert!(matches!(
+            admin_bootstrap_tenant_id(Some("not-a-uuid".to_owned())),
+            Err(ConfigError::InvalidAdminBootstrapTenant(_))
+        ));
+        assert!(matches!(
+            admin_bootstrap_tenant_id(Some(Uuid::nil().to_string())),
+            Err(ConfigError::NilTenant)
+        ));
     }
 
     #[test]
