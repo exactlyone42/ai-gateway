@@ -5,11 +5,11 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中 |
+| 狀態 | 已交付 |
 | 優先度 | P0 |
 | 前置 | 無 |
 | 開始 | `2026-09-08T21:50+08:00` |
-| 結束 | — |
+| 結束 | `2026-09-11T01:57+08:00` |
 | Token | 由 `./scripts/token-ledger.sh` 填，不要手寫 |
 
 ## 目的
@@ -17,14 +17,15 @@
 每條結論都附得出官方來源。
 
 ## 完成判準
-- [ ] `docs/client-compatibility.md` 每個 Client 一條，欄位齊全：
+- [x] `docs/client-compatibility.md` 每個 Client 一條，欄位齊全：
       client／version／verification_date／custom_endpoint／protocol／authentication／streaming／
       tools／reasoning／seat_subscription_behavior／configuration_example／known_limitations／official_source。
-- [ ] 每條結論標明「這證明什麼、證明不了什麼」。
-- [ ] 查不到官方來源的一律標 `unknown`，**不寫推測**。
-- [ ] 明確區分「閘道支援這個模型」與「Client UI 顯示這個模型」。
-- [ ] 訂閱席次邊界寫進 `docs/security-and-compliance.md`，附官方定價／方案頁原文。
-- [ ] **實測**：至少一個 Client 真的指向本機閘道並成功往返一次（不是只讀文件）。
+- [x] 每條結論標明「這證明什麼、證明不了什麼」。
+- [x] 查不到官方來源的一律標 `unknown`，**不寫推測**。
+- [x] 明確區分「閘道支援這個模型」與「Client UI 顯示這個模型」。
+- [x] 訂閱席次邊界寫進 `docs/security-and-compliance.md`，附官方定價／方案頁原文。
+- [x] **實測**：至少一個 Client 真的指向本機閘道並成功往返一次（不是只讀文件）。
+- [x] **陰性對照**：移除任一 Client 的必要欄位，`./scripts/check.sh clients` 必須變紅。
 
 ## 已知
 - 待查的 Client：Claude Code CLI、Claude Desktop、Codex CLI、Codex Desktop／IDE、
@@ -33,6 +34,12 @@
   沒有查證日期、沒有官方來源 → 不能當證據，要重寫。
 - 硬約束（規格 §6）：不做 TLS 中間人、不注入憑證、不破解 Client、不改執行檔、
   不攔截訂閱憑證。某個 Client 不支援就標 unsupported，不硬 hack。
+- 2026-09-11 本機只有 Claude Code 2.1.267 與 Codex CLI 0.153.0；沒有 `code`／`cursor`
+  binary，所以 VS Code、Cursor、Codex Desktop／IDE 的行為只標官方文件等級，不冒充本機實測。
+- Cursor 官方來源已自行覆核：BYOK／base URL override 存在，但所有 request 仍經 Cursor backend；
+  `127.0.0.1`／private-only 預設不可達，enterprise private connectivity 是否涵蓋 custom LLM
+  gateway 為 unknown。Codex 官方 Bedrock 文件證明 Desktop／VS Code extension 讀共用 config，
+  但不能外推任意 self-hosted provider，狀態改為 pending。
 
 ## 已做
 - `2026-09-08` 起 `compat-research` 子 Agent 查證 9 組問題（各 Client 自訂端點、席次邊界、
@@ -50,6 +57,26 @@
 - `2026-09-11` Claude Code 2.1.267 以 `ANTHROPIC_BASE_URL`／`ANTHROPIC_AUTH_TOKEN`
   指向本機 gateway，再到可控 Anthropic SSE mock；單次 `claude -p` 精確輸出
   `W05_CLAUDE_CODE_OK`。這封閉至少一個真 Client 往返判準，但 W01 的研究缺口仍未完成。
+- `2026-09-11` Codex CLI 0.153.0 經本機 gateway 與可控 Responses SSE mock，精確輸出
+  `W06_CODEX_OK`；版本化 capture 鎖定 POST responses、stream/store、typed tools、reasoning
+  與完整 request sentinel 掃描；隔離組態沒有先查 models，不沿用舊環境的順序主張。
+- `2026-09-11` 重寫六個 Client 的統一 13 欄契約，補齊 Cursor、Codex UI client、VS Code
+  與 OpenAI billing 官方證據；席次／API 邊界同步進 security 文件。
+- `2026-09-11` 新增 client compatibility 文件關卡，納入 `gate`／`all`。
+- `2026-09-11` 第一輪反方審查指出 2 high／4 medium；採納全部事實缺口：拆開 Codex 四種
+  認證模式、收斂 Cursor 私連結論、移除 VS Code 虛構能力、限定 tools／reasoning 證據範圍，
+  並把 `clients` gate 明定為結構檢查，不拿它代替來源人工覆核。
+- `2026-09-11` 補 `scripts/verify-client-roundtrip.sh`、本機 mock、兩份 SSE fixture 與版本化去敏
+  capture；Claude Code 2.1.267、Codex CLI 0.153.0 各重播成功。第一次重播另抓到 Codex
+  custom provider 缺 `name` 會在送 request 前拒絕設定，已同步修文件範例。
+- `2026-09-11` 完整 diff review 指出 1 high／4 medium，全部採納：runtime 改 `mktemp` 且 DB
+  要顯式 mutation flag＋測試庫名稱；port 改動態且驗子程序 PID；capture 掃完整 request sentinel
+  並鎖定 stream／store／tool types／reasoning；OpenAI API key 標成 gateway 外；Cursor 移除
+  「等於公開」絕對句。精確 capture 也推翻舊的 GET models／全 function tools 敘述，已刪除。
+- `2026-09-11` PR 級檢查：69 lib＋2 schema＝71 passed、0 failed、0 ignored；29/29 gate
+  selftests；client capture schema、log secrets、loops、bans、deadfiles 全綠。
+- `2026-09-11` PR #33 合進 `dev`（merge `38d2e103c6cbd78f4a8658f1ecafc4cab9798363`）；
+  CI `rust` 與兩個 board sync 共 3/3 completed success，W01 收工。
 
 ## 已確定不可行
 - **Claude Desktop 用 `ANTHROPIC_BASE_URL`**：Desktop 走的是 Claude apps gateway 的
@@ -57,28 +84,49 @@
   要支援得實作那個協定（規格由跑起來的 gateway 在 `GET /protocol` 提供，且官方寫明
   不保證無限期向後相容）。列 pending，不阻塞其它段落。
 - **把訂閱席次轉成 API credit**：官方規則就是分開計費，這條從一開始就不成立，不再花時間查。
-- **Cursor 走私有網段的閘道**：官方說請求「routed through Cursor's servers for final prompt
-  building」。要支援就得讓閘道從 Cursor 機房連得到，跟「閘道放私有網段」直接衝突。
-  在這點解掉以前不列入支援——**這是架構衝突，不是協定問題，所以查更多協定文件沒用。**
+- **Cursor 直接走 `127.0.0.1`／private-only gateway**：官方說所有請求經 Cursor backend 做
+  final prompt building，因此預設不可達。enterprise private connectivity 是否支援 custom LLM
+  gateway 沒有官方證據，標 `unknown`，不宣稱架構上永遠不可能。
 
 ## 證據
 - `ANTHROPIC_BASE_URL`「Override the API endpoint to route requests through a proxy or gateway.」
-  → **這證明** Claude Code 官方支援指向自架閘道。**證明不了**本機真的跑通過（實測待 W05）。
+  → **這證明** Claude Code 官方支援指向自架閘道；W05 已另以 2.1.267 完成本機往返。
+  **證明不了**真 Anthropic 帳號、正式模型或計費已驗證。
 - `wire_api`「`responses` is the only supported value, and it is the default when omitted.」
-  → **這證明** Codex 只走 Responses API。**證明不了** Codex 實際會送哪些欄位——
-  Codex 沒有等同 Anthropic 那份的閘道相容契約，這是 W06 的已知風險。
+  → **這證明** Codex 只走 Responses API；W06 已另以 0.153.0 實測實際欄位。
+  **證明不了**未來版本仍維持相同私有模型 metadata 契約，這個缺口移交 W10。
 - 「While a gateway credential variable or `apiKeyHelper` is active, a developer's claude.ai
   subscription isn't used... billed per token to whoever owns the credential.」
-  → **這證明**席次與 API 計費的邊界主張正確。**證明不了** OpenAI 側的等價聲明（待補）。
+  → **這證明** Anthropic 席次與 API 計費的邊界。OpenAI 另有官方文件明寫 ChatGPT 與 API
+  billing 分離、Codex ChatGPT login 用 plan、自有 API key 用 API pricing。
 - 本機版本：Claude Code `2.1.267`、codex-cli `0.153.0`（`claude --version` / `codex --version`）。
-  → **這證明**這兩個版本存在於本機。**證明不了**文件描述的行為在這兩個版本上已生效。
+  → 兩者都完成真 Client 往返；證明不了真 Provider 帳號、正式模型與計費。
+- `./scripts/check.sh clients`：六個 Client 各 13 欄、官方 URL 與證據邊界全通過。刪除 Cursor
+  `streaming` 欄時精準 exit 1，恢復後通過。這只是結構 gate；來源與逐欄主張另由人工對照，
+  gate 證明不了 URL 內容、結論正確性或官方頁未來不會改版。
+- `CLIENT_ROUNDTRIP_ALLOW_DATABASE_MUTATION=1 DATABASE_URL=<disposable> ./scripts/verify-client-roundtrip.sh all`：
+  兩個真 Client 各一次往返；固定命令、fixture、去敏
+  capture 與證據邊界見 `docs/client-roundtrip-evidence.md`。
+- 去敏 gate 陰性對照：暫時加入 `authorization` 欄位後，只有 `clients` 以
+  `unapproved fields: ['authorization']` 變紅；還原後通過。
+- harness 安全陰性對照：缺 mutation flag 與帶 `production` DB 名稱各自 exit 2，均在啟動
+  mock／gateway 前停止；證明文件提醒已變成程式守門，不會誤連正式 DB。
+- GitHub PR #33 的 merge commit 為 `38d2e103c6cbd78f4a8658f1ecafc4cab9798363`；該 PR
+  `rust` CI 與兩個 board sync 均為 `COMPLETED/SUCCESS`。
 
 ## 來源
 - <https://code.claude.com/docs/en/llm-gateway-protocol>（閘道相容契約）2026-09-08
 - <https://code.claude.com/docs/en/llm-gateway>（席次邊界、不支援非 Claude 模型）2026-09-08
 - <https://code.claude.com/docs/en/env-vars>（環境變數逐條說明）2026-09-08
 - <https://code.claude.com/docs/en/claude-apps-gateway>（第一方閘道能力與限制表）2026-09-08
-- <https://learn.chatgpt.com/docs/config-file/config-reference>（Codex `model_providers`）2026-09-08
+- <https://learn.chatgpt.com/docs/config-file/config-reference>（Codex `model_providers`）2026-09-11
+- <https://help.openai.com/en/articles/20001275>（Codex plan／API key 計費）2026-09-11
+- <https://help.openai.com/en/articles/9039756>（ChatGPT／API 分開計費）2026-09-11
+- <https://help.openai.com/en/articles/20001253-configure-codex-with-amazon-bedrock>（UI clients）2026-09-11
+- <https://code.visualstudio.com/docs/agent-customization/language-models>（VS Code Custom Endpoint）2026-09-11
+- <https://prod.cursor.com/help/models-and-usage/api-keys>、<https://www.cursor.com/security>（Cursor）2026-09-11
+- <https://prod.cursor.com/docs/cloud-agent/private-connectivity>（Cursor enterprise 私連邊界）2026-09-11
+- <https://learn.chatgpt.com/docs/auth>（Codex 認證模式）2026-09-11
 
 ## Trade-off
 | 決策 | 選了什麼 | 放棄了什麼 | 為什麼 |
@@ -86,10 +134,5 @@
 | 子 Agent 查證 | 子 Agent 廣搜 → 主 session 覆核關鍵 URL | 主 session 自己全查 | 全查會把數十頁文件讀進主 context；但「其它 Agent 的報告」不算證據，關鍵條目要自己覆核 |
 
 ## 下一步
-1. 自行覆核 Cursor 的官方頁面（目前是子 Agent 轉述，證據等級低），重點是
-   「請求是否真的經過 Cursor 伺服器」——那決定閘道要不要對外曝露。
-2. 補 OpenAI／ChatGPT 側的席次邊界官方原文（目前只有 Anthropic 側齊全）。
-3. 席次邊界結論寫進 `docs/security-and-compliance.md`。
-4. 實測 Client 對本機閘道往返（等 W05 有 `/v1/messages` 之後）。
-   **VS Code 與 Claude Code 兩個都能講 Anthropic Messages，一次驗兩個。**
-5. **請 cash 決定**：第一方 Claude apps gateway 的採用與否。見 `docs/feasibility.md` 第四節。
+1. W01 已完成；Claude apps gateway 採用與否仍是產品範圍決策，不阻塞後續段落。
+2. Codex UI client 實測屬後續獨立範圍，不重開 W01。

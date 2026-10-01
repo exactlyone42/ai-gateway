@@ -6,7 +6,10 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
-use crate::{identity::IdentityError, ledger::LedgerError};
+use crate::{
+    identity::IdentityError, ledger::LedgerError, model_registry::RegistryError,
+    policy::PolicyError, quota::QuotaError, scheduler::SchedulerError,
+};
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
@@ -14,6 +17,26 @@ pub enum GatewayError {
     Unauthorized,
     #[error("model is not allowed by policy")]
     ModelForbidden,
+    #[error("request policy hint is invalid")]
+    InvalidPolicyHint,
+    #[error("request denied by policy")]
+    PolicyDenied,
+    #[error("request exceeds an active quota")]
+    QuotaExceeded,
+    #[error("request is deferred by a soft quota")]
+    QuotaDeferred,
+    #[error("scheduler queue is full")]
+    QueueFull,
+    #[error("request expired while waiting for provider capacity")]
+    QueueExpired,
+    #[error("scheduler is shutting down")]
+    SchedulerClosed,
+    #[error("gateway is draining for shutdown")]
+    ProcessDraining,
+    #[error("no provider is currently available")]
+    ProviderUnavailable,
+    #[error("model cannot satisfy required capability: {0}")]
+    CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
     InvalidRequest(#[source] serde_json::Error),
     #[error("request option is not supported by this gateway")]
@@ -28,10 +51,20 @@ pub enum GatewayError {
     AuthenticationUnavailable(#[source] IdentityError),
     #[error("upstream request failed")]
     Upstream(#[from] reqwest::Error),
+    #[error("upstream response does not satisfy the translated protocol")]
+    UpstreamProtocol,
     #[error("failed to build the response")]
     ResponseBuild(#[from] axum::http::Error),
     #[error("usage ledger is unavailable")]
     LedgerUnavailable(#[from] LedgerError),
+    #[error("model registry is unavailable")]
+    RegistryUnavailable(#[source] RegistryError),
+    #[error("policy service is unavailable")]
+    PolicyUnavailable(#[source] PolicyError),
+    #[error("quota service is unavailable")]
+    QuotaUnavailable(#[source] QuotaError),
+    #[error("scheduler is unavailable")]
+    SchedulerUnavailable(#[source] SchedulerError),
 }
 
 /// Carries the failure from the error boundary to the access log, which is the
@@ -53,6 +86,16 @@ impl GatewayError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::ModelForbidden => "model_forbidden",
+            Self::InvalidPolicyHint => "invalid_policy_hint",
+            Self::PolicyDenied => "policy_denied",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::QuotaDeferred => "quota_deferred",
+            Self::QueueFull => "scheduler_queue_full",
+            Self::QueueExpired => "scheduler_queue_expired",
+            Self::SchedulerClosed => "scheduler_closed",
+            Self::ProcessDraining => "process_draining",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
             Self::PayloadTooLarge => "payload_too_large",
@@ -60,8 +103,13 @@ impl GatewayError {
             Self::InvalidConfiguration => "invalid_configuration",
             Self::AuthenticationUnavailable(_) => "authentication_unavailable",
             Self::Upstream(_) => "upstream_unavailable",
+            Self::UpstreamProtocol => "upstream_protocol_error",
             Self::ResponseBuild(_) => "response_build_failed",
             Self::LedgerUnavailable(_) => "ledger_unavailable",
+            Self::RegistryUnavailable(_) => "model_registry_unavailable",
+            Self::PolicyUnavailable(_) => "policy_unavailable",
+            Self::QuotaUnavailable(_) => "quota_unavailable",
+            Self::SchedulerUnavailable(_) => "scheduler_unavailable",
         }
     }
 
@@ -72,6 +120,16 @@ impl GatewayError {
         match self {
             Self::Unauthorized
             | Self::ModelForbidden
+            | Self::InvalidPolicyHint
+            | Self::PolicyDenied
+            | Self::QuotaExceeded
+            | Self::QuotaDeferred
+            | Self::QueueFull
+            | Self::QueueExpired
+            | Self::SchedulerClosed
+            | Self::ProcessDraining
+            | Self::ProviderUnavailable
+            | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
             | Self::InvalidConfiguration => None,
@@ -79,8 +137,13 @@ impl GatewayError {
             Self::RequestBodyUnavailable(error) => Some(error.clone()),
             Self::AuthenticationUnavailable(error) => Some(error.to_string()),
             Self::Upstream(error) => Some(error.to_string()),
+            Self::UpstreamProtocol => None,
             Self::ResponseBuild(error) => Some(error.to_string()),
             Self::LedgerUnavailable(error) => Some(error.to_string()),
+            Self::RegistryUnavailable(error) => Some(error.to_string()),
+            Self::PolicyUnavailable(error) => Some(error.to_string()),
+            Self::QuotaUnavailable(error) => Some(error.to_string()),
+            Self::SchedulerUnavailable(error) => Some(error.to_string()),
         }
     }
 }
@@ -91,9 +154,17 @@ impl IntoResponse for GatewayError {
             kind: self.kind(),
             cause: self.cause(),
         };
-        let status = match self {
+        let status = match &self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::ModelForbidden => StatusCode::FORBIDDEN,
+            Self::InvalidPolicyHint => StatusCode::BAD_REQUEST,
+            Self::PolicyDenied => StatusCode::FORBIDDEN,
+            Self::QuotaExceeded | Self::QuotaDeferred => StatusCode::TOO_MANY_REQUESTS,
+            Self::QueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::QueueExpired => StatusCode::REQUEST_TIMEOUT,
+            Self::SchedulerClosed | Self::ProcessDraining => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -101,8 +172,13 @@ impl IntoResponse for GatewayError {
             Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AuthenticationUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Self::UpstreamProtocol => StatusCode::BAD_GATEWAY,
             Self::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::LedgerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::RegistryUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::PolicyUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::QuotaUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::SchedulerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         let mut response = (
             status,
@@ -110,7 +186,64 @@ impl IntoResponse for GatewayError {
         )
             .into_response();
         response.extensions_mut().insert(failure);
+        if matches!(
+            self,
+            Self::QueueFull | Self::SchedulerClosed | Self::ProcessDraining
+        ) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
         response
+    }
+}
+
+impl From<PolicyError> for GatewayError {
+    fn from(error: PolicyError) -> Self {
+        match error {
+            PolicyError::InvalidHint => Self::InvalidPolicyHint,
+            error @ (PolicyError::InvalidTenant
+            | PolicyError::InvalidDocument(_)
+            | PolicyError::InvalidValue
+            | PolicyError::CacheUnavailable
+            | PolicyError::Database(_)) => Self::PolicyUnavailable(error),
+        }
+    }
+}
+
+impl From<RegistryError> for GatewayError {
+    fn from(error: RegistryError) -> Self {
+        match error {
+            RegistryError::InvalidSelector | RegistryError::ModelUnavailable => {
+                Self::ModelForbidden
+            }
+            RegistryError::CapabilityMismatch(capability) => Self::CapabilityMismatch(capability),
+            error @ (RegistryError::UntrustedProvider
+            | RegistryError::InvalidProviderProfile
+            | RegistryError::RequestEncoding(_)
+            | RegistryError::Database(_)) => Self::RegistryUnavailable(error),
+        }
+    }
+}
+
+impl From<QuotaError> for GatewayError {
+    fn from(error: QuotaError) -> Self {
+        Self::QuotaUnavailable(error)
+    }
+}
+
+impl From<SchedulerError> for GatewayError {
+    fn from(error: SchedulerError) -> Self {
+        match error {
+            SchedulerError::QueueFull => Self::QueueFull,
+            SchedulerError::HardQuota => Self::QuotaExceeded,
+            SchedulerError::Expired => Self::QueueExpired,
+            SchedulerError::Closed => Self::SchedulerClosed,
+            error @ (SchedulerError::InvalidConfiguration | SchedulerError::Unavailable) => {
+                Self::SchedulerUnavailable(error)
+            }
+        }
     }
 }
 

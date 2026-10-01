@@ -56,7 +56,36 @@ pub async fn migrate(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
     // schema changes are expand-only, so unknown newer versions are safe to
     // leave in place and must not prevent the old binary from starting.
     migrations.set_ignore_missing(true);
-    migrations.run(pool).await.map_err(DatabaseError::Migrate)
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    let original_timeouts = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false)",
+    )
+    .bind("30s")
+    .bind("5s")
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    let migration_result = migrations.run(&mut *connection).await;
+    let restore_result = sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false)",
+    )
+    .bind(&original_timeouts.0)
+    .bind(&original_timeouts.1)
+    .execute(&mut *connection)
+    .await;
+    migration_result.map_err(DatabaseError::Migrate)?;
+    restore_result
+        .map(|_| ())
+        .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))
 }
 
 /// Answers whether the database can serve a query right now.
@@ -67,5 +96,56 @@ pub async fn is_reachable(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     match tokio::time::timeout(PROBE_TIMEOUT, sqlx::query("SELECT 1").execute(pool)).await {
         Ok(result) => result.map(|_| ()),
         Err(_elapsed) => Err(sqlx::Error::PoolTimedOut),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    /// The rollback guarantee in docs/operations.md: an older binary restarts
+    /// against a schema a newer release already migrated. Without it a rollback
+    /// needs someone to delete migration history on a live database.
+    #[sqlx::test]
+    async fn a_rolled_back_binary_starts_against_a_newer_schema(pool: PgPool) {
+        super::migrate(&pool).await.unwrap();
+        // What the newer release left behind before it was rolled back. The
+        // version is far in the future so no real migration can collide.
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES (99990101000000, 'applied by a newer release', now(), true, '\\x00'::bytea, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::migrate(&pool).await.unwrap();
+
+        let still_there: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM _sqlx_migrations WHERE version = 99990101000000",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(still_there, 1, "the newer migration record must survive");
+    }
+
+    #[sqlx::test]
+    async fn startup_migration_path_accepts_the_timeout_configuration(pool: PgPool) {
+        let before = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        super::migrate(&pool).await.unwrap();
+        let after = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
     }
 }

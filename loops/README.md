@@ -19,30 +19,32 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
-| [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 18 個可獨立審查的段落，並先確認可行性。卡 #20 |
-| [client-compatibility](./client-compatibility.loop.md) | W01 | 進行中 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
+| [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
+| [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
 | [identity-credential](./identity-credential.loop.md) | W03 | 已交付 | P0 | 一把金鑰對應一個人類看得懂的身分，可簽發、可撤銷、可輪替 |
 | [usage-ledger](./usage-ledger.loop.md) | W04 | 已交付 | P0 | 每一筆請求與用量都落在 PostgreSQL，DB 短暫不可用也不會無聲遺失 |
 | [anthropic-native](./anthropic-native.loop.md) | W05 | 已交付 | P0 | Claude Code 指向閘道就能用：串流即時、取消傳到上游、用量落帳 |
-| [openai-native](./openai-native.loop.md) | W06 | 進行中 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
+| [openai-native](./openai-native.loop.md) | W06 | 已交付 | P0 | Codex 與 OpenAI 相容 Client 指向閘道就能用，複用同一套串流骨架 |
 | [observability-otel](./observability-otel.loop.md) | W07 | 已交付（部分移交） | P1 | 任何一次請求都查得到卡在哪一步、花多久、誰發的 |
-| [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 未開始 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
-| [admin-web](./admin-web.loop.md) | W09 | 未開始 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
-| [model-registry-router](./model-registry-router.loop.md) | W10 | 未開始 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
-| [policy-engine](./policy-engine.loop.md) | W11 | 未開始 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
-| [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 未開始 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
-| [scheduler-admission](./scheduler-admission.loop.md) | W13 | 未開始 | P1 | 互動工作不被背景餓死，背景工作也不會永遠排不到 |
-| [canonical-layer](./canonical-layer.loop.md) | W14 | 未開始 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
-| [cross-provider](./cross-provider.loop.md) | W15 | 未開始 | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
-| [providers-expansion](./providers-expansion.loop.md) | W16 | 未開始 | P2 | 加 Gemini／xAI／Local 不需要改 Core（改了就是抽象設計錯了） |
-| [advanced-routing](./advanced-routing.loop.md) | W17 | 未開始 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
-| [test-harness-load](./test-harness-load.loop.md) | W18 | 未開始 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
-| [process-lifecycle](./process-lifecycle.loop.md) | W19 | 未開始 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
+| [admin-api-rbac](./admin-api-rbac.loop.md) | W08 | 已交付 | P1 | 後台權限在 API 層擋得住，每個控制面操作都留得下改前改後 |
+| [admin-web](./admin-web.loop.md) | W09 | 已交付 | P1 | 打開頁面就能回答誰在用、用什麼模型、花多少、誰在排隊 |
+| [model-registry-router](./model-registry-router.loop.md) | W10 | 已交付 | P1 | 換模型是改設定不是改程式；可指定模型也可只要品質等級 |
+| [policy-engine](./policy-engine.loop.md) | W11 | 已交付 | P1 | 效力政策可預測、可解釋、可稽核，查得到「為什麼只給 standard」 |
+| [quota-ratelimit](./quota-ratelimit.loop.md) | W12 | 已交付 | P1 | 超量會被擋或降級，而且擋的理由查得到是哪一條 |
+| [scheduler-admission](./scheduler-admission.loop.md) | W13 | 已交付 | P1 | 互動工作不被背景餓死，背景工作也不會永遠排不到 |
+| [canonical-layer](./canonical-layer.loop.md) | W14 | 已交付 | P2 | 協定轉換從 N×M 變 N+M，且現有行為一位元不變 |
+| [cross-provider](./cross-provider.loop.md) | W15 | 已交付 | P2 | 跨協定用模型，能力轉不過去時明說而不是默默吞掉 |
+| [providers-expansion](./providers-expansion.loop.md) | W16 | 已交付 | P2 | 加 Gemini／xAI／Local 不需要改 Core（改了就是抽象設計錯了） |
+| [advanced-routing](./advanced-routing.loop.md) | W17 | 已交付 | P2 | Provider 變慢就換路，換路的理由與代價查得到 |
+| [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
+| [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
+| [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
 
 ## 現在該做哪一個
 
-看 `docs/work-breakdown.md` 的依賴圖。關鍵路徑是
-`W02 → W03/W04 → W05 → W06 → W14`，其餘掛在旁邊可並行。W02 已交付，下一刀是 W03 或 W04。
+W00–W19 共 20 份 loop 已全數交付。目前進行中的是 W20 `production-readiness`（分支
+`feature/production-readiness`、PR #54）；接手前先讀該 loop 的「下一步」，較早的輪次紀錄在
+`production-readiness.progress.md`。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。

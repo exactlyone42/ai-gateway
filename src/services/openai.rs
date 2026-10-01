@@ -11,12 +11,25 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use crate::{
+    adapters::{
+        ProviderRequestInput, ValidatedTranslationPlan, prepare_for_provider, protocol, provider,
+        response,
+        stream::{CrossStreamEncoder, CrossStreamObserver},
+    },
+    canonical::{CanonicalRequest, CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
     ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
-    services::streaming::{CanonicalStreamEvent, ProtocolError, StreamObserver, event_data, relay},
+    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, ProviderKind},
+    policy::value_text,
+    quota::QuotaAdmission,
+    services::{
+        request_policy::{self, RejectionContext},
+        request_quota,
+        streaming::{ProtocolError, StreamObserver, event_data, relay, relay_transcoded},
+    },
     state::AppState,
 };
 
@@ -50,6 +63,13 @@ impl Operation {
             }
         }
     }
+
+    fn gateway(self) -> GatewayOperation {
+        match self {
+            Self::Responses => GatewayOperation::OpenAiResponses,
+            Self::ChatCompletions => GatewayOperation::OpenAiChatCompletions,
+        }
+    }
 }
 
 pub struct Reply {
@@ -75,73 +95,216 @@ struct BufferedContext {
     reservation: crate::ledger::Reservation,
     attempt: ProviderAttempt,
     model: String,
+    provider: String,
+    provider_kind: ProviderKind,
     operation: Operation,
+    translation: ValidatedTranslationPlan,
+    gateway_request_id: uuid::Uuid,
+    response_max_bytes: usize,
+    canonical: CanonicalRequest,
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
-    let metadata: Value =
-        serde_json::from_slice(&request.body).map_err(GatewayError::InvalidRequest)?;
+    let operation = request.operation.gateway();
+    let body_len = request.body.len();
+    let session_id = header_text(&request.headers, "x-codex-session-id")
+        .or_else(|| header_text(&request.headers, "x-session-id"));
+    // Built before the body is read, so a request that never decodes still has
+    // an identity and a request id to record itself with.
+    let rejection = RejectionContext {
+        principal: request.principal.clone(),
+        received_at: request.received_at,
+        request_id: ledger_request_id(&request.headers),
+        session_id: session_id.clone(),
+        operation: request.operation.name(),
+        client_agent_id: None,
+        parent_agent_id: None,
+        estimated_tokens: Some(i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+    };
+    let decoded = match protocol::decode(operation, request.body) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            request_policy::record_unprocessable(state, &rejection, None, "request_undecodable")
+                .await;
+            return Err(GatewayError::InvalidRequest(error));
+        }
+    };
     if request.operation == Operation::Responses
-        && metadata.get("background").and_then(Value::as_bool) == Some(true)
+        && decoded
+            .document()
+            .get("background")
+            .and_then(Value::as_bool)
+            == Some(true)
     {
+        request_policy::record_unprocessable(
+            state,
+            &rejection,
+            Some(decoded.requested_model().to_owned()),
+            "background_not_supported",
+        )
+        .await;
         return Err(GatewayError::UnsupportedRequest);
     }
-    let model = ensure_model_allowed(state, &metadata)?.to_owned();
-    let is_stream = metadata.get("stream").and_then(Value::as_bool) == Some(true);
-    let observer = request.operation.observer(&metadata)?;
-    let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
-    let estimated = TokenUsage {
-        input_tokens: u64::try_from(request.body.len().div_ceil(4)).unwrap_or(u64::MAX),
-        ..TokenUsage::default()
+    let selector = match ModelSelector::parse(decoded.requested_model()) {
+        Ok(selector) => selector,
+        Err(error) => {
+            request_policy::record_unprocessable(
+                state,
+                &rejection,
+                Some(decoded.requested_model().to_owned()),
+                "model_name_unparsable",
+            )
+            .await;
+            return Err(GatewayError::from(error));
+        }
     };
+    let prepared = request_policy::prepare(state, &request.headers, selector, rejection).await?;
+    let policy = &prepared.policy;
+    let required = CapabilityRequirements::from_request(operation, decoded.document());
+    let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
+    let gateway_request_id = uuid::Uuid::new_v4();
     let trace_id = match logging::current_trace_ids().0 {
         value if value.is_empty() => None,
         value => Some(value),
     };
+    let canonical = decoded.enrich(RequestEnrichment {
+        gateway_request_id,
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
+        principal: PrincipalRef::from(&request.principal),
+        requested_model: prepared.requested_model.clone(),
+        requested_quality: None,
+        workload_class: value_text(&policy.workload_class),
+        urgency: value_text(&policy.urgency),
+        budget_class: value_text(&policy.budget_class),
+        deadline: policy.deadline_at,
+    });
+    let prepared_quota = request_quota::admit(
+        state,
+        &prepared,
+        gateway_request_id,
+        &canonical,
+        body_len,
+        required,
+    )
+    .await?;
+    let routing_reason = prepared_quota.routing_reason;
+    let routing_claim = prepared_quota.routing_claim;
+    let translation = prepared_quota.translation;
+    let response_max_bytes = if translation.translated {
+        state.config.stream_event_max_bytes.saturating_mul(8)
+    } else {
+        usize::MAX
+    };
+    let QuotaAdmission {
+        selection,
+        estimated_usage: estimated,
+        snapshot: quota_snapshot,
+        concurrency,
+    } = prepared_quota.admission;
+    let model = selection.public_model_id.clone();
+    let provider_model = selection.provider_model_id.clone();
+    let provider = selection.provider_key.clone();
+    let profile = selection.profile.clone();
+    let selection_snapshot = selection.ledger_snapshot();
+    let upstream_request = prepare_for_provider(
+        &canonical,
+        &profile,
+        &provider_model,
+        translation,
+        ProviderRequestInput {
+            source_path_and_query: &request.path_and_query,
+            client_headers: &request.headers,
+            idempotency_key,
+        },
+    )?;
+    let is_stream = canonical.stream;
     let mut reservation = state
         .ledger
-        .reserve(RequestStart {
-            request_id: ledger_request_id(&request.headers),
-            session_id: header_text(&request.headers, "x-codex-session-id")
-                .or_else(|| header_text(&request.headers, "x-session-id")),
-            trace_id,
-            requested_model: Some(model.clone()),
-            workload_class: None,
-            urgency: None,
-            quality: None,
-            budget_class: None,
-            estimated_tokens: Some(i64::try_from(estimated.input_tokens).unwrap_or(i64::MAX)),
-            principal: request.principal,
-            created_at: request.received_at,
-        })
+        .reserve_with_quota(
+            RequestStart {
+                request_id: ledger_request_id(&request.headers),
+                session_id: canonical.session_id.clone(),
+                trace_id: canonical.trace_id.clone(),
+                requested_model: Some(canonical.requested_model.clone()),
+                workload_class: Some(canonical.workload_class.clone()),
+                urgency: Some(canonical.urgency.clone()),
+                quality: Some(value_text(&policy.quality)),
+                budget_class: Some(canonical.budget_class.clone()),
+                estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
+                selection: selection_snapshot.clone(),
+                policy: Some(policy.ledger_snapshot().with_routing(routing_reason)),
+                principal: request.principal.clone(),
+                created_at: request.received_at,
+            },
+            Some(gateway_request_id),
+            quota_snapshot,
+        )
         .await?;
+    reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(request.operation.name(), None, None);
-
-    let provider_request_at = Utc::now();
-    let upstream = match forward(
+    if policy.is_expired(Utc::now()) {
+        reservation.annotate_policy(policy.rejection_snapshot("deadline_expired"));
+        reservation
+            .finish(RequestCompletion {
+                status: "rejected".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: Vec::new(),
+                completed_at: Utc::now(),
+            })
+            .await?;
+        return Err(GatewayError::PolicyDenied);
+    }
+    reservation = crate::services::admission::acquire(
         state,
-        &request.path_and_query,
-        &request.headers,
-        request.body,
-        idempotency_key,
+        reservation,
+        crate::services::admission::AdmissionContext {
+            principal: &request.principal,
+            policy,
+            selection: &selection,
+            quota: concurrency,
+            body: canonical.source_document(),
+            received_at: request.received_at,
+        },
+    )
+    .await?;
+    let provider_request_at = Utc::now();
+    reservation.attach_routing_lease(state.routing.begin(
+        &provider,
+        provider_request_at,
+        routing_claim,
+    )?);
+    let mut attempt = ProviderAttempt::begin(
+        provider.clone(),
+        provider_model.clone(),
+        None,
+        provider_request_at,
+        estimated,
+    )
+    .with_selection(selection_snapshot);
+    reservation
+        .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
+        .await?;
+    let upstream = match provider::send(
+        &state.client,
+        &profile.base_url,
+        upstream_request,
+        &profile.provider_key,
+        &provider_model,
     )
     .await
     {
         Ok(response) => response,
         Err(error) => {
             let completed_at = Utc::now();
+            attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
             reservation
                 .finish(RequestCompletion {
                     status: "failed".to_owned(),
                     selected_model: Some(model.clone()),
-                    selected_provider: Some(state.config.openai_provider.clone()),
-                    attempts: vec![ProviderAttempt::failed(
-                        state.config.openai_provider.clone(),
-                        model,
-                        provider_request_at,
-                        completed_at,
-                        error.kind().to_owned(),
-                    )],
+                    selected_provider: Some(provider.clone()),
+                    attempts: vec![attempt],
                     completed_at,
                 })
                 .await?;
@@ -157,85 +320,98 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         .or_else(|| upstream.headers().get("request-id"))
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
-    let attempt = ProviderAttempt::begin(
-        state.config.openai_provider.clone(),
-        model.clone(),
-        provider_request_id,
-        provider_request_at,
-        estimated,
-    );
+    attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/event-stream"));
 
+    if status.is_success() && is_stream && translation.translated && !content_is_sse {
+        let completed_at = Utc::now();
+        let mut attempt = attempt;
+        attempt.conclude(
+            "failed",
+            Some("upstream_protocol_error".to_owned()),
+            completed_at,
+        );
+        reservation
+            .finish(RequestCompletion {
+                status: "failed".to_owned(),
+                selected_model: Some(model),
+                selected_provider: Some(provider),
+                attempts: vec![attempt],
+                completed_at,
+            })
+            .await?;
+        return Err(GatewayError::UpstreamProtocol);
+    }
+
     if status.is_success() && is_stream && content_is_sse {
-        let body = relay(
-            upstream,
-            reservation,
-            attempt,
-            model,
-            state.config.openai_provider.clone(),
-            observer,
-            state.config.stream_event_max_bytes,
-        )
-        .await?;
+        let body = if translation.translated {
+            relay_transcoded(
+                upstream,
+                reservation,
+                attempt,
+                model.clone(),
+                provider.clone(),
+                (
+                    CrossStreamObserver::new(translation.target_operation)
+                        .map_err(|_| GatewayError::InvalidConfiguration)?,
+                    CrossStreamEncoder::new(
+                        translation.source_operation,
+                        format!("resp_apg_{}", gateway_request_id.simple()),
+                        model,
+                        &canonical,
+                    )
+                    .map_err(|_| GatewayError::InvalidConfiguration)?,
+                ),
+                state.config.stream_event_max_bytes,
+            )
+            .await?
+        } else {
+            relay(
+                upstream,
+                reservation,
+                attempt,
+                model,
+                provider.clone(),
+                request.operation.observer(canonical.source_document())?,
+                state.config.stream_event_max_bytes,
+            )
+            .await?
+        };
         return Ok(Reply {
             status,
-            headers: response_headers,
+            headers: if translation.translated {
+                translated_stream_headers()
+            } else {
+                response_headers
+            },
             body,
             streaming: true,
         });
     }
 
-    finish_buffered(
-        state,
-        BufferedContext {
-            response: upstream,
-            status,
-            headers: response_headers,
-            reservation,
-            attempt,
-            model,
-            operation: request.operation,
-        },
-    )
+    finish_buffered(BufferedContext {
+        response: upstream,
+        status,
+        headers: response_headers,
+        reservation,
+        attempt,
+        model,
+        provider,
+        provider_kind: profile.kind,
+        operation: request.operation,
+        translation,
+        gateway_request_id,
+        response_max_bytes,
+        canonical,
+    })
     .await
 }
 
-#[tracing::instrument(name = "provider.attempt", skip_all)]
-async fn forward(
-    state: &AppState,
-    path_and_query: &str,
-    client_headers: &HeaderMap,
-    body: Bytes,
-    idempotency_key: Option<HeaderValue>,
-) -> Result<reqwest::Response, GatewayError> {
-    let mut headers = provider_headers(client_headers);
-    if let Some(value) = idempotency_key {
-        headers.insert(HeaderName::from_static("idempotency-key"), value);
-    }
-    logging::inject_context(&mut headers);
-    let authorization = HeaderValue::from_str(&format!("Bearer {}", state.config.openai_api_key))
-        .map_err(|_| GatewayError::InvalidConfiguration)?;
-    headers.insert(header::AUTHORIZATION, authorization);
-    Ok(state
-        .client
-        .post(format!(
-            "{}{}",
-            state.config.openai_base_url, path_and_query
-        ))
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?)
-}
-
-async fn finish_buffered(
-    state: &AppState,
-    context: BufferedContext,
-) -> Result<Reply, GatewayError> {
+async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError> {
     let BufferedContext {
         response,
         status,
@@ -243,7 +419,13 @@ async fn finish_buffered(
         mut reservation,
         mut attempt,
         model,
+        provider,
+        provider_kind,
         operation,
+        translation,
+        gateway_request_id,
+        response_max_bytes,
+        canonical,
     } = context;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
@@ -262,7 +444,7 @@ async fn finish_buffered(
                     .finish(RequestCompletion {
                         status: "failed".to_owned(),
                         selected_model: Some(model),
-                        selected_provider: Some(state.config.openai_provider.clone()),
+                        selected_provider: Some(provider),
                         attempts: vec![attempt],
                         completed_at,
                     })
@@ -275,6 +457,24 @@ async fn finish_buffered(
             attempt.observe_first_byte(Utc::now());
         }
         bytes.extend_from_slice(&chunk);
+        if bytes.len() > response_max_bytes {
+            let completed_at = Utc::now();
+            attempt.conclude(
+                "failed",
+                Some("response_too_large".to_owned()),
+                completed_at,
+            );
+            reservation
+                .finish(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: Some(model),
+                    selected_provider: Some(provider),
+                    attempts: vec![attempt],
+                    completed_at,
+                })
+                .await?;
+            return Err(GatewayError::UpstreamProtocol);
+        }
     }
     let body = Bytes::from(bytes);
     let completed_at = Utc::now();
@@ -286,27 +486,118 @@ async fn finish_buffered(
             .map(ToOwned::to_owned)
     }));
     if status.is_success() {
-        attempt.observe_usage(TokenUsage::from_response(&body), completed_at);
+        let usage = match provider::usage_for(provider_kind, &body) {
+            Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
+            Err(error) => {
+                attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                reservation.set_client_first_byte_at(completed_at);
+                reservation
+                    .finish(RequestCompletion {
+                        status: "failed".to_owned(),
+                        selected_model: Some(model),
+                        selected_provider: Some(provider),
+                        attempts: vec![attempt],
+                        completed_at,
+                    })
+                    .await?;
+                return Err(error);
+            }
+        };
+        attempt.observe_usage(usage, completed_at);
     }
-    let (request_status, attempt_status, error_type) =
-        buffered_outcome(operation, status, response_value.as_ref());
+    let client_response = if translation.translated {
+        if !status.is_success() {
+            None
+        } else {
+            match response::transcode_buffered_with_outcome(
+                translation.target_operation,
+                translation.source_operation,
+                &body,
+                &format!("resp_apg_{}", gateway_request_id.simple()),
+                &model,
+                &canonical,
+            ) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                    reservation.set_client_first_byte_at(completed_at);
+                    reservation
+                        .finish(RequestCompletion {
+                            status: "failed".to_owned(),
+                            selected_model: Some(model),
+                            selected_provider: Some(provider),
+                            attempts: vec![attempt],
+                            completed_at,
+                        })
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
+    } else {
+        Some(response::TranscodedBufferedResponse {
+            body,
+            incomplete: false,
+        })
+    };
+    let incomplete = client_response
+        .as_ref()
+        .is_some_and(|response| response.incomplete);
+    let (request_status, attempt_status, error_type) = if incomplete {
+        (
+            "failed",
+            "failed",
+            Some("provider_response_incomplete".to_owned()),
+        )
+    } else if translation.translated && status.is_success() {
+        ("completed", "completed", None)
+    } else {
+        buffered_outcome(operation, status, response_value.as_ref())
+    };
     attempt.conclude(attempt_status, error_type, completed_at);
     reservation.set_client_first_byte_at(completed_at);
     reservation
         .finish(RequestCompletion {
             status: request_status.to_owned(),
             selected_model: Some(model),
-            selected_provider: Some(state.config.openai_provider.clone()),
+            selected_provider: Some(provider),
             attempts: vec![attempt],
             completed_at,
         })
         .await?;
+    if translation.translated && client_response.is_none() {
+        return Err(GatewayError::UpstreamProtocol);
+    }
+    let client_body = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
     Ok(Reply {
         status,
-        headers,
-        body: Body::from(body),
+        headers: if translation.translated {
+            translated_response_headers()
+        } else {
+            headers
+        },
+        body: Body::from(client_body),
         streaming: false,
     })
+}
+
+fn translated_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers
+}
+
+fn translated_stream_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers
 }
 
 fn buffered_outcome(
@@ -368,35 +659,9 @@ fn provider_idempotency_key(
         .map_err(|_| GatewayError::InvalidConfiguration)
 }
 
-fn ensure_model_allowed<'a>(state: &AppState, body: &'a Value) -> Result<&'a str, GatewayError> {
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    state
-        .config
-        .allowed_models
-        .iter()
-        .any(|allowed| allowed == model)
-        .then_some(model)
-        .ok_or(GatewayError::ModelForbidden)
-}
-
-fn provider_headers(client: &HeaderMap) -> HeaderMap {
-    let mut outgoing = HeaderMap::new();
-    for (name, value) in client {
-        let text = name.as_str();
-        let allowed = name == header::CONTENT_TYPE
-            || name == header::ACCEPT
-            || text == "openai-beta"
-            || text == "originator"
-            || text == "session_id"
-            || text.starts_with("x-stainless-");
-        if allowed && name != header::AUTHORIZATION && text != "x-api-key" {
-            outgoing.append(name.clone(), value.clone());
-        }
-    }
-    outgoing
+#[tracing::instrument(name = "token.estimate", skip_all)]
+fn estimate_input_tokens(bytes: usize) -> u64 {
+    u64::try_from(bytes.div_ceil(4)).unwrap_or(u64::MAX)
 }
 
 fn response_headers(upstream: &HeaderMap) -> HeaderMap {
@@ -474,16 +739,18 @@ impl StreamObserver for ResponsesObserver {
                 "Responses stream ended with [DONE] instead of a terminal response event",
             ));
         }
-        let mut events = response_metadata(&value, &mut self.response_id, &mut self.usage);
+        let mut events = response_metadata(&value, &mut self.response_id, &mut self.usage)?;
         match kind {
-            "response.completed" => events.push(CanonicalStreamEvent::Completed),
-            "response.failed" => {
-                events.push(CanonicalStreamEvent::Failed("provider_response_failed"))
-            }
-            "response.incomplete" => {
-                events.push(CanonicalStreamEvent::Failed("provider_response_incomplete"))
-            }
-            "error" => events.push(CanonicalStreamEvent::Failed("provider_stream_error")),
+            "response.completed" => events.push(CanonicalStreamEvent::ResponseCompleted),
+            "response.failed" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_response_failed"),
+            )),
+            "response.incomplete" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_response_incomplete"),
+            )),
+            "error" => events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_stream_error"),
+            )),
             _ => {}
         }
         Ok(events)
@@ -524,7 +791,7 @@ impl StreamObserver for ChatObserver {
         }
         if data.bytes == b"[DONE]" {
             return if self.all_finished() {
-                Ok(vec![CanonicalStreamEvent::Completed])
+                Ok(vec![CanonicalStreamEvent::ResponseCompleted])
             } else {
                 Err(ProtocolError::Invalid(
                     "Chat stream ended before a finish_reason",
@@ -541,12 +808,14 @@ impl StreamObserver for ChatObserver {
             events.push(CanonicalStreamEvent::ResponseStarted(id.to_owned()));
         }
         if let Some(usage) = value.get("usage").filter(|usage| usage.is_object())
-            && merge_usage(&mut self.usage, usage)
+            && let Some(usage) = merge_usage(&mut self.usage, usage)?
         {
-            events.push(CanonicalStreamEvent::Usage(self.usage.clone()));
+            events.push(CanonicalStreamEvent::Usage(usage));
         }
         if value.get("error").is_some_and(|error| !error.is_null()) {
-            events.push(CanonicalStreamEvent::Failed("provider_stream_error"));
+            events.push(CanonicalStreamEvent::Error(
+                crate::canonical::CanonicalError::provider("provider_stream_error"),
+            ));
         } else {
             let was_finished = self.all_finished();
             for choice in value
@@ -555,12 +824,17 @@ impl StreamObserver for ChatObserver {
                 .into_iter()
                 .flatten()
             {
-                if choice
-                    .get("finish_reason")
-                    .is_some_and(|reason| !reason.is_null())
-                    && let Some(index) = choice.get("index").and_then(Value::as_u64)
+                if let (Some(reason), Some(index)) = (
+                    choice.get("finish_reason").and_then(Value::as_str),
+                    choice.get("index").and_then(Value::as_u64),
+                ) && self.finished_choices.insert(index)
                 {
-                    self.finished_choices.insert(index);
+                    events.push(CanonicalStreamEvent::OutputCompleted {
+                        index: u32::try_from(index).map_err(|_| {
+                            ProtocolError::Invalid("Chat choice index exceeds canonical range")
+                        })?,
+                        finish_reason: reason.to_owned(),
+                    });
                 }
             }
             if !was_finished && self.all_finished() {
@@ -572,7 +846,7 @@ impl StreamObserver for ChatObserver {
 
     fn finish(&mut self) -> Result<Vec<CanonicalStreamEvent>, ProtocolError> {
         self.all_finished()
-            .then(|| vec![CanonicalStreamEvent::Completed])
+            .then(|| vec![CanonicalStreamEvent::ResponseCompleted])
             .ok_or(ProtocolError::Invalid(
                 "Chat stream ended before a finish_reason",
             ))
@@ -600,7 +874,7 @@ fn response_metadata(
     value: &Value,
     response_id: &mut Option<String>,
     usage: &mut TokenUsage,
-) -> Vec<CanonicalStreamEvent> {
+) -> Result<Vec<CanonicalStreamEvent>, ProtocolError> {
     let mut events = Vec::new();
     if let Some(response) = value.get("response") {
         if let Some(id) = response.get("id").and_then(Value::as_str)
@@ -610,15 +884,18 @@ fn response_metadata(
             events.push(CanonicalStreamEvent::ResponseStarted(id.to_owned()));
         }
         if let Some(next) = response.get("usage").filter(|next| next.is_object())
-            && merge_usage(usage, next)
+            && let Some(normalized) = merge_usage(usage, next)?
         {
-            events.push(CanonicalStreamEvent::Usage(usage.clone()));
+            events.push(CanonicalStreamEvent::Usage(normalized));
         }
     }
-    events
+    Ok(events)
 }
 
-fn merge_usage(current: &mut TokenUsage, value: &Value) -> bool {
+fn merge_usage(
+    current: &mut TokenUsage,
+    value: &Value,
+) -> Result<Option<crate::canonical::CanonicalUsage>, ProtocolError> {
     let before = current.clone();
     set_if_present(value, "input_tokens", &mut current.input_tokens);
     set_if_present(value, "prompt_tokens", &mut current.input_tokens);
@@ -643,7 +920,12 @@ fn merge_usage(current: &mut TokenUsage, value: &Value) -> bool {
             &mut current.cache_write_input_tokens,
         );
     }
-    *current != before
+    if *current == before {
+        return Ok(None);
+    }
+    provider::normalize_openai_usage(current.clone())
+        .map(Some)
+        .map_err(|_| ProtocolError::Invalid("OpenAI usage details exceed their totals"))
 }
 
 fn set_if_present(value: &Value, key: &str, target: &mut u64) {
@@ -655,7 +937,7 @@ fn set_if_present(value: &Value, key: &str, target: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::{ChatObserver, ResponsesObserver};
-    use crate::services::streaming::{CanonicalStreamEvent, StreamObserver};
+    use crate::{canonical::CanonicalStreamEvent, services::streaming::StreamObserver};
 
     #[test]
     fn responses_requires_an_explicit_terminal_event() {
@@ -664,7 +946,11 @@ mod tests {
             .observe(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
             .unwrap();
         assert!(events.contains(&CanonicalStreamEvent::ResponseStarted("resp_1".to_owned())));
-        assert!(events.contains(&CanonicalStreamEvent::Completed));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
+        );
         assert!(ResponsesObserver::default().finish().is_err());
     }
 
@@ -674,6 +960,10 @@ mod tests {
         let finish = observer
             .observe(b"data: {\"id\":\"chat_1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n")
             .unwrap();
+        assert!(finish.contains(&CanonicalStreamEvent::OutputCompleted {
+            index: 0,
+            finish_reason: "stop".to_owned(),
+        }));
         assert!(finish.contains(&CanonicalStreamEvent::CompletionHint));
         let usage = observer
             .observe(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n")
@@ -687,7 +977,8 @@ mod tests {
             observer
                 .finish()
                 .unwrap()
-                .contains(&CanonicalStreamEvent::Completed)
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
         );
 
         let mut with_done = ChatObserver::new(1);
@@ -698,7 +989,8 @@ mod tests {
             with_done
                 .observe(b"data: [DONE]\n\n")
                 .unwrap()
-                .contains(&CanonicalStreamEvent::Completed)
+                .iter()
+                .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
         );
     }
 
@@ -708,14 +1000,32 @@ mod tests {
         let first = observer
             .observe(b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n")
             .unwrap();
-        assert!(!first.contains(&CanonicalStreamEvent::CompletionHint));
+        assert_eq!(
+            first,
+            vec![CanonicalStreamEvent::OutputCompleted {
+                index: 0,
+                finish_reason: "stop".to_owned(),
+            }]
+        );
         assert!(observer.finish().is_err());
 
         let second = observer
             .observe(b"data: {\"choices\":[{\"index\":1,\"finish_reason\":\"length\"}]}\n\n")
             .unwrap();
-        assert!(second.contains(&CanonicalStreamEvent::CompletionHint));
-        assert!(observer.finish().is_ok());
+        assert_eq!(
+            second,
+            vec![
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 1,
+                    finish_reason: "length".to_owned(),
+                },
+                CanonicalStreamEvent::CompletionHint,
+            ]
+        );
+        assert_eq!(
+            observer.finish().unwrap(),
+            vec![CanonicalStreamEvent::ResponseCompleted]
+        );
     }
 
     #[test]

@@ -1,0 +1,16 @@
+data: {"type":"response.created","response":{"id":"resp_fixture","object":"response","created_at":0,"status":"in_progress","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"company-default","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":"low","summary":null},"store":false,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+data: {"type":"response.output_item.added","item":{"id":"msg_fixture","type":"message","status":"in_progress","role":"assistant","content":[]},"output_index":0,"sequence_number":1}
+
+data: {"type":"response.content_part.added","item_id":"msg_fixture","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":2}
+
+data: {"type":"response.output_text.delta","item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"W06_CODEX_OK","logprobs":[],"sequence_number":3}
+
+data: {"type":"response.output_text.done","item_id":"msg_fixture","output_index":0,"content_index":0,"text":"W06_CODEX_OK","logprobs":[],"sequence_number":4}
+
+data: {"type":"response.content_part.done","item_id":"msg_fixture","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"W06_CODEX_OK"},"sequence_number":5}
+
+data: {"type":"response.output_item.done","item":{"id":"msg_fixture","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"W06_CODEX_OK"}]},"output_index":0,"sequence_number":6}
+
+data: {"type":"response.completed","response":{"id":"resp_fixture","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"company-default","output":[{"id":"msg_fixture","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"W06_CODEX_OK"}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":"low","summary":null},"store":false,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},"user":null,"metadata":{}},"sequence_number":7}
+

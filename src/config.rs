@@ -1,8 +1,39 @@
-use std::{collections::HashSet, env, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
+use crate::model_registry::{GatewayOperation, ProviderKind};
+use crate::routing::RoutingConfig;
+use crate::scheduler::SchedulerConfig;
+
+#[derive(Clone)]
+pub struct ExtraProviderProfile {
+    pub kind: ProviderKind,
+    pub credential_ref: String,
+    pub provider_key: String,
+    pub base_url: String,
+    pub operations: Vec<GatewayOperation>,
+    pub secret: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExtraProviderProfile {
+    kind: String,
+    credential_ref: String,
+    provider_key: String,
+    base_url: String,
+    operations: Vec<String>,
+    secret_env: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -17,8 +48,16 @@ pub struct Config {
     pub anthropic_api_key: String,
     pub anthropic_provider: String,
     pub anthropic_request_max_bytes: usize,
+    pub extra_provider_profiles: Vec<ExtraProviderProfile>,
     /// Maximum bytes in one decoded SSE event and in the held terminal tail.
     pub stream_event_max_bytes: usize,
+    /// Maximum silence between provider response reads. This does not cap the
+    /// total lifetime of an active stream.
+    pub provider_idle_timeout: Duration,
+    pub provider_connect_timeout: Duration,
+    pub request_header_max_bytes: usize,
+    pub drain_timeout: Duration,
+    pub shutdown_finalize_timeout: Duration,
     pub bootstrap_client_key: Option<String>,
     pub allowed_models: Vec<String>,
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`. None means no exporter and no tracer
@@ -31,6 +70,7 @@ pub struct Config {
     /// `DATABASE_MAX_CONNECTIONS`. Postgres has a global connection ceiling,
     /// so this is a share of it, not a throughput dial.
     pub database_max_connections: u32,
+    pub admin_database_max_connections: u32,
     /// Server-side key for HMAC credential hashes. It never enters the database.
     pub credential_hash_key: Vec<u8>,
     /// Non-secret identifier persisted beside hashes so server keys can overlap.
@@ -41,9 +81,19 @@ pub struct Config {
     pub credential_environment: String,
     pub credential_cache_capacity: usize,
     pub credential_cache_ttl_seconds: u64,
+    pub policy_cache_capacity: usize,
+    pub policy_cache_ttl_seconds: u64,
+    pub admin_bootstrap_token: Option<String>,
+    pub admin_bootstrap_tenant_id: Option<Uuid>,
+    pub provider_allowed_tenant_ids: Vec<Uuid>,
+    pub admin_session_ttl_seconds: u64,
+    pub admin_allowed_origin: Option<String>,
+    pub admin_trusted_proxy_ips: Vec<IpAddr>,
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
+    pub routing: RoutingConfig,
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Error)]
@@ -54,6 +104,12 @@ pub enum ConfigError {
     InvalidAddress(#[from] std::net::AddrParseError),
     #[error("invalid DATABASE_MAX_CONNECTIONS: {0}")]
     InvalidPoolSize(#[from] std::num::ParseIntError),
+    #[error("invalid ADMIN_DATABASE_MAX_CONNECTIONS: {0}")]
+    InvalidAdminPoolSize(String),
+    #[error("tenant ids must not be the nil UUID")]
+    NilTenant,
+    #[error("invalid PROVIDER_ALLOWED_TENANT_IDS entry: {0}")]
+    InvalidProviderTenant(String),
     #[error("CREDENTIAL_HASH_KEY must contain at least 32 bytes")]
     WeakCredentialHashKey,
     #[error("credential hash key ids must use lowercase ASCII letters, digits or hyphens")]
@@ -72,8 +128,14 @@ pub enum ConfigError {
     InvalidCredentialCacheCapacity(String),
     #[error("invalid CREDENTIAL_CACHE_TTL_SECONDS: {0}")]
     InvalidCredentialCacheTtl(String),
+    #[error("invalid POLICY_CACHE_CAPACITY: {0}")]
+    InvalidPolicyCacheCapacity(String),
+    #[error("invalid POLICY_CACHE_TTL_SECONDS: {0}")]
+    InvalidPolicyCacheTtl(String),
     #[error("OPENAI_PROVIDER and ANTHROPIC_PROVIDER must not be empty")]
     InvalidProvider,
+    #[error("invalid EXTRA_PROVIDER_PROFILES_JSON: {0}")]
+    InvalidExtraProviderProfiles(String),
     #[error("invalid ledger spool capacity: {0}")]
     InvalidLedgerSpoolCapacity(String),
     #[error("invalid ANTHROPIC_REQUEST_MAX_BYTES: {0}")]
@@ -82,20 +144,52 @@ pub enum ConfigError {
     InvalidOpenAiRequestLimit(String),
     #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
     InvalidStreamEventLimit(String),
+    #[error("invalid PROVIDER_IDLE_TIMEOUT_MS: {0}")]
+    InvalidProviderIdleTimeout(String),
+    #[error("invalid PROVIDER_CONNECT_TIMEOUT_MS: {0}")]
+    InvalidProviderConnectTimeout(String),
+    #[error("invalid REQUEST_HEADER_MAX_BYTES: {0}")]
+    InvalidRequestHeaderLimit(String),
+    #[error("invalid DRAIN_TIMEOUT_MS: {0}")]
+    InvalidDrainTimeout(String),
+    #[error("invalid SHUTDOWN_FINALIZE_TIMEOUT_MS: {0}")]
+    InvalidShutdownFinalizeTimeout(String),
+    #[error("ADMIN_BOOTSTRAP_TOKEN and ADMIN_BOOTSTRAP_TENANT_ID must be configured together")]
+    IncompleteAdminBootstrap,
+    #[error("ADMIN_BOOTSTRAP_TOKEN must contain at least 32 bytes")]
+    WeakAdminBootstrapToken,
+    #[error("invalid ADMIN_BOOTSTRAP_TENANT_ID: {0}")]
+    InvalidAdminBootstrapTenant(String),
+    #[error("invalid ADMIN_SESSION_TTL_SECONDS: {0}")]
+    InvalidAdminSessionTtl(String),
+    #[error("ADMIN_ALLOWED_ORIGIN must be one exact http or https origin without a path")]
+    InvalidAdminOrigin,
+    #[error("invalid ADMIN_TRUSTED_PROXY_IPS: {0}")]
+    InvalidAdminTrustedProxy(String),
+    #[error(
+        "no tenant may use the providers: set PROVIDER_ALLOWED_TENANT_IDS, or ADMIN_BOOTSTRAP_TENANT_ID with ADMIN_BOOTSTRAP_TOKEN"
+    )]
+    NoAllowedTenant,
+    #[error(
+        "{0} still holds a value that ships in this repository; set a real secret or run with CREDENTIAL_ENVIRONMENT=dev"
+    )]
+    DevelopmentSecretOutsideDevelopment(&'static str),
+    #[error("invalid scheduler setting: {0}")]
+    InvalidScheduler(String),
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let listen_address = env::var("LISTEN_ADDRESS")
+        let listen_address = setting("LISTEN_ADDRESS")
             .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
             .parse()?;
-        let openai_base_url = env::var("OPENAI_BASE_URL")
+        let openai_base_url = setting("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
         let openai_api_key = required("OPENAI_API_KEY")?;
         let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
-        let openai_request_max_bytes = env::var("OPENAI_REQUEST_MAX_BYTES")
+        let openai_request_max_bytes = setting("OPENAI_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
             .parse()
             .map_err(|error: std::num::ParseIntError| {
@@ -106,13 +200,13 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
-        let anthropic_base_url = env::var("ANTHROPIC_BASE_URL")
+        let anthropic_base_url = setting("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
         let anthropic_api_key = required("ANTHROPIC_API_KEY")?;
         let anthropic_provider = provider_name("ANTHROPIC_PROVIDER", "anthropic")?;
-        let anthropic_request_max_bytes = env::var("ANTHROPIC_REQUEST_MAX_BYTES")
+        let anthropic_request_max_bytes = setting("ANTHROPIC_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
             .parse()
             .map_err(|error: std::num::ParseIntError| {
@@ -123,7 +217,10 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
-        let stream_event_max_bytes = env::var("STREAM_EVENT_MAX_BYTES")
+        let extra_provider_profiles = extra_provider_profiles(
+            setting("EXTRA_PROVIDER_PROFILES_JSON").unwrap_or_else(|_| "[]".to_owned()),
+        )?;
+        let stream_event_max_bytes = setting("STREAM_EVENT_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
             .parse()
             .map_err(|error: std::num::ParseIntError| {
@@ -134,51 +231,100 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
-        let allowed_models = env::var("ALLOWED_MODELS")
-            .unwrap_or_else(|_| "company-default".to_owned())
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+        let provider_idle_timeout_ms = setting("PROVIDER_IDLE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "120000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidProviderIdleTimeout(error.to_string()))?;
+        if provider_idle_timeout_ms == 0 || provider_idle_timeout_ms > 600_000 {
+            return Err(ConfigError::InvalidProviderIdleTimeout(
+                "must be between 1 and 600000".to_owned(),
+            ));
+        }
+        let provider_idle_timeout = Duration::from_millis(provider_idle_timeout_ms);
+        let provider_connect_timeout_ms = setting("PROVIDER_CONNECT_TIMEOUT_MS")
+            .unwrap_or_else(|_| "10000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidProviderConnectTimeout(error.to_string()))?;
+        if !(1..=120_000).contains(&provider_connect_timeout_ms) {
+            return Err(ConfigError::InvalidProviderConnectTimeout(
+                "must be between 1 and 120000".to_owned(),
+            ));
+        }
+        let provider_connect_timeout = Duration::from_millis(provider_connect_timeout_ms);
+        let request_header_max_bytes = setting("REQUEST_HEADER_MAX_BYTES")
+            .unwrap_or_else(|_| (64 * 1024).to_string())
+            .parse::<usize>()
+            .map_err(|error| ConfigError::InvalidRequestHeaderLimit(error.to_string()))?;
+        if !(8192..=256 * 1024).contains(&request_header_max_bytes) {
+            return Err(ConfigError::InvalidRequestHeaderLimit(
+                "must be between 8192 and 262144".to_owned(),
+            ));
+        }
+        let drain_timeout_ms = setting("DRAIN_TIMEOUT_MS")
+            .unwrap_or_else(|_| "30000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidDrainTimeout(error.to_string()))?;
+        if drain_timeout_ms > 600_000 {
+            return Err(ConfigError::InvalidDrainTimeout(
+                "must be between 0 and 600000".to_owned(),
+            ));
+        }
+        let drain_timeout = Duration::from_millis(drain_timeout_ms);
+        let shutdown_finalize_timeout_ms = setting("SHUTDOWN_FINALIZE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "5000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidShutdownFinalizeTimeout(error.to_string()))?;
+        if !(1..=60_000).contains(&shutdown_finalize_timeout_ms) {
+            return Err(ConfigError::InvalidShutdownFinalizeTimeout(
+                "must be between 1 and 60000".to_owned(),
+            ));
+        }
+        let shutdown_finalize_timeout = Duration::from_millis(shutdown_finalize_timeout_ms);
+        // raw-env: an explicitly empty list means "allow nothing".
+        let allowed_models = model_allowlist(env::var("ALLOWED_MODELS").ok());
 
-        let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        let otlp_endpoint = setting("OTEL_EXPORTER_OTLP_ENDPOINT")
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_owned())
             .filter(|value| !value.is_empty());
 
         let database_url = required("DATABASE_URL")?;
-        let database_max_connections = env::var("DATABASE_MAX_CONNECTIONS")
+        let database_max_connections = setting("DATABASE_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "10".to_owned())
             .parse()?;
+        let admin_database_max_connections = setting("ADMIN_DATABASE_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "2".to_owned())
+            .parse::<u32>()
+            .map_err(|error| ConfigError::InvalidAdminPoolSize(error.to_string()))?;
+        validate_pool_budget(database_max_connections, admin_database_max_connections)?;
         let credential_environment =
-            env::var("CREDENTIAL_ENVIRONMENT").unwrap_or_else(|_| "dev".to_owned());
+            setting("CREDENTIAL_ENVIRONMENT").unwrap_or_else(|_| "dev".to_owned());
         if !valid_tag(&credential_environment) {
             return Err(ConfigError::InvalidCredentialEnvironment);
         }
-        let development_bootstrap_enabled = env::var("ENABLE_DEVELOPMENT_BOOTSTRAP")
+        let development_bootstrap_enabled = setting("ENABLE_DEVELOPMENT_BOOTSTRAP")
             .unwrap_or_else(|_| "false".to_owned())
             .parse::<bool>()
             .map_err(|_| ConfigError::InvalidDevelopmentBootstrapFlag)?;
         let bootstrap_client_key = bootstrap_client_key(
             &credential_environment,
             development_bootstrap_enabled,
-            env::var("BOOTSTRAP_CLIENT_KEY").ok(),
+            setting("BOOTSTRAP_CLIENT_KEY").ok(),
         )?;
         let credential_hash_key = required("CREDENTIAL_HASH_KEY")?.into_bytes();
         if credential_hash_key.len() < 32 {
             return Err(ConfigError::WeakCredentialHashKey);
         }
         let credential_hash_key_id =
-            env::var("CREDENTIAL_HASH_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
+            setting("CREDENTIAL_HASH_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
         if !valid_tag(&credential_hash_key_id) {
             return Err(ConfigError::InvalidCredentialHashKeyId);
         }
         let credential_retiring_hash_keys = retiring_hash_keys(
-            env::var("CREDENTIAL_RETIRING_HASH_KEYS").unwrap_or_default(),
+            setting("CREDENTIAL_RETIRING_HASH_KEYS").unwrap_or_default(),
             &credential_hash_key_id,
         )?;
-        let credential_cache_capacity = env::var("CREDENTIAL_CACHE_CAPACITY")
+        let credential_cache_capacity = setting("CREDENTIAL_CACHE_CAPACITY")
             .unwrap_or_else(|_| "1024".to_owned())
             .parse()
             .map_err(|error: std::num::ParseIntError| {
@@ -189,7 +335,7 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
-        let credential_cache_ttl_seconds = env::var("CREDENTIAL_CACHE_TTL_SECONDS")
+        let credential_cache_ttl_seconds = setting("CREDENTIAL_CACHE_TTL_SECONDS")
             .unwrap_or_else(|_| "60".to_owned())
             .parse()
             .map_err(|error: std::num::ParseIntError| {
@@ -200,8 +346,88 @@ impl Config {
                 "must be greater than zero".to_owned(),
             ));
         }
+        let policy_cache_capacity = setting("POLICY_CACHE_CAPACITY")
+            .unwrap_or_else(|_| "1024".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidPolicyCacheCapacity(error.to_string())
+            })?;
+        if policy_cache_capacity == 0 {
+            return Err(ConfigError::InvalidPolicyCacheCapacity(
+                "must be greater than zero".to_owned(),
+            ));
+        }
+        let policy_cache_ttl_seconds = setting("POLICY_CACHE_TTL_SECONDS")
+            .unwrap_or_else(|_| "60".to_owned())
+            .parse()
+            .map_err(|error: std::num::ParseIntError| {
+                ConfigError::InvalidPolicyCacheTtl(error.to_string())
+            })?;
+        if policy_cache_ttl_seconds == 0 {
+            return Err(ConfigError::InvalidPolicyCacheTtl(
+                "must be greater than zero".to_owned(),
+            ));
+        }
+        let admin_bootstrap_token = setting("ADMIN_BOOTSTRAP_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let admin_bootstrap_tenant_id =
+            admin_bootstrap_tenant_id(setting("ADMIN_BOOTSTRAP_TENANT_ID").ok())?;
+        if admin_bootstrap_token.is_some() != admin_bootstrap_tenant_id.is_some() {
+            return Err(ConfigError::IncompleteAdminBootstrap);
+        }
+        reject_placeholder_secret(
+            &credential_environment,
+            "CREDENTIAL_HASH_KEY",
+            &String::from_utf8_lossy(&credential_hash_key),
+        )?;
+        reject_placeholder_secret(&credential_environment, "OPENAI_API_KEY", &openai_api_key)?;
+        reject_placeholder_secret(
+            &credential_environment,
+            "ANTHROPIC_API_KEY",
+            &anthropic_api_key,
+        )?;
+        let provider_allowed_tenant_ids = provider_allowed_tenants(
+            setting("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default(),
+            admin_bootstrap_tenant_id,
+            bootstrap_client_key.is_some(),
+        )?;
+        if admin_bootstrap_token
+            .as_ref()
+            .is_some_and(|value| value.len() < 32)
+        {
+            return Err(ConfigError::WeakAdminBootstrapToken);
+        }
+        let admin_session_ttl_seconds = setting("ADMIN_SESSION_TTL_SECONDS")
+            .unwrap_or_else(|_| "900".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidAdminSessionTtl(error.to_string()))?;
+        if !(60..=3600).contains(&admin_session_ttl_seconds) {
+            return Err(ConfigError::InvalidAdminSessionTtl(
+                "must be between 60 and 3600".to_owned(),
+            ));
+        }
+        let admin_allowed_origin = setting("ADMIN_ALLOWED_ORIGIN")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
+        if admin_allowed_origin
+            .as_deref()
+            .is_some_and(|value| !valid_origin(value, &credential_environment))
+        {
+            return Err(ConfigError::InvalidAdminOrigin);
+        }
+        let admin_trusted_proxy_ips = setting("ADMIN_TRUSTED_PROXY_IPS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<IpAddr>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ConfigError::InvalidAdminTrustedProxy(error.to_string()))?;
         let ledger_spool_dir = PathBuf::from(
-            env::var("LEDGER_SPOOL_DIR").unwrap_or_else(|_| "var/ledger-spool".to_owned()),
+            setting("LEDGER_SPOOL_DIR").unwrap_or_else(|_| "var/ledger-spool".to_owned()),
         );
         let ledger_spool_max_bytes = ledger_capacity("LEDGER_SPOOL_MAX_BYTES", 64 * 1024 * 1024)?;
         let ledger_spool_entry_max_bytes =
@@ -222,6 +448,8 @@ impl Config {
                     .to_owned(),
             ));
         }
+        let scheduler = scheduler_config()?;
+        let routing = routing_config()?;
 
         Ok(Self {
             listen_address,
@@ -233,27 +461,204 @@ impl Config {
             anthropic_api_key,
             anthropic_provider,
             anthropic_request_max_bytes,
+            extra_provider_profiles,
             stream_event_max_bytes,
+            provider_idle_timeout,
+            provider_connect_timeout,
+            request_header_max_bytes,
+            drain_timeout,
+            shutdown_finalize_timeout,
             bootstrap_client_key,
             allowed_models,
             otlp_endpoint,
             database_url,
             database_max_connections,
+            admin_database_max_connections,
             credential_hash_key,
             credential_hash_key_id,
             credential_retiring_hash_keys,
             credential_environment,
             credential_cache_capacity,
             credential_cache_ttl_seconds,
+            policy_cache_capacity,
+            policy_cache_ttl_seconds,
+            admin_bootstrap_token,
+            admin_bootstrap_tenant_id,
+            provider_allowed_tenant_ids,
+            admin_session_ttl_seconds,
+            admin_allowed_origin,
+            admin_trusted_proxy_ips,
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
+            routing,
+            scheduler,
         })
+    }
+
+    pub fn data_database_max_connections(&self) -> u32 {
+        self.database_max_connections - self.admin_database_max_connections
+    }
+
+    pub fn transport_header_max_bytes(&self) -> usize {
+        self.request_header_max_bytes.saturating_mul(2)
     }
 }
 
+fn routing_config() -> Result<RoutingConfig, ConfigError> {
+    let defaults = RoutingConfig::default();
+    Ok(RoutingConfig {
+        health_aware: scheduler_bool("ROUTING_HEALTH_AWARE", defaults.health_aware)?,
+        load_aware: scheduler_bool("ROUTING_LOAD_AWARE", defaults.load_aware)?,
+        cost_aware: scheduler_bool("ROUTING_COST_AWARE", defaults.cost_aware)?,
+        quota_aware: scheduler_bool("ROUTING_QUOTA_AWARE", defaults.quota_aware)?,
+        auto_quality: scheduler_bool("ROUTING_AUTO_QUALITY", defaults.auto_quality)?,
+        failure_cooldown: chrono::Duration::milliseconds(
+            i64::try_from(scheduler_u64(
+                "ROUTING_FAILURE_COOLDOWN_MS",
+                defaults.failure_cooldown.num_milliseconds() as u64,
+            )?)
+            .map_err(|_| {
+                ConfigError::InvalidScheduler("routing cooldown is too large".to_owned())
+            })?,
+        ),
+    })
+}
+
+fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, ConfigError> {
+    let raw = serde_json::from_str::<Vec<RawExtraProviderProfile>>(&value)
+        .map_err(|error| ConfigError::InvalidExtraProviderProfiles(error.to_string()))?;
+    raw.into_iter()
+        .map(|profile| {
+            let kind = match profile.kind.as_str() {
+                "gemini" => ProviderKind::Gemini,
+                "xai" => ProviderKind::Xai,
+                "vllm" => ProviderKind::Vllm,
+                "ollama" => ProviderKind::Ollama,
+                _ => {
+                    return Err(ConfigError::InvalidExtraProviderProfiles(format!(
+                        "unsupported kind {}",
+                        profile.kind
+                    )));
+                }
+            };
+            let operations = profile
+                .operations
+                .iter()
+                .map(|operation| {
+                    GatewayOperation::parse(operation).ok_or_else(|| {
+                        ConfigError::InvalidExtraProviderProfiles(format!(
+                            "unsupported operation {operation}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let valid_operations = !operations.is_empty()
+                && operations.iter().all(|operation| match kind {
+                    ProviderKind::Gemini => *operation == GatewayOperation::GeminiGenerateContent,
+                    ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => matches!(
+                        operation,
+                        GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions
+                    ),
+                    ProviderKind::Anthropic | ProviderKind::OpenAi => false,
+                });
+            if !valid_operations
+                || profile.credential_ref.trim().is_empty()
+                || profile.provider_key.trim().is_empty()
+                || profile.base_url.trim().is_empty()
+            {
+                return Err(ConfigError::InvalidExtraProviderProfiles(
+                    "profile fields or operations are invalid".to_owned(),
+                ));
+            }
+            let secret = profile
+                .secret_env
+                .as_deref()
+                .map(|name| {
+                    if name.trim().is_empty() {
+                        return Err(ConfigError::InvalidExtraProviderProfiles(
+                            "secret_env must not be empty".to_owned(),
+                        ));
+                    }
+                    setting(name).map_err(|_| {
+                        ConfigError::InvalidExtraProviderProfiles(format!(
+                            "missing secret environment variable {name}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            if matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) && secret.is_none() {
+                return Err(ConfigError::InvalidExtraProviderProfiles(
+                    "gemini and xai require secret_env".to_owned(),
+                ));
+            }
+            Ok(ExtraProviderProfile {
+                kind,
+                credential_ref: profile.credential_ref,
+                provider_key: profile.provider_key,
+                base_url: profile.base_url.trim_end_matches('/').to_owned(),
+                operations,
+                secret,
+            })
+        })
+        .collect()
+}
+
+fn provider_tenant_ids(value: String) -> Result<Vec<Uuid>, ConfigError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map_err(|_| ConfigError::InvalidProviderTenant(value.to_owned()))
+                .and_then(|tenant_id| {
+                    (!tenant_id.is_nil())
+                        .then_some(tenant_id)
+                        .ok_or(ConfigError::NilTenant)
+                })
+        })
+        .collect()
+}
+
+fn valid_origin(value: &str, environment: &str) -> bool {
+    let Ok(uri) = value.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let path_is_origin = uri.path().is_empty() || uri.path() == "/";
+    let secure = scheme == "https";
+    let development_loopback = environment == "dev"
+        && scheme == "http"
+        && matches!(authority.host(), "localhost" | "127.0.0.1" | "[::1]");
+    path_is_origin
+        && uri.query().is_none()
+        && !authority.as_str().contains('@')
+        && (secure || development_loopback)
+}
+
+fn validate_pool_budget(total: u32, admin: u32) -> Result<(), ConfigError> {
+    if admin == 0 {
+        return Err(ConfigError::InvalidAdminPoolSize(
+            "must be greater than zero".to_owned(),
+        ));
+    }
+    if total.saturating_sub(admin) < 2 {
+        return Err(ConfigError::InvalidAdminPoolSize(
+            "must leave one quota guard connection and one serving connection for the data plane"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn provider_name(variable: &'static str, default: &str) -> Result<String, ConfigError> {
-    let value = env::var(variable)
+    let value = setting(variable)
         .unwrap_or_else(|_| default.to_owned())
         .trim()
         .to_owned();
@@ -269,6 +674,31 @@ fn valid_tag(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Placeholder secrets that ship in `deploy/docker-compose.yml` and
+/// `.env.example`. Anyone who can read the repository knows them, so a
+/// credential hash key taken from this list makes every credential fingerprint
+/// predictable. They are fine for development and must never reach an
+/// environment that calls itself anything else.
+const REPOSITORY_PLACEHOLDER_SECRETS: [&str; 3] = [
+    "development-only-credential-hash-key",
+    "replace-with-at-least-32-random-bytes",
+    "replace-me",
+];
+
+fn reject_placeholder_secret(
+    environment: &str,
+    name: &'static str,
+    value: &str,
+) -> Result<(), ConfigError> {
+    if environment == "dev" {
+        return Ok(());
+    }
+    if REPOSITORY_PLACEHOLDER_SECRETS.contains(&value.trim()) {
+        return Err(ConfigError::DevelopmentSecretOutsideDevelopment(name));
+    }
+    Ok(())
 }
 
 fn bootstrap_client_key(
@@ -319,12 +749,87 @@ fn retiring_hash_keys(
         .collect()
 }
 
+/// Collects every tenant that may use the server-side provider credentials:
+/// the operator's own list, the admin bootstrap tenant, and the nil tenant that
+/// belongs to the development bootstrap key.
+///
+/// Fails closed when the result is empty, and says which setting is missing.
+/// An empty list still builds provider profiles, which the registry then
+/// rejects with an error that names no environment variable at all.
+fn provider_allowed_tenants(
+    configured: String,
+    bootstrap_tenant: Option<Uuid>,
+    has_bootstrap_client_key: bool,
+) -> Result<Vec<Uuid>, ConfigError> {
+    let mut tenants = provider_tenant_ids(configured)?;
+    if let Some(tenant_id) = bootstrap_tenant
+        && !tenants.contains(&tenant_id)
+    {
+        tenants.push(tenant_id);
+    }
+    if has_bootstrap_client_key {
+        tenants.push(Uuid::nil());
+    }
+    if tenants.is_empty() {
+        return Err(ConfigError::NoAllowedTenant);
+    }
+    Ok(tenants)
+}
+
+/// An empty value means "not set", the same as `ADMIN_BOOTSTRAP_TOKEN`. A
+/// deployment template that forwards both variables unconditionally would
+/// otherwise refuse to start instead of running without admin bootstrap.
+fn admin_bootstrap_tenant_id(value: Option<String>) -> Result<Option<Uuid>, ConfigError> {
+    let Some(value) = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let tenant_id = Uuid::parse_str(&value)
+        .map_err(|error| ConfigError::InvalidAdminBootstrapTenant(error.to_string()))?;
+    if tenant_id.is_nil() {
+        return Err(ConfigError::NilTenant);
+    }
+    Ok(Some(tenant_id))
+}
+
+/// Reads a setting, treating an empty or blank value as "not set".
+///
+/// A deployment template can then forward every variable unconditionally,
+/// instead of leaving them out or copying this file's defaults -- the two
+/// places then drift apart, and a template that forwards a variable it has no
+/// value for hands the process an empty string it has to reject.
+/// The development model allowlist.
+///
+/// This is the one setting where empty is a decision, not an omission: an
+/// explicitly empty list allows nothing, which is not what leaving the variable
+/// out means. So it reads the raw value instead of going through [`setting`].
+fn model_allowlist(raw: Option<String>) -> Vec<String> {
+    raw.unwrap_or_else(|| "company-default".to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The value itself is returned untouched: a secret may legitimately carry
+/// surrounding whitespace, and trimming it would silently change the key.
+fn setting(name: &str) -> Result<String, env::VarError> {
+    // raw-env: this is the wrapper every other read goes through.
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Err(env::VarError::NotPresent),
+        other => other,
+    }
+}
+
 fn required(name: &'static str) -> Result<String, ConfigError> {
-    env::var(name).map_err(|_| ConfigError::Missing(name))
+    setting(name).map_err(|_| ConfigError::Missing(name))
 }
 
 fn ledger_capacity(name: &'static str, default: u64) -> Result<u64, ConfigError> {
-    let value = env::var(name)
+    let value = setting(name)
         .unwrap_or_else(|_| default.to_string())
         .parse::<u64>()
         .map_err(|error| ConfigError::InvalidLedgerSpoolCapacity(error.to_string()))?;
@@ -334,6 +839,86 @@ fn ledger_capacity(name: &'static str, default: u64) -> Result<u64, ConfigError>
         )));
     }
     Ok(value)
+}
+
+fn scheduler_config() -> Result<SchedulerConfig, ConfigError> {
+    let defaults = SchedulerConfig::default();
+    let config = SchedulerConfig {
+        active_interactive_reserved: scheduler_usize(
+            "SCHEDULER_ACTIVE_INTERACTIVE_RESERVED",
+            defaults.active_interactive_reserved,
+        )?,
+        active_shared: scheduler_usize("SCHEDULER_ACTIVE_SHARED", defaults.active_shared)?,
+        active_background_reserved: scheduler_usize(
+            "SCHEDULER_ACTIVE_BACKGROUND_RESERVED",
+            defaults.active_background_reserved,
+        )?,
+        queue_interactive_reserved: scheduler_usize(
+            "SCHEDULER_QUEUE_INTERACTIVE_RESERVED",
+            defaults.queue_interactive_reserved,
+        )?,
+        queue_shared: scheduler_usize("SCHEDULER_QUEUE_SHARED", defaults.queue_shared)?,
+        queue_background_reserved: scheduler_usize(
+            "SCHEDULER_QUEUE_BACKGROUND_RESERVED",
+            defaults.queue_background_reserved,
+        )?,
+        queue_per_tenant: scheduler_usize("SCHEDULER_QUEUE_PER_TENANT", defaults.queue_per_tenant)?,
+        queue_per_credential: scheduler_usize(
+            "SCHEDULER_QUEUE_PER_CREDENTIAL",
+            defaults.queue_per_credential,
+        )?,
+        per_provider: scheduler_usize("SCHEDULER_PER_PROVIDER", defaults.per_provider)?,
+        per_model: scheduler_usize("SCHEDULER_PER_MODEL", defaults.per_model)?,
+        per_user: scheduler_usize("SCHEDULER_PER_USER", defaults.per_user)?,
+        per_device: scheduler_usize("SCHEDULER_PER_DEVICE", defaults.per_device)?,
+        per_client: scheduler_usize("SCHEDULER_PER_CLIENT", defaults.per_client)?,
+        per_agent: scheduler_usize("SCHEDULER_PER_AGENT", defaults.per_agent)?,
+        per_credential: scheduler_usize("SCHEDULER_PER_CREDENTIAL", defaults.per_credential)?,
+        per_workload: scheduler_usize("SCHEDULER_PER_WORKLOAD", defaults.per_workload)?,
+        hard_queue_timeout: Duration::from_millis(scheduler_u64(
+            "SCHEDULER_HARD_QUEUE_TIMEOUT_MS",
+            defaults.hard_queue_timeout.as_millis() as u64,
+        )?),
+        aging_interval: Duration::from_millis(scheduler_u64(
+            "SCHEDULER_AGING_INTERVAL_MS",
+            defaults.aging_interval.as_millis() as u64,
+        )?),
+        aging_enabled: scheduler_bool("SCHEDULER_AGING_ENABLED", defaults.aging_enabled)?,
+        reservations_enabled: scheduler_bool(
+            "SCHEDULER_RESERVATIONS_ENABLED",
+            defaults.reservations_enabled,
+        )?,
+    };
+    config
+        .validate()
+        .map_err(|error| ConfigError::InvalidScheduler(error.to_string()))?;
+    Ok(config)
+}
+
+fn scheduler_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
+    let value = scheduler_u64(name, default as u64)?;
+    usize::try_from(value)
+        .map_err(|_| ConfigError::InvalidScheduler(format!("{name} is too large")))
+}
+
+fn scheduler_u64(name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    let value = setting(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|error| ConfigError::InvalidScheduler(format!("{name}: {error}")))?;
+    if value == 0 {
+        return Err(ConfigError::InvalidScheduler(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
+
+fn scheduler_bool(name: &'static str, default: bool) -> Result<bool, ConfigError> {
+    setting(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<bool>()
+        .map_err(|error| ConfigError::InvalidScheduler(format!("{name}: {error}")))
 }
 
 #[cfg(test)]
@@ -357,6 +942,143 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_admin_bootstrap_tenant_means_no_bootstrap() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(admin_bootstrap_tenant_id(None).unwrap(), None);
+        // What a deployment template forwards when the operator set nothing.
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some("  ".to_owned())).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_bootstrap_tenant_id(Some(format!(" {tenant} "))).unwrap(),
+            Some(tenant)
+        );
+        assert!(matches!(
+            admin_bootstrap_tenant_id(Some("not-a-uuid".to_owned())),
+            Err(ConfigError::InvalidAdminBootstrapTenant(_))
+        ));
+        assert!(matches!(
+            admin_bootstrap_tenant_id(Some(Uuid::nil().to_string())),
+            Err(ConfigError::NilTenant)
+        ));
+    }
+
+    #[test]
+    fn an_explicitly_empty_model_allowlist_allows_nothing() {
+        assert!(
+            model_allowlist(Some(String::new())).is_empty(),
+            "an empty list must not fall back to a default model"
+        );
+        assert!(model_allowlist(Some(" , ".to_owned())).is_empty());
+        // Leaving the variable out is a different thing entirely.
+        assert_eq!(model_allowlist(None), vec!["company-default".to_owned()]);
+        assert_eq!(
+            model_allowlist(Some(" a , b ".to_owned())),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_empty_setting_reads_as_not_set() {
+        // SAFETY: writing an environment variable races with any thread that
+        // reads the environment. Nothing else in this binary reads this name,
+        // and it is removed before the test ends.
+        let name = "AGENT_POOL_GATEWAY_EMPTY_SETTING_PROBE";
+        // What a deployment template forwards for a variable with no value.
+        unsafe { env::set_var(name, "") };
+        assert!(
+            setting(name).is_err(),
+            "an empty value must read as not set"
+        );
+        unsafe { env::set_var(name, "   ") };
+        assert!(setting(name).is_err(), "a blank value must read as not set");
+        // A real value survives untouched: a secret may carry surrounding
+        // whitespace, so the value is never trimmed on the way out.
+        unsafe { env::set_var(name, " kept ") };
+        assert_eq!(setting(name).unwrap(), " kept ");
+        unsafe { env::remove_var(name) };
+    }
+
+    #[test]
+    fn repository_placeholder_secrets_stay_in_development() {
+        // The exact strings the compose file and .env.example ship with.
+        for placeholder in REPOSITORY_PLACEHOLDER_SECRETS {
+            assert!(
+                reject_placeholder_secret("dev", "CREDENTIAL_HASH_KEY", placeholder).is_ok(),
+                "development must keep working"
+            );
+            assert!(matches!(
+                reject_placeholder_secret("prod", "CREDENTIAL_HASH_KEY", placeholder),
+                Err(ConfigError::DevelopmentSecretOutsideDevelopment(
+                    "CREDENTIAL_HASH_KEY"
+                ))
+            ));
+            assert!(matches!(
+                reject_placeholder_secret(
+                    "staging",
+                    "OPENAI_API_KEY",
+                    &format!("  {placeholder} ")
+                ),
+                Err(ConfigError::DevelopmentSecretOutsideDevelopment(
+                    "OPENAI_API_KEY"
+                ))
+            ));
+        }
+        reject_placeholder_secret(
+            "prod",
+            "CREDENTIAL_HASH_KEY",
+            "a-real-secret-at-least-32-bytes-long",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn providers_need_at_least_one_tenant() {
+        let tenant = Uuid::new_v4();
+        let bootstrap = Uuid::new_v4();
+        // What the shipped compose file passes when the operator set nothing.
+        assert!(matches!(
+            provider_allowed_tenants(String::new(), None, false),
+            Err(ConfigError::NoAllowedTenant)
+        ));
+        assert_eq!(
+            provider_allowed_tenants(tenant.to_string(), None, false).unwrap(),
+            vec![tenant]
+        );
+        assert_eq!(
+            provider_allowed_tenants(String::new(), Some(bootstrap), false).unwrap(),
+            vec![bootstrap]
+        );
+        assert_eq!(
+            provider_allowed_tenants(String::new(), None, true).unwrap(),
+            vec![Uuid::nil()]
+        );
+        // The bootstrap tenant is not added twice when it is already listed.
+        assert_eq!(
+            provider_allowed_tenants(tenant.to_string(), Some(tenant), false).unwrap(),
+            vec![tenant]
+        );
+    }
+
+    #[test]
+    fn provider_tenants_are_explicit_and_non_nil() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(
+            provider_tenant_ids(tenant.to_string()).unwrap(),
+            vec![tenant]
+        );
+        assert!(matches!(
+            provider_tenant_ids(Uuid::nil().to_string()),
+            Err(ConfigError::NilTenant)
+        ));
+    }
+
+    #[test]
     fn retiring_hash_key_ids_are_unique_and_secrets_are_strong() {
         let parsed =
             retiring_hash_keys("v1=old-credential-hash-key-at-least-32".to_owned(), "v2").unwrap();
@@ -365,5 +1087,49 @@ mod tests {
             retiring_hash_keys("v2=duplicate-active-hash-key-at-least-32".to_owned(), "v2"),
             Err(ConfigError::InvalidRetiringHashKey(_))
         ));
+    }
+
+    #[test]
+    fn admin_pool_is_reserved_inside_the_total_database_budget() {
+        validate_pool_budget(10, 2).unwrap();
+        assert!(matches!(
+            validate_pool_budget(10, 0),
+            Err(ConfigError::InvalidAdminPoolSize(_))
+        ));
+        assert!(matches!(
+            validate_pool_budget(3, 2),
+            Err(ConfigError::InvalidAdminPoolSize(_))
+        ));
+    }
+
+    #[test]
+    fn admin_origin_is_exact_and_secure_outside_development() {
+        assert!(valid_origin("https://admin.example.com", "prod"));
+        assert!(!valid_origin("http://admin.example.com", "prod"));
+        assert!(!valid_origin("https://admin.example.com/path", "prod"));
+        assert!(!valid_origin("https://admin.example.com?tenant=a", "prod"));
+        assert!(valid_origin("http://127.0.0.1:5173", "dev"));
+        assert!(valid_origin("http://[::1]:5173", "dev"));
+        assert!(!valid_origin("http://192.168.1.10:5173", "dev"));
+    }
+
+    #[test]
+    fn extra_provider_profiles_are_typed_and_local_auth_is_optional() {
+        let profiles = extra_provider_profiles(
+            r#"[{"kind":"vllm","credential_ref":"none://vllm","provider_key":"local-vllm","base_url":"http://127.0.0.1:8000/","operations":["openai_responses"],"secret_env":null}]"#.to_owned(),
+        )
+        .unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].kind, ProviderKind::Vllm);
+        assert_eq!(profiles[0].base_url, "http://127.0.0.1:8000");
+        assert!(profiles[0].secret.is_none());
+        assert!(extra_provider_profiles(
+            r#"[{"kind":"unknown","credential_ref":"x","provider_key":"x","base_url":"http://localhost","operations":["openai_responses"]}]"#.to_owned(),
+        )
+        .is_err());
+        assert!(extra_provider_profiles(
+            r#"[{"kind":"gemini","credential_ref":"x","provider_key":"x","base_url":"https://example.test","operations":["openai_responses"]}]"#.to_owned(),
+        )
+        .is_err());
     }
 }
