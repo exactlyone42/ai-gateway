@@ -7,6 +7,7 @@
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
 #   ./scripts/check.sh clients     # client compatibility document contract
+#   ./scripts/check.sh frontend    # admin UI lint + types + tests + build
 #   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
 #   ./scripts/check.sh selftest    # prove the gates above actually catch things
 #   ./scripts/check.sh all         # everything CI runs
@@ -30,6 +31,21 @@ test_all() {
     export DATABASE_URL="postgres://gateway:gateway-dev@127.0.0.1:${POSTGRES_PORT:-15432}/gateway"
   fi
   cargo test --workspace --all-features
+}
+
+frontend() {
+  step "admin frontend"
+  if grep -RInE 'localStorage|sessionStorage' web/src; then
+    echo "persistent browser storage is forbidden for Admin sessions"
+    return 1
+  fi
+  (
+    cd web
+    npm run lint
+    npm run typecheck
+    npm run test
+    npm run build
+  )
 }
 
 # Machine-checkable loop-file rules. A loop file that drifts from the format is
@@ -179,6 +195,21 @@ bans() {
     failed=1
   fi
 
+  # 8. Configuration reads go through `setting`, which treats an empty value
+  #    as unset. That is what lets the deployment template forward every
+  #    variable without holding a second copy of the defaults; a direct
+  #    `env::var` silently opts out and turns a forwarded blank into a parse
+  #    error at startup. Mark a deliberate raw read with `raw-env:` on the line
+  #    above it, saying why empty is not the same as absent there.
+  hits=$(printf '%s\n' "$prod" | awk '
+    { code = $0; sub(/^[^:]*:[0-9]+:/, "", code)
+      if (code ~ /env::var\(/ && previous !~ /raw-env:/) print
+      previous = code }')
+  if [ -n "$hits" ]; then
+    echo "$hits" | sed 's/^/configuration read bypasses `setting` (mark it `raw-env:` if deliberate): /'
+    failed=1
+  fi
+
   # 7. Metric attributes come from an explicit allowlist, because the failure
   #    mode of a wrong one is a metrics backend that falls over days later,
   #    far from the commit that caused it. Rule 5 blocks the ids we already
@@ -293,10 +324,11 @@ case "${1:-gate}" in
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
   clients)   clients ;;
+  frontend)  frontend ;;
   secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
   all|pre-push)
-    fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
+    frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh
     ;;

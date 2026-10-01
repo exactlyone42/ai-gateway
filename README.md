@@ -31,6 +31,10 @@ directly. Others use a small, explicit adapter:
 
 Exact compatibility is tracked in `docs/client-compatibility.md`; product
 capabilities can change and must be verified before declaring support.
+Model registry administration and lifecycle ordering are documented in
+`docs/model-registry.md`.
+Request policy resolution, hints, constraints, and rollout are documented in
+`docs/request-policy.md`.
 
 ## Current milestone
 
@@ -39,12 +43,14 @@ The repository contains the native Anthropic and OpenAI data-plane slice:
 - `GET /healthz`
 - `POST /v1/messages` and `/v1/messages/count_tokens`
 - `POST /v1/responses` and `/v1/chat/completions`, including incremental SSE
-- `GET /v1/models` from the configured model allowlist
+- tenant-scoped `GET /v1/models` and deterministic routing from the active PostgreSQL registry
 - tenant-scoped virtual credentials with constant-time HMAC verification
+- seven-layer request policy resolution with immutable decision snapshots
+- tenant-scoped hard/soft quota enforcement with persistent UTC windows and usage reconciliation
 - cancellation propagation, durable usage accounting, request IDs, traces,
   metrics, and structured JSON logs
 
-An explicitly configured bootstrap key remains a dev-only compatibility path. Issued virtual
+An explicitly configured bootstrap key and `ALLOWED_MODELS` remain a dev-only compatibility path. Issued virtual
 credentials resolve through PostgreSQL to a user, device, client and agent.
 
 The work from here is split into 18 independently reviewable segments. Read
@@ -67,11 +73,28 @@ curl http://127.0.0.1:8080/ready    # readiness: the database answers too
 Migrations run during startup, so a database is required to boot. A failing
 migration stops the process rather than serving against a half-migrated schema.
 
-The whole stack, including the gateway image:
+The whole stack, including the gateway image. It runs without the development
+bootstrap, so it needs a tenant that may use the server-side provider
+credentials. Setting the admin bootstrap pair covers that and gives you a way
+in; export the token from your own secret store instead of typing it:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+ADMIN_BOOTSTRAP_TOKEN="$MY_BOOTSTRAP_TOKEN" \
+ADMIN_BOOTSTRAP_TENANT_ID=<tenant uuid> \
+  docker compose -f deploy/docker-compose.yml up --build
 ```
+
+Without either that pair or `PROVIDER_ALLOWED_TENANT_IDS`, the gateway refuses
+to start and says which setting is missing, rather than serving providers no
+tenant may use.
+
+A started stack still serves nobody: `POST /admin/v1/bootstrap` creates the
+first admin, and identities and keys are issued from there. `docs/admin.md` has
+that flow. Provider credentials also stay at their `replace-me` defaults until
+you supply real ones.
+
+The Admin Web UI is served by the gateway at `http://127.0.0.1:8080/admin/` and uses the
+short-lived Admin session flow documented in `docs/admin.md`.
 
 Never commit real provider credentials or client keys.
 
@@ -85,8 +108,11 @@ for which problem, so you do not have to load everything.
 - `docs/task-ledger.md` — time and token cost per segment, plus trade-offs
 - `docs/architecture.md` — three planes, request path, failure model
 - `docs/security-and-compliance.md` — credential and subscription boundary
+- `docs/admin.md` — Admin authentication, RBAC and control-plane API contract
+- `docs/admin-web.md` — Admin report definitions, operator questions and browser security
 - `docs/product-requirements.md` — roles, policies and acceptance criteria
 - `docs/client-compatibility.md` — integration contract by client
+- `docs/request-policy.md` — policy scopes, request hints, constraints and rollout
 - `docs/operations.md` — rollout and incident controls
 - `loops/` — one live status file per segment
 

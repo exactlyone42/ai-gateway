@@ -56,7 +56,8 @@ Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號�
 
 **Gateway contract**：推論可打 `/v1/messages?beta=true`，所以比對 path 而非完整 URL；
 `anthropic-beta`／`anthropic-version`、錯誤 body、`system` 陣列、`cache_control` 與 SSE raw
-bytes 都不得改寫。模型發現為 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
+bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發現為
+`GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
 只顯示 id 含 `claude` 或 `anthropic` 的模型。`x-claude-code-agent-id` 是 agent，不是人。
 
 ## Codex CLI
@@ -74,12 +75,14 @@ bytes 都不得改寫。模型發現為 `GET /v1/models?limit=1000`，3 秒 time
 | reasoning | request serialization verified：實測送出 `reasoning.effort` 與 `reasoning.encrypted_content` include；reasoning response 往返 unknown |
 | seat_subscription_behavior | OpenAI 路徑以 ChatGPT 登入時使用 ChatGPT plan；自己的 OpenAI API key 使用 API pricing。自訂 gateway credential 由 gateway／上游帳戶計費；官方文件沒有說明此模式是否仍影響 Client 端的 ChatGPT plan meter |
 | configuration_example | 見下方 `config.toml` |
-| known_limitations | 沒有 gateway compatibility contract；0.153.0 會讀私有 `models[]` metadata，一般 OpenAI `data[]` 只觸發 fallback warning，明確模型仍可用；完整能力 metadata 留給 W10 |
+| known_limitations | 沒有官方 gateway compatibility contract；0.153.0 對 custom provider 不會查 gateway `/v1/models`，未知 model 會使用 fallback metadata。要消除 warning，必須另以本機 `model_catalog_json` 提供已知正確的 Codex catalog，不能由 gateway 猜 reasoning levels |
 | official_source | <https://learn.chatgpt.com/docs/config-file/config-reference>、<https://learn.chatgpt.com/docs/auth>、<https://help.openai.com/en/articles/20001275>、<https://help.openai.com/en/articles/9039756> |
 
 ```toml
 model = "company-default"
 model_provider = "aigw"
+# Optional: operator-maintained catalog with verified metadata for the model.
+# model_catalog_json = "/etc/codex/company-models.json"
 
 [model_providers.aigw]
 name = "Company Gateway"

@@ -18,6 +18,8 @@ const MAX_ROTATION_OVERLAP: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
+    #[error("tenant id must not be the nil UUID")]
+    InvalidTenant,
     #[error("invalid credential")]
     InvalidCredential,
     #[error("credential state does not allow this operation")]
@@ -77,6 +79,12 @@ impl PrincipalContext {
             agent_id: None,
             agent_name: None,
         }
+    }
+
+    pub fn is_development_bootstrap(&self) -> bool {
+        self.tenant_id.is_nil()
+            && self.credential_id.is_nil()
+            && self.credential_name == "development bootstrap"
     }
 
     /// Logs use an opaque identifier. Display names remain available to the
@@ -160,6 +168,9 @@ impl CredentialService {
         &self,
         input: NewPrincipal<'_>,
     ) -> Result<PrincipalIds, IdentityError> {
+        if input.tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let ids = PrincipalIds {
             user_id: Uuid::new_v4(),
             device_id: Uuid::new_v4(),
@@ -210,6 +221,9 @@ impl CredentialService {
         &self,
         input: NewCredential<'_>,
     ) -> Result<IssuedCredential, IdentityError> {
+        if input.tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let material = self.generate(input.tenant_id)?;
         let id = Uuid::new_v4();
         sqlx::query(
@@ -263,7 +277,7 @@ impl CredentialService {
             r#"
             WITH expired AS (
                 UPDATE credentials
-                SET status = 'expired'
+                SET status = 'expired', version = version + 1, updated_at = now()
                 WHERE tenant_id = $1
                   AND fingerprint = $2
                   AND status IN ('active', 'disabled')
@@ -276,6 +290,26 @@ impl CredentialService {
                   AND status = 'active'
                   AND revoked_at IS NULL
                   AND (expires_at IS NULL OR expires_at > now())
+                  AND (user_id IS NULL OR EXISTS (
+                      SELECT 1 FROM users
+                      WHERE users.tenant_id = credentials.tenant_id
+                        AND users.id = credentials.user_id AND users.status = 'active'
+                  ))
+                  AND (device_id IS NULL OR EXISTS (
+                      SELECT 1 FROM devices
+                      WHERE devices.tenant_id = credentials.tenant_id
+                        AND devices.id = credentials.device_id AND devices.status = 'active'
+                  ))
+                  AND (client_id IS NULL OR EXISTS (
+                      SELECT 1 FROM clients
+                      WHERE clients.tenant_id = credentials.tenant_id
+                        AND clients.id = credentials.client_id AND clients.status = 'active'
+                  ))
+                  AND (agent_id IS NULL OR EXISTS (
+                      SELECT 1 FROM agents
+                      WHERE agents.tenant_id = credentials.tenant_id
+                        AND agents.id = credentials.agent_id AND agents.status = 'active'
+                  ))
                 RETURNING *
             )
             SELECT c.secret_hash, c.hash_key_id, c.expires_at,
@@ -336,7 +370,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'revoked', revoked_at = now()
+            SET status = 'revoked', revoked_at = now(), version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2
               AND status IN ('active', 'disabled')
             RETURNING id
@@ -354,7 +388,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'disabled'
+            SET status = 'disabled', version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2 AND status = 'active'
               AND (expires_at IS NULL OR expires_at > now())
             RETURNING id
@@ -372,7 +406,7 @@ impl CredentialService {
             id,
             r#"
             UPDATE credentials
-            SET status = 'active'
+            SET status = 'active', version = version + 1, updated_at = now()
             WHERE tenant_id = $1 AND id = $2 AND status = 'disabled'
               AND revoked_at IS NULL
               AND (expires_at IS NULL OR expires_at > now())
@@ -389,7 +423,7 @@ impl CredentialService {
         let result = sqlx::query(
             r#"
             UPDATE credentials
-            SET status = 'expired'
+            SET status = 'expired', version = version + 1, updated_at = now()
             WHERE tenant_id = $1
               AND status IN ('active', 'disabled')
               AND expires_at <= now()
@@ -432,21 +466,22 @@ impl CredentialService {
                 SET expires_at = LEAST(
                     COALESCE(current.expires_at, now() + $3 * interval '1 second'),
                     now() + $3 * interval '1 second'
-                )
+                ), version = current.version + 1, updated_at = now()
                 FROM old
                 WHERE current.tenant_id = old.tenant_id AND current.id = old.id
                 RETURNING old."type", old.display_name, old.user_id,
                           old.device_id, old.client_id, old.agent_id,
-                          old.expires_at AS inherited_expires_at
+                          old.expires_at AS inherited_expires_at,
+                          COALESCE(old.rotation_root_id, old.id) AS rotation_root_id
             ), inserted AS (
                 INSERT INTO credentials (
                     id, tenant_id, "type", display_name, secret_hash, hash_key_id, key_prefix,
                     fingerprint, user_id, device_id, client_id, agent_id,
-                    expires_at, rotated_from_id
+                    expires_at, rotated_from_id, rotation_root_id
                 )
                 SELECT $4, $1, "type", display_name, $5, $6, $7,
                        $8, user_id, device_id, client_id, agent_id,
-                       COALESCE($9, inherited_expires_at), $2
+                       COALESCE($9, inherited_expires_at), $2, rotation_root_id
                 FROM shortened
                 RETURNING id
             )
@@ -484,7 +519,10 @@ impl CredentialService {
             .ok_or(IdentityError::InvalidTransition)
     }
 
-    fn generate(&self, tenant_id: Uuid) -> Result<KeyMaterial, IdentityError> {
+    pub(crate) fn generate(&self, tenant_id: Uuid) -> Result<KeyMaterial, IdentityError> {
+        if tenant_id.is_nil() {
+            return Err(IdentityError::InvalidTenant);
+        }
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(IdentityError::Random)?;
         let encoded = URL_SAFE_NO_PAD.encode(random);
@@ -552,6 +590,15 @@ impl CredentialService {
             .lock()
             .map_err(|_| IdentityError::CacheUnavailable)
     }
+
+    pub(crate) async fn lifecycle_write(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.lifecycle_gate.clone().write_owned().await
+    }
+
+    pub(crate) fn clear_tenant_cache(&self, tenant_id: Uuid) -> Result<(), IdentityError> {
+        self.cache_lock()?.clear_tenant(tenant_id);
+        Ok(())
+    }
 }
 
 struct HashKeys {
@@ -571,12 +618,12 @@ fn map_rotation_error(error: sqlx::Error) -> IdentityError {
     }
 }
 
-struct KeyMaterial {
-    plaintext: String,
-    key_prefix: String,
-    fingerprint: [u8; 32],
-    secret_hash: [u8; 32],
-    hash_key_id: String,
+pub(crate) struct KeyMaterial {
+    pub(crate) plaintext: String,
+    pub(crate) key_prefix: String,
+    pub(crate) fingerprint: [u8; 32],
+    pub(crate) secret_hash: [u8; 32],
+    pub(crate) hash_key_id: String,
 }
 
 impl KeyMaterial {
@@ -738,9 +785,10 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
+    use serde_json::Value;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -818,6 +866,7 @@ mod tests {
 
     #[sqlx::test]
     async fn lifecycle_is_tenant_safe_and_revocation_beats_the_cache(pool: Pool<Postgres>) {
+        let tenant_id = Uuid::new_v4();
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
@@ -828,27 +877,44 @@ mod tests {
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
+            provider_idle_timeout: Duration::from_secs(120),
+            provider_connect_timeout: Duration::from_secs(10),
+            request_header_max_bytes: 64 * 1024,
+            drain_timeout: Duration::from_secs(30),
+            shutdown_finalize_timeout: Duration::from_secs(5),
             bootstrap_client_key: Some("bootstrap-key".to_owned()),
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
             database_url: "managed-by-sqlx-test".to_owned(),
             database_max_connections: 1,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![tenant_id, Uuid::nil()],
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            routing: Default::default(),
+            scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
-        let tenant_id = Uuid::new_v4();
+        seed_active_openai_model(&pool, tenant_id).await;
         let principal = state
             .credentials
             .create_principal(NewPrincipal {
@@ -870,6 +936,38 @@ mod tests {
             })
             .await
             .unwrap();
+
+        let models = routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models?limit=1000")
+                    .header("authorization", format!("Bearer {}", issued.plaintext))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models.status(), StatusCode::OK);
+        let models: Value =
+            serde_json::from_slice(&to_bytes(models.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(models["data"][0]["id"], "company-default");
+        assert_eq!(models["data"][0]["display_name"], "Company default");
+
+        let tools_rejected = routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", format!("Bearer {}", issued.plaintext))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","tools":[{"type":"function"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tools_rejected.status(), StatusCode::BAD_REQUEST);
 
         assert!(!database_contains(&pool, &issued.plaintext).await);
         assert_eq!(
@@ -1082,6 +1180,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        let tenant_id = Uuid::new_v4();
         let config = Config {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
@@ -1092,27 +1191,44 @@ mod tests {
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
+            provider_idle_timeout: Duration::from_secs(120),
+            provider_connect_timeout: Duration::from_secs(10),
+            request_header_max_bytes: 64 * 1024,
+            drain_timeout: Duration::from_secs(30),
+            shutdown_finalize_timeout: Duration::from_secs(5),
             bootstrap_client_key: None,
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
             database_url: "managed-by-sqlx-test".to_owned(),
             database_max_connections: 2,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![tenant_id],
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            routing: Default::default(),
+            scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, bounded_pool).unwrap());
-        let tenant_id = Uuid::new_v4();
+        seed_active_openai_model(&pool, tenant_id).await;
         let principal = state
             .credentials
             .create_principal(NewPrincipal {
@@ -1170,24 +1286,41 @@ mod tests {
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
+            extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
+            provider_idle_timeout: Duration::from_secs(120),
+            provider_connect_timeout: Duration::from_secs(10),
+            request_header_max_bytes: 64 * 1024,
+            drain_timeout: Duration::from_secs(30),
+            shutdown_finalize_timeout: Duration::from_secs(5),
             bootstrap_client_key: None,
             allowed_models: vec!["company-default".to_owned()],
             otlp_endpoint: None,
             database_url: "postgres://gateway@127.0.0.1:1/gateway".to_owned(),
             database_max_connections: 1,
+            admin_database_max_connections: 1,
             credential_hash_key: b"test-credential-hash-key-at-least-32".to_vec(),
             credential_hash_key_id: "v1".to_owned(),
             credential_retiring_hash_keys: Vec::new(),
             credential_environment: "test".to_owned(),
             credential_cache_capacity: 2,
             credential_cache_ttl_seconds: 300,
+            policy_cache_capacity: 2,
+            policy_cache_ttl_seconds: 300,
+            admin_bootstrap_token: None,
+            admin_bootstrap_tenant_id: None,
+            provider_allowed_tenant_ids: vec![Uuid::new_v4()],
+            admin_session_ttl_seconds: 900,
+            admin_allowed_origin: None,
+            admin_trusted_proxy_ips: Vec::new(),
             ledger_spool_dir: std::env::temp_dir().join(format!(
                 "agent-pool-gateway-identity-test-{}",
                 Uuid::new_v4()
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            routing: Default::default(),
+            scheduler: Default::default(),
         };
         let pool = crate::db::pool(&config.database_url, config.database_max_connections).unwrap();
         let state = Arc::new(AppState::new(config, pool).unwrap());
@@ -1217,6 +1350,36 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    async fn seed_active_openai_model(pool: &Pool<Postgres>, tenant_id: Uuid) {
+        sqlx::query(
+            r#"
+            WITH provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $2, $1, 'openai-test', 'OpenAI test', 'openai',
+                    'http://127.0.0.1:1', 'env://OPENAI_API_KEY',
+                    ARRAY['openai_chat_completions'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, lifecycle_state
+            )
+            SELECT $3, $1, id, 'company-default', 'company-default',
+                   'Company default', ARRAY['openai_chat_completions'], 'active'
+            FROM provider
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn database_contains(pool: &Pool<Postgres>, needle: &str) -> bool {

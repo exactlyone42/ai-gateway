@@ -41,7 +41,7 @@ W02 workspace-foundation ──┬───────────┼──→ 
 
 **兩個先於實作的決定**（拖到寫程式時才問就來不及）：
 
-1. **單實例還是分散式計數器**（屬於 W19）。`docs/architecture.md` 原本寫「至少兩個實例」，
+1. **單實例還是分散式計數器**（W12/W19 已定案）。`docs/architecture.md` 原本寫「至少兩個實例」，
    而 W12 寫「不做分散式計數器」——兩個實例各自記憶體計數，等於所有上限實際上是兩倍，
    而且**沒有任何錯誤訊息**。第一版的答案是**單實例**，理由見 `docs/task-ledger.md`。
 2. **要不要自建 Admin 認證**（屬於 W08）。取決於採不採用第一方閘道，見 `docs/feasibility.md` 第四節。
@@ -127,7 +127,7 @@ metric 命名與 cardinality 規則（`request_id` 這類只進 trace／log，�
 
 | 編號 | Slug | 優先度 | 前置 |
 | --- | --- | --- | --- |
-| W08 | `admin-api-rbac` | P1 | W03 |
+| W08 | `admin-api-rbac` | P1 | W03, W04 |
 
 **目的**：後台的權限在 API 層擋得住，不是靠前端藏按鈕。
 **交付**：Admin 登入（短效 token／安全 session，與 Client API Key 分開兩套語意）；

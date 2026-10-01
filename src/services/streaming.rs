@@ -5,18 +5,12 @@ use chrono::Utc;
 use futures_util::StreamExt as _;
 use thiserror::Error;
 
-use crate::ledger::{ProviderAttempt, RequestCompletion, Reservation, TokenUsage};
+use crate::{
+    canonical::CanonicalStreamEvent,
+    ledger::{ProviderAttempt, RequestCompletion, Reservation},
+};
 
 const DEFAULT_EVENT_MAX_BYTES: usize = 32 * 1024 * 1024;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CanonicalStreamEvent {
-    ResponseStarted(String),
-    Usage(TokenUsage),
-    CompletionHint,
-    Completed,
-    Failed(&'static str),
-}
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -24,6 +18,8 @@ pub enum ProtocolError {
     EventTooLarge,
     #[error("terminal SSE events exceeded the bounded hold size")]
     TerminalTooLarge,
+    #[error("provider stream exceeded the bounded total response size")]
+    ResponseTooLarge,
     #[error("{0}")]
     Invalid(&'static str),
 }
@@ -36,6 +32,15 @@ pub trait StreamObserver: Send + 'static {
             "provider stream ended without a terminal event",
         ))
     }
+}
+
+pub trait StreamEncoder: Send + 'static {
+    fn encode(&mut self, events: &[CanonicalStreamEvent]) -> Result<Vec<Bytes>, ProtocolError>;
+}
+
+struct RelayProtocol<O> {
+    observer: O,
+    encoder: Option<Box<dyn StreamEncoder>>,
 }
 
 pub struct EventDecoder {
@@ -118,13 +123,64 @@ pub fn event_data(event: &[u8]) -> EventData {
 
 pub async fn relay<O: StreamObserver>(
     response: reqwest::Response,
-    mut reservation: Reservation,
+    reservation: Reservation,
     attempt: ProviderAttempt,
     model: String,
     provider: String,
     observer: O,
     event_max_bytes: usize,
 ) -> Result<Body, crate::ledger::LedgerError> {
+    relay_inner(
+        response,
+        reservation,
+        attempt,
+        model,
+        provider,
+        RelayProtocol {
+            observer,
+            encoder: None,
+        },
+        event_max_bytes,
+    )
+    .await
+}
+
+pub async fn relay_transcoded<O: StreamObserver, E: StreamEncoder>(
+    response: reqwest::Response,
+    reservation: Reservation,
+    attempt: ProviderAttempt,
+    model: String,
+    provider: String,
+    transcoder: (O, E),
+    event_max_bytes: usize,
+) -> Result<Body, crate::ledger::LedgerError> {
+    relay_inner(
+        response,
+        reservation,
+        attempt,
+        model,
+        provider,
+        RelayProtocol {
+            observer: transcoder.0,
+            encoder: Some(Box::new(transcoder.1)),
+        },
+        event_max_bytes,
+    )
+    .await
+}
+
+async fn relay_inner<O: StreamObserver>(
+    response: reqwest::Response,
+    mut reservation: Reservation,
+    attempt: ProviderAttempt,
+    model: String,
+    provider: String,
+    mut protocol: RelayProtocol<O>,
+    event_max_bytes: usize,
+) -> Result<Body, crate::ledger::LedgerError> {
+    // The stream owns provider capacity until its final frame is yielded or the
+    // client drops the body. Ledger completion can happen before that yield.
+    let scheduler_lease = reservation.take_scheduler_lease();
     let checkpoint_at = Utc::now();
     reservation
         .checkpoint(cancelled_completion(
@@ -136,9 +192,9 @@ pub async fn relay<O: StreamObserver>(
         .await?;
 
     let stream = async_stream::stream! {
+        let _scheduler_lease = scheduler_lease;
         let mut upstream = response.bytes_stream();
         let mut decoder = EventDecoder::new(event_max_bytes);
-        let mut observer = observer;
         let mut reservation = Some(reservation);
         let mut attempt = attempt;
         let mut first_provider_byte = false;
@@ -146,6 +202,19 @@ pub async fn relay<O: StreamObserver>(
         let mut held = Vec::<Bytes>::new();
         let mut held_bytes = 0usize;
         let mut holding_terminal = false;
+        let translated = protocol.encoder.is_some();
+        let response_max_bytes = if translated {
+            event_max_bytes.saturating_mul(8)
+        } else {
+            usize::MAX
+        };
+        let terminal_max_bytes = if translated {
+            response_max_bytes
+        } else {
+            event_max_bytes
+        };
+        let mut provider_bytes = 0usize;
+        let mut client_bytes = 0usize;
 
         while let Some(item) = upstream.next().await {
             let bytes = match item {
@@ -156,6 +225,12 @@ pub async fn relay<O: StreamObserver>(
                     return;
                 }
             };
+            provider_bytes = provider_bytes.saturating_add(bytes.len());
+            if provider_bytes > response_max_bytes {
+                finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
+                yield Err(io::Error::other(ProtocolError::ResponseTooLarge));
+                return;
+            }
             let mut batch_changed = false;
             if !first_provider_byte {
                 first_provider_byte = true;
@@ -173,7 +248,7 @@ pub async fn relay<O: StreamObserver>(
             let mut ready = Vec::new();
             let mut batch_terminal = None;
             for raw in events {
-                let observed = match observer.observe(&raw) {
+                let observed = match protocol.observer.observe(&raw) {
                     Ok(observed) => observed,
                     Err(error) => {
                         finish_failed(&mut reservation, &mut attempt, &model, &provider, "malformed_sse").await;
@@ -181,19 +256,39 @@ pub async fn relay<O: StreamObserver>(
                         return;
                     }
                 };
+                let rendered = if let Some(encoder) = protocol.encoder.as_mut() {
+                    match encoder.encode(&observed) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            finish_failed(&mut reservation, &mut attempt, &model, &provider, "malformed_sse").await;
+                            yield Err(io::Error::other(error));
+                            return;
+                        }
+                    }
+                } else {
+                    vec![raw]
+                };
                 let state = apply_events(&mut attempt, observed, Utc::now());
                 batch_changed |= state.changed;
                 holding_terminal |= state.hint || state.terminal.is_some();
-                if holding_terminal {
-                    held_bytes = held_bytes.saturating_add(raw.len());
-                    held.push(raw);
-                    if held_bytes > event_max_bytes {
-                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "terminal_buffer_overflow").await;
-                        yield Err(io::Error::other(ProtocolError::TerminalTooLarge));
+                for output in rendered {
+                    client_bytes = client_bytes.saturating_add(output.len());
+                    if client_bytes > response_max_bytes {
+                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
+                        yield Err(io::Error::other(ProtocolError::ResponseTooLarge));
                         return;
                     }
-                } else {
-                    ready.push(raw);
+                    if holding_terminal {
+                        held_bytes = held_bytes.saturating_add(output.len());
+                        held.push(output);
+                        if held_bytes > terminal_max_bytes {
+                            finish_failed(&mut reservation, &mut attempt, &model, &provider, "terminal_buffer_overflow").await;
+                            yield Err(io::Error::other(ProtocolError::TerminalTooLarge));
+                            return;
+                        }
+                    } else {
+                        ready.push(output);
+                    }
                 }
                 if let Some(outcome) = state.terminal {
                     batch_terminal = Some(outcome);
@@ -241,7 +336,7 @@ pub async fn relay<O: StreamObserver>(
             return;
         }
 
-        let final_events = match observer.finish() {
+        let final_events = match protocol.observer.finish() {
             Ok(events) => events,
             Err(error) => {
                 finish_failed(&mut reservation, &mut attempt, &model, &provider, "incomplete_stream").await;
@@ -277,10 +372,10 @@ fn mark_client_first_byte(reservation: &mut Option<Reservation>, first_client_by
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum TerminalOutcome {
     Completed,
-    Failed(&'static str),
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -303,14 +398,26 @@ fn apply_events(
                 state.changed = true;
             }
             CanonicalStreamEvent::Usage(usage) => {
-                attempt.observe_usage(usage, at);
+                attempt.observe_usage(usage.into(), at);
                 state.changed = true;
             }
             CanonicalStreamEvent::CompletionHint => state.hint = true,
-            CanonicalStreamEvent::Completed => state.terminal = Some(TerminalOutcome::Completed),
-            CanonicalStreamEvent::Failed(error_type) => {
-                state.terminal = Some(TerminalOutcome::Failed(error_type));
+            CanonicalStreamEvent::ResponseCompleted => {
+                state.terminal = Some(TerminalOutcome::Completed);
             }
+            CanonicalStreamEvent::Error(error) => {
+                state.terminal = Some(TerminalOutcome::Failed(error.error_type));
+            }
+            CanonicalStreamEvent::MessageStarted { .. }
+            | CanonicalStreamEvent::ContentBlockStarted { .. }
+            | CanonicalStreamEvent::TextDelta { .. }
+            | CanonicalStreamEvent::ReasoningDelta { .. }
+            | CanonicalStreamEvent::ToolCallStarted { .. }
+            | CanonicalStreamEvent::ToolArgumentsDelta { .. }
+            | CanonicalStreamEvent::ToolCallCompleted { .. }
+            | CanonicalStreamEvent::ContentBlockCompleted { .. }
+            | CanonicalStreamEvent::MessageCompleted
+            | CanonicalStreamEvent::OutputCompleted { .. } => {}
         }
     }
     state
@@ -345,7 +452,7 @@ async fn finish_terminal(
     let at = Utc::now();
     let (request_status, attempt_status, error_type) = match outcome {
         TerminalOutcome::Completed => ("completed", "completed", None),
-        TerminalOutcome::Failed(kind) => ("failed", "failed", Some(kind.to_owned())),
+        TerminalOutcome::Failed(kind) => ("failed", "failed", Some(kind)),
     };
     attempt.conclude(attempt_status, error_type, at);
     if let Some(held) = reservation.take() {
@@ -373,7 +480,7 @@ async fn finish_failed(
         attempt,
         model,
         provider,
-        TerminalOutcome::Failed(error_type),
+        TerminalOutcome::Failed(error_type.to_owned()),
     )
     .await
     {
@@ -454,7 +561,13 @@ fn logical_lines(bytes: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventDecoder, ProtocolError, event_data};
+    use chrono::Utc;
+
+    use super::{EventDecoder, ProtocolError, TerminalOutcome, apply_events, event_data};
+    use crate::{
+        canonical::{CanonicalContent, CanonicalError, CanonicalStreamEvent, ProviderOptions},
+        ledger::{ProviderAttempt, TokenUsage},
+    };
 
     #[test]
     fn frames_split_crlf_and_cr_only_without_rewriting_bytes() {
@@ -493,6 +606,50 @@ mod tests {
         assert!(matches!(
             decoder.feed(b"data: 123\n\n"),
             Err(ProtocolError::EventTooLarge)
+        ));
+    }
+
+    #[test]
+    fn rich_stream_lifecycle_has_one_terminal_state_machine() {
+        let mut attempt = ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            TokenUsage::default(),
+        );
+        let state = apply_events(
+            &mut attempt,
+            vec![
+                CanonicalStreamEvent::ContentBlockStarted {
+                    index: 0,
+                    content: CanonicalContent::Text {
+                        text: "sentinel".to_owned(),
+                        provider_options: ProviderOptions::new(),
+                    },
+                },
+                CanonicalStreamEvent::ContentBlockCompleted { index: 0 },
+                CanonicalStreamEvent::MessageCompleted,
+                CanonicalStreamEvent::OutputCompleted {
+                    index: 0,
+                    finish_reason: "stop".to_owned(),
+                },
+                CanonicalStreamEvent::ResponseCompleted,
+            ],
+            Utc::now(),
+        );
+        assert!(matches!(state.terminal, Some(TerminalOutcome::Completed)));
+
+        let failed = apply_events(
+            &mut attempt,
+            vec![CanonicalStreamEvent::Error(CanonicalError::provider(
+                "provider_stream_error",
+            ))],
+            Utc::now(),
+        );
+        assert!(matches!(
+            failed.terminal,
+            Some(TerminalOutcome::Failed(ref kind)) if kind == "provider_stream_error"
         ));
     }
 }

@@ -11,7 +11,17 @@ use crate::{db, state::AppState};
 /// whose liveness fails, so making this depend on the database would turn a
 /// database outage into a restart loop of a process that was working fine.
 pub async fn live() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "ok"})))
+    // The revision is here so a deployment can prove which build is serving,
+    // rather than take someone's word for it. It is a build identifier, not a
+    // secret, and this endpoint is already reachable without a client key.
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "revision": env!("BUILD_REVISION"),
+        })),
+    )
 }
 
 /// `GET /ready` -- readiness. The process can serve traffic right now.
@@ -19,6 +29,12 @@ pub async fn live() -> impl IntoResponse {
 /// This is the endpoint a load balancer polls to decide whether to send
 /// requests here, so it does check the dependencies a request needs.
 pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.lifecycle.is_draining() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready", "process": "draining"})),
+        );
+    }
     match db::is_reachable(&state.pool).await {
         Ok(()) => (
             StatusCode::OK,

@@ -61,6 +61,23 @@ Provider（Anthropic / OpenAI / Gemini / xAI / Local vLLM・Ollama）
 Provider SSE → Provider Adapter → Canonical Stream Event → Protocol Adapter → Client SSE
 ```
 
+Same-dialect forwarding keeps a short-lived native wire sidecar so request,
+response, and SSE bytes are not re-encoded. The canonical view is still built
+once at ingress and enriched with identity, policy, quota, and trace context.
+Protocol adapters and provider adapters depend only on canonical types, never
+on each other. Each provider adapter selects its native operation, path,
+authentication mode, and header allowlist from a vendor-neutral operation;
+both client routes then use one common HTTP transport. The core dispatcher
+chooses native or canonical payloads. Each provider profile declares a target
+dialect, so provider selection is not inferred from the client endpoint. The
+canonical contract includes neutral tool choice, reasoning, and
+structured-output fields; malformed, conflicting, or vendor-only shapes stay
+source-scoped and cannot be silently translated.
+
+Content-bearing canonical values are in-memory request data. They are not
+serializable, their debug output is redacted, and they never enter the ledger,
+logs, traces, or spool by default.
+
 旁路（不擋主路徑）：
 
 ```text
@@ -153,7 +170,7 @@ Global 預設 → User → Device → Client → Agent → Credential → Reques
 | OTel 後端掛掉 | 推論不受影響，遙測降級 |
 | 儀表板／分析查詢掛掉 | 推論不受影響 |
 | PostgreSQL 掛掉 | **已存在的串流不得被 kill**；新請求靠有上限的憑證／政策快取，快取未命中則 fail closed；用量寫進有上限的持久化 spool，恢復後補寫 |
-| Provider 掛掉 | 依政策 retry／fallback，遙測分開記 |
+| Provider 掛掉 | 本次不重送；被動健康訊號讓下一請求預先換路，理由持久化 |
 | 佇列滿 | 明確拒絕，不無上限堆積 |
 | 收到 SIGTERM | 停收新請求、既有串流繼續、`drain_timeout` 到才強制關閉並留下記錄（W19） |
 
@@ -165,7 +182,8 @@ Global 預設 → User → Device → Client → Agent → Credential → Reques
 
 原因不是懶，是正確性：併發上限與配額計數器在第一版放在行程記憶體裡（規格 §82 明確不做
 Redis Cluster），兩個實例就等於所有上限**實際上是兩倍**，而且沒有任何錯誤訊息會告訴你。
-要跑多實例就必須先把計數器移進 PostgreSQL（多一次往返，要量），那是 W19 的決定，不是預設。
+W12/W19 已定案維持單實例。要跑多實例就必須先把計數器改成跨實例 durable counters，量測新增的
+資料庫成本，再移除啟動時的 advisory lock；這不是目前部署模式。
 
 多實例就緒之後：無狀態閘道實例掛在私有負載平衡器後面。PostgreSQL 與可觀測性後端放私有網段，
 Docker port 預設綁 `127.0.0.1`。正式環境變更走版本化設定，Provider 憑證變更需二人核可，

@@ -1,14 +1,25 @@
-use reqwest::Client;
+use reqwest::{Client, redirect::Policy};
 use sha2::{Digest, Sha256};
-use sqlx::{Pool, Postgres};
-use std::time::Duration;
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use std::{sync::Arc, time::Duration};
 
 use crate::{
+    admin::{AdminService, AdminServiceConfig},
     config::Config,
     identity::CredentialService,
     ledger::{Ledger, LedgerError},
+    lifecycle::ProcessLifecycle,
     metrics::Instruments,
+    model_registry::{
+        GatewayOperation, ModelRegistry, ProviderDialect, ProviderKind, ProviderProfile,
+        ProviderProfiles, RegistryError,
+    },
+    policy::PolicyEngine,
+    quota::QuotaEngine,
+    routing::RoutingEngine,
+    scheduler::Scheduler,
 };
+use thiserror::Error;
 
 /// Shared, read-only state every handler gets through `State`.
 pub struct AppState {
@@ -22,12 +33,19 @@ pub struct AppState {
     /// Lazy: built without touching the network, so handler code can assume a
     /// pool exists and readiness decides whether it currently works.
     pub(crate) pool: Pool<Postgres>,
+    pub(crate) models: ModelRegistry,
+    pub(crate) policies: PolicyEngine,
+    pub(crate) quotas: QuotaEngine,
+    pub(crate) routing: RoutingEngine,
+    pub(crate) scheduler: Scheduler,
     pub(crate) credentials: CredentialService,
+    pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
+    pub(crate) lifecycle: ProcessLifecycle,
 }
 
 impl AppState {
-    pub fn new(config: Config, pool: Pool<Postgres>) -> Result<Self, LedgerError> {
+    pub fn new(config: Config, pool: Pool<Postgres>) -> Result<Self, StateError> {
         let bootstrap_key_hash = (config.credential_environment == "dev")
             .then(|| {
                 config
@@ -45,20 +63,147 @@ impl AppState {
             config.credential_cache_capacity,
             Duration::from_secs(config.credential_cache_ttl_seconds),
         );
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(config.admin_database_max_connections)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
+        let mut provider_profiles = vec![
+            ProviderProfile::bearer(
+                "env://OPENAI_API_KEY",
+                config.openai_provider.clone(),
+                config.openai_base_url.clone(),
+                ProviderDialect::OpenAi,
+                vec![
+                    GatewayOperation::OpenAiResponses,
+                    GatewayOperation::OpenAiChatCompletions,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+                Arc::<str>::from(config.openai_api_key.clone()),
+            ),
+            ProviderProfile::api_key(
+                "env://ANTHROPIC_API_KEY",
+                config.anthropic_provider.clone(),
+                config.anthropic_base_url.clone(),
+                ProviderDialect::Anthropic,
+                vec![
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicCountTokens,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+                Arc::<str>::from(config.anthropic_api_key.clone()),
+            ),
+        ];
+        let extra_profiles = config
+            .extra_provider_profiles
+            .iter()
+            .map(|extra| {
+                let args = (
+                    extra.credential_ref.clone(),
+                    extra.provider_key.clone(),
+                    extra.base_url.clone(),
+                    extra.operations.clone(),
+                    config.provider_allowed_tenant_ids.clone(),
+                );
+                Ok(match (extra.kind, extra.secret.as_ref()) {
+                    (ProviderKind::Gemini, Some(secret)) => ProviderProfile::api_key_for(
+                        extra.kind,
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                        Arc::<str>::from(secret.clone()),
+                    ),
+                    (
+                        ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama,
+                        Some(secret),
+                    ) => ProviderProfile::bearer_for(
+                        extra.kind,
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                        Arc::<str>::from(secret.clone()),
+                    ),
+                    (ProviderKind::Vllm | ProviderKind::Ollama, None) => {
+                        ProviderProfile::unauthenticated_for(
+                            extra.kind, args.0, args.1, args.2, args.3, args.4,
+                        )
+                    }
+                    _ => return Err(RegistryError::InvalidProviderProfile),
+                })
+            })
+            .collect::<Result<Vec<_>, RegistryError>>()?;
+        provider_profiles.extend(extra_profiles);
+        let routing = RoutingEngine::new(
+            config.routing,
+            provider_profiles
+                .iter()
+                .map(|profile| profile.provider_key.clone()),
+        );
+        let profiles = ProviderProfiles::new(provider_profiles)?;
+        let policies = PolicyEngine::with_cache(
+            pool.clone(),
+            config.policy_cache_capacity,
+            Duration::from_secs(config.policy_cache_ttl_seconds),
+        );
+        let quotas = QuotaEngine::new(pool.clone());
+        let scheduler = Scheduler::new(config.scheduler.clone())?;
+        let admin = AdminService::new(
+            admin_pool,
+            credentials.clone(),
+            AdminServiceConfig {
+                hash_key: config.credential_hash_key.clone(),
+                hash_key_id: config.credential_hash_key_id.clone(),
+                retiring_hash_keys: config.credential_retiring_hash_keys.clone(),
+                bootstrap_token: config.admin_bootstrap_token.clone(),
+                bootstrap_tenant_id: config.admin_bootstrap_tenant_id,
+                session_ttl: Duration::from_secs(config.admin_session_ttl_seconds),
+            },
+        )
+        .with_provider_profiles(profiles.clone())
+        .with_policy_engine(policies.clone())
+        .with_scheduler(scheduler.clone());
         let ledger = Ledger::open(
             pool.clone(),
             config.ledger_spool_dir.clone(),
             config.ledger_spool_max_bytes,
             config.ledger_spool_entry_max_bytes,
         )?;
+        let models = ModelRegistry::new(pool.clone(), profiles, config.allowed_models.clone());
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(config.provider_connect_timeout)
+            .read_timeout(config.provider_idle_timeout)
+            .build()?;
         Ok(Self {
             config,
-            client: Client::new(),
+            client,
             bootstrap_key_hash,
             instruments: Instruments::new(),
             pool,
+            models,
+            policies,
+            quotas,
+            routing,
+            scheduler,
             credentials,
+            admin,
             ledger,
+            lifecycle: ProcessLifecycle::default(),
         })
     }
+}
+
+#[derive(Debug, Error)]
+pub enum StateError {
+    #[error("could not initialize the usage ledger")]
+    Ledger(#[from] LedgerError),
+    #[error("could not initialize the provider client")]
+    Http(#[from] reqwest::Error),
+    #[error("could not initialize the model registry")]
+    Registry(#[from] crate::model_registry::RegistryError),
+    #[error("could not initialize the scheduler")]
+    Scheduler(#[from] crate::scheduler::SchedulerError),
 }
