@@ -1,0 +1,90 @@
+{
+  "version": "1.0.0",
+  "repository": "agent-pool-gateway",
+  "baseline": "e2bc8eb3c7f2c1f0091770b7c63f748bf5279718",
+  "default_branch": "main",
+  "legacy_branches": [
+    "dev",
+    "develop",
+    "main"
+  ],
+  "deployment_branches": [],
+  "deployment_tags": false,
+  "checks": [
+    {
+      "pattern": "^\\.repo-policy/",
+      "pre_commit": [
+        "python3",
+        ".repo-policy/test_policy.py"
+      ],
+      "pre_push": [
+        "python3",
+        ".repo-policy/test_policy.py"
+      ],
+      "timeout": 60
+    },
+    {
+      "pattern": "^(?!\\.repo-policy/).*\\.rs$|(^|/)Cargo\\.(toml|lock)$|^rustfmt\\.toml$",
+      "requires": "Cargo.toml",
+      "pre_commit": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "pre_push": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ]
+    },
+    {
+      "pattern": "^(?!\\.repo-policy/).*\\.rs$|(^|/)Cargo\\.(toml|lock)$|^rustfmt\\.toml$",
+      "requires": "Cargo.toml",
+      "pre_push": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "Cargo.toml",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ]
+    },
+    {
+      "pattern": "^(?!\\.repo-policy/).*\\.rs$|(^|/)Cargo\\.(toml|lock)$|^rustfmt\\.toml$",
+      "requires": "Cargo.toml",
+      "pre_push": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--workspace"
+      ]
+    },
+    {
+      "pattern": "^(?!\\.repo-policy/).*\\.rs$|(^|/)Cargo\\.(toml|lock)$|^rustfmt\\.toml$",
+      "requires": "scripts/check.sh",
+      "pre_push": [
+        "bash",
+        "scripts/check.sh",
+        "all"
+      ],
+      "optional_on_legacy_branch": true
+    }
+  ],
+  "legacy_tips": [
+    "bbd49aaefa5f564a6ececb23a7282c9752172b34",
+    "e2bc8eb3c7f2c1f0091770b7c63f748bf5279718",
+    "e2bc8eb3c7f2c1f0091770b7c63f748bf5279718"
+  ]
+}
