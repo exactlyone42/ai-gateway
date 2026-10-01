@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.2",
   "repository": "agent-pool-gateway",
   "baseline": "e2bc8eb3c7f2c1f0091770b7c63f748bf5279718",
   "default_branch": "main",
