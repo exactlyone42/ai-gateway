@@ -153,6 +153,7 @@ mod tests {
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
+            anthropic_auth_token: None,
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),
