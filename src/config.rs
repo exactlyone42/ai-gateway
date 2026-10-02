@@ -46,6 +46,7 @@ pub struct Config {
     /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
     pub anthropic_base_url: String,
     pub anthropic_api_key: String,
+    pub anthropic_auth_token: Option<String>,
     pub anthropic_provider: String,
     pub anthropic_request_max_bytes: usize,
     pub extra_provider_profiles: Vec<ExtraProviderProfile>,
@@ -204,7 +205,12 @@ impl Config {
             .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
-        let anthropic_api_key = required("ANTHROPIC_API_KEY")?;
+        let anthropic_auth_token = setting("ANTHROPIC_AUTH_TOKEN").ok();
+        let anthropic_api_key = if anthropic_auth_token.is_some() {
+            setting("ANTHROPIC_API_KEY").unwrap_or_default()
+        } else {
+            required("ANTHROPIC_API_KEY")?
+        };
         let anthropic_provider = provider_name("ANTHROPIC_PROVIDER", "anthropic")?;
         let anthropic_request_max_bytes = setting("ANTHROPIC_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
@@ -383,11 +389,13 @@ impl Config {
             &String::from_utf8_lossy(&credential_hash_key),
         )?;
         reject_placeholder_secret(&credential_environment, "OPENAI_API_KEY", &openai_api_key)?;
-        reject_placeholder_secret(
-            &credential_environment,
-            "ANTHROPIC_API_KEY",
-            &anthropic_api_key,
-        )?;
+        if anthropic_auth_token.is_none() {
+            reject_placeholder_secret(
+                &credential_environment,
+                "ANTHROPIC_API_KEY",
+                &anthropic_api_key,
+            )?;
+        }
         let provider_allowed_tenant_ids = provider_allowed_tenants(
             setting("PROVIDER_ALLOWED_TENANT_IDS").unwrap_or_default(),
             admin_bootstrap_tenant_id,
@@ -459,6 +467,7 @@ impl Config {
             openai_request_max_bytes,
             anthropic_base_url,
             anthropic_api_key,
+            anthropic_auth_token,
             anthropic_provider,
             anthropic_request_max_bytes,
             extra_provider_profiles,

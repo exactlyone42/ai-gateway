@@ -80,18 +80,33 @@ impl AppState {
                 config.provider_allowed_tenant_ids.clone(),
                 Arc::<str>::from(config.openai_api_key.clone()),
             ),
-            ProviderProfile::api_key(
-                "env://ANTHROPIC_API_KEY",
-                config.anthropic_provider.clone(),
-                config.anthropic_base_url.clone(),
-                ProviderDialect::Anthropic,
-                vec![
-                    GatewayOperation::AnthropicMessages,
-                    GatewayOperation::AnthropicCountTokens,
-                ],
-                config.provider_allowed_tenant_ids.clone(),
-                Arc::<str>::from(config.anthropic_api_key.clone()),
-            ),
+            if let Some(ref token) = config.anthropic_auth_token {
+                ProviderProfile::bearer(
+                    "env://ANTHROPIC_AUTH_TOKEN",
+                    config.anthropic_provider.clone(),
+                    config.anthropic_base_url.clone(),
+                    ProviderDialect::Anthropic,
+                    vec![
+                        GatewayOperation::AnthropicMessages,
+                        GatewayOperation::AnthropicCountTokens,
+                    ],
+                    config.provider_allowed_tenant_ids.clone(),
+                    Arc::<str>::from(token.clone()),
+                )
+            } else {
+                ProviderProfile::api_key(
+                    "env://ANTHROPIC_API_KEY",
+                    config.anthropic_provider.clone(),
+                    config.anthropic_base_url.clone(),
+                    ProviderDialect::Anthropic,
+                    vec![
+                        GatewayOperation::AnthropicMessages,
+                        GatewayOperation::AnthropicCountTokens,
+                    ],
+                    config.provider_allowed_tenant_ids.clone(),
+                    Arc::<str>::from(config.anthropic_api_key.clone()),
+                )
+            },
         ];
         let extra_profiles = config
             .extra_provider_profiles
