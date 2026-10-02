@@ -271,12 +271,18 @@ fn apply_authentication(
     profile: &ProviderProfile,
 ) -> Result<(), GatewayError> {
     let (name, value) = match mode {
-        AuthenticationMode::ApiKey => (
-            HeaderName::from_static("x-api-key"),
-            profile
-                .api_key_secret()
-                .ok_or(GatewayError::InvalidConfiguration)?,
-        ),
+        AuthenticationMode::ApiKey => {
+            if let Some(secret) = profile.api_key_secret() {
+                (HeaderName::from_static("x-api-key"), secret)
+            } else if let Some(secret) = profile.bearer_secret() {
+                let value = HeaderValue::from_str(&format!("Bearer {secret}"))
+                    .map_err(|_| GatewayError::InvalidConfiguration)?;
+                headers.insert(header::AUTHORIZATION, value);
+                return Ok(());
+            } else {
+                return Err(GatewayError::InvalidConfiguration);
+            }
+        }
         AuthenticationMode::GoogleApiKey => (
             HeaderName::from_static("x-goog-api-key"),
             profile
