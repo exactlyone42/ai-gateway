@@ -5,7 +5,7 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{config::Config, db, logging, metrics, routes, state::AppState};
+use crate::{config::Config, db, logging, metrics, model_sync, routes, state::AppState};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
@@ -32,6 +32,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("database schema is up to date");
 
     let state = Arc::new(AppState::new(config, pool)?);
+    if let Err(error) = model_sync::refresh(&state.pool, &state.client).await {
+        tracing::warn!(event.name = "model_catalog.refresh_failed", exception.message = %error, "startup model catalog refresh failed");
+    }
+    let model_sync = model_sync::spawn(state.pool.clone(), state.client.clone());
     state.quotas.acquire_single_instance_guard().await?;
     let recovered = state.ledger.flush_startup().await?;
     if recovered > 0 {
@@ -45,6 +49,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     listener.set_nonblocking(true)?;
     info!(%address, "agent pool gateway started");
     serve_with_shutdown(listener, Arc::clone(&state), shutdown_signal()).await?;
+    model_sync.abort();
 
     report_flush_bounded("spans", state.config.shutdown_finalize_timeout, move || {
         traces.map_or(Ok(()), |provider| provider.shutdown())

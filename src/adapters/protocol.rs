@@ -286,6 +286,7 @@ fn take_reasoning(
         GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => {
             let enabled = match source.get("type").and_then(Value::as_str) {
                 Some("enabled") => Some(true),
+                Some("adaptive") => Some(true),
                 Some("disabled") => Some(false),
                 _ => return None,
             };
@@ -1172,6 +1173,19 @@ mod tests {
         .unwrap();
         assert_eq!(request.max_output_tokens, Some(0));
         assert!(!request.stream);
+    }
+
+    #[test]
+    fn anthropic_adaptive_thinking_is_preserved_for_translation() {
+        let request = decode(
+            GatewayOperation::AnthropicMessages,
+            Bytes::from_static(
+                br#"{"model":"public","messages":[],"thinking":{"type":"adaptive"}}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(request.reasoning.unwrap().enabled, Some(true));
     }
 
     fn assert_vendor_extension(request: &DecodedProtocolRequest) {

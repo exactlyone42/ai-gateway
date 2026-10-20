@@ -96,6 +96,12 @@ pub async fn admit(
         .await?;
         return Err(GatewayError::ModelForbidden);
     }
+    let use_jev = state.jev.is_some()
+        && prepared.selector.quality().is_some()
+        && operation != GatewayOperation::AnthropicCountTokens;
+    if use_jev && let Some(router) = &state.jev {
+        router.select(&state.client, body, &mut candidates).await?;
+    }
     let mut ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
@@ -121,7 +127,11 @@ pub async fn admit(
             .ok_or(GatewayError::ModelForbidden)?;
         selection.record_selected();
         let translation = validate_for_provider(request, &selection)?;
-        let routing_reason = ranked.reason_for(&selection, state.routing.quota_aware());
+        let routing_reason = if use_jev {
+            "jev"
+        } else {
+            ranked.reason_for(&selection, state.routing.quota_aware())
+        };
         let routing_claim = ranked.take_claim_for(&selection);
         return Ok(PreparedQuota {
             routing_reason,
@@ -162,8 +172,11 @@ pub async fn admit(
         QuotaOutcome::Allowed(admission) => {
             admission.selection.record_selected();
             let translation = validate_for_provider(request, &admission.selection)?;
-            let routing_reason =
-                ranked.reason_for(&admission.selection, state.routing.quota_aware());
+            let routing_reason = if use_jev {
+                "jev"
+            } else {
+                ranked.reason_for(&admission.selection, state.routing.quota_aware())
+            };
             let routing_claim = ranked.take_claim_for(&admission.selection);
             Ok(PreparedQuota {
                 routing_reason,

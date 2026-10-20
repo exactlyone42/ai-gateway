@@ -94,11 +94,14 @@ pub struct Config {
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
     pub routing: RoutingConfig,
+    pub jev: Option<crate::jev::JevConfig>,
     pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("invalid Jev configuration")]
+    InvalidJev,
     #[error("missing required environment variable {0}")]
     Missing(&'static str),
     #[error("invalid LISTEN_ADDRESS: {0}")]
@@ -500,6 +503,7 @@ impl Config {
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
+            jev: load_jev()?,
             routing,
             scheduler,
         })
@@ -928,6 +932,33 @@ fn scheduler_bool(name: &'static str, default: bool) -> Result<bool, ConfigError
         .unwrap_or_else(|_| default.to_string())
         .parse::<bool>()
         .map_err(|error| ConfigError::InvalidScheduler(format!("{name}: {error}")))
+}
+
+fn load_jev() -> Result<Option<crate::jev::JevConfig>, ConfigError> {
+    match setting("JEV_ENABLED").as_deref() {
+        Err(_) | Ok("false") => return Ok(None),
+        Ok("true") => {}
+        _ => return Err(ConfigError::InvalidJev),
+    }
+    let api_key =
+        setting("TYPESAFE_API_KEY").map_err(|_| ConfigError::Missing("TYPESAFE_API_KEY"))?;
+    let model = setting("JEV_MODEL").map_err(|_| ConfigError::Missing("JEV_MODEL"))?;
+    if api_key.trim().is_empty()
+        || model.trim().is_empty()
+        || model.ends_with("latest")
+        || model.ends_with("preview")
+    {
+        return Err(ConfigError::InvalidJev);
+    }
+    let descriptions = serde_json::from_str(
+        &setting("JEV_MODEL_DESCRIPTIONS_JSON").unwrap_or_else(|_| "{}".into()),
+    )
+    .map_err(|_| ConfigError::InvalidJev)?;
+    Ok(Some(crate::jev::JevConfig {
+        api_key,
+        model,
+        descriptions,
+    }))
 }
 
 #[cfg(test)]
