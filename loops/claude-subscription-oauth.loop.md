@@ -3,7 +3,7 @@
 | 欄位 | 值 |
 | --- | --- |
 | 開始 | 2026-10-20T21:20+08:00 |
-| 結束 | — |
+| 結束 | 2026-10-20T21:36+08:00 |
 
 ## 目的
 讓本人的 Claude Code 訂閱登入經 Gateway 與 Jev 後，仍由 Anthropic Claude 回覆。
@@ -24,10 +24,10 @@ Gateway 目前會移除 Client 的 Authorization，並改用伺服器 Provider �
 | --- | --- | --- |
 | S01 | OAuth 驗證、個人身分對應、只向 Anthropic 轉送 | 完成 |
 | S02 | 本機部署與真實 Claude Code 往返 | 完成 |
-| S03 | 全套檢查、提交、推送、合併 `dev` | 待開始 |
+| S03 | 全套檢查、提交、推送、合併 `dev` | 完成 |
 
 ## 目前狀態
-本機服務已接通；進行 S03 全套檢查與合併。
+功能已合進 `dev`；本機服務使用同版程式與設定。
 
 ## 已做
 OAuth 驗證、個人 Principal 對應、Client bearer 限定轉送 Anthropic，以及 14 個 Claude 模型登記。
@@ -46,4 +46,4 @@ OAuth refresh token 會輪替；驗收只能共用原登入，不可複製成兩
 Anthropic `/v1/models` 與 `/v1/messages` 真實回應（2026-10-20）。
 
 ## 下一步
-跑完整關卡，提交、推送並合進 `dev`。
+維持本機服務運行，使用者可直接由 Claude Code 驗收。
