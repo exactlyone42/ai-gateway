@@ -912,6 +912,7 @@ mod tests {
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
             routing: Default::default(),
+            jev: None,
             scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
@@ -1227,6 +1228,7 @@ mod tests {
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
             routing: Default::default(),
+            jev: None,
             scheduler: Default::default(),
         };
         let state = Arc::new(AppState::new(config, bounded_pool).unwrap());
@@ -1323,6 +1325,7 @@ mod tests {
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
             routing: Default::default(),
+            jev: None,
             scheduler: Default::default(),
         };
         let pool = crate::db::pool(&config.database_url, config.database_max_connections).unwrap();

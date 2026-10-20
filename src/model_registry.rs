@@ -999,33 +999,53 @@ const SELECTION_SQL: &str = r#"
 "#;
 
 const QUALITY_CANDIDATES_SQL: &str = r#"
+    WITH candidates AS (
     SELECT a.id AS alias_id, a.version AS alias_version, a.quality_tier,
            m.id AS model_id, m.version AS model_version,
            m.public_model_id, m.provider_model_id, m.provider_id,
            m.supports_streaming, m.supports_tools, m.supports_reasoning,
            m.supports_images, m.supports_structured_output,
-           m.max_output_tokens, m.cost_metadata,
+           m.max_output_tokens, m.cost_metadata
+    FROM model_aliases a
+    JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
+    WHERE a.tenant_id = $1 AND a.operation = $2
+      AND a.lifecycle_state = 'active' AND m.lifecycle_state = 'active'
+    UNION ALL
+    SELECT NULL::uuid, NULL::bigint, m.quality_tier,
+           m.id, m.version, m.public_model_id, m.provider_model_id, m.provider_id,
+           m.supports_streaming, m.supports_tools, m.supports_reasoning,
+           m.supports_images, m.supports_structured_output,
+           m.max_output_tokens, m.cost_metadata
+    FROM models m
+    WHERE m.tenant_id = $1 AND m.lifecycle_state = 'active'
+      AND m.quality_tier IS NOT NULL
+      AND $2 = ANY(m.supported_operations)
+      AND NOT EXISTS (
+          SELECT 1 FROM model_aliases a
+          WHERE (a.tenant_id, a.model_id) = (m.tenant_id, m.id)
+            AND a.operation = $2 AND a.lifecycle_state = 'active'
+      )
+    )
+    SELECT c.*,
            p.version AS provider_version, p.provider_key,
            p.base_url, p.credential_ref, p.provider_type,
            m.supported_operations AS model_supported_operations,
            p.supported_operations AS provider_supported_operations
-    FROM model_aliases a
-    JOIN models m ON (m.tenant_id, m.id) = (a.tenant_id, a.model_id)
-    JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
-    WHERE a.tenant_id = $1 AND a.operation = $2
-      AND a.lifecycle_state = 'active' AND m.lifecycle_state = 'active'
-      AND p.lifecycle_state = 'active'
-      AND CASE a.quality_tier
+    FROM candidates c
+    JOIN models m ON (m.tenant_id, m.id) = ($1, c.model_id)
+    JOIN providers p ON (p.tenant_id, p.id) = ($1, c.provider_id)
+    WHERE p.lifecycle_state = 'active'
+      AND CASE c.quality_tier
             WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
             WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
           END <= CASE $3
             WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
             WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
           END
-    ORDER BY CASE a.quality_tier
+    ORDER BY CASE c.quality_tier
             WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
             WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
-          END DESC, m.public_model_id, m.id
+          END DESC, c.public_model_id, c.model_id
 "#;
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ mod config;
 mod db;
 mod error;
 pub mod identity;
+mod jev;
 pub mod ledger;
 pub mod lifecycle;
 #[cfg(test)]
@@ -14,6 +15,7 @@ mod logging;
 mod metrics;
 mod middleware;
 mod model_registry;
+mod model_sync;
 mod policy;
 mod quota;
 mod routes;

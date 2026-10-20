@@ -126,3 +126,5 @@ for which problem, so you do not have to load everything.
 ## License
 
 Proprietary. All rights reserved.
+
+本機個人試用與 Jev 設定：[使用說明](docs/jev-local.md)。

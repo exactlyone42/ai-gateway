@@ -48,3 +48,5 @@ W00–W19 共 20 份 loop 已全數交付。目前進行中的是 W20 `productio
 `production-readiness.progress.md`。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
+
+- [jev-local](jev-local.loop.md)：本機 Jev 接入。

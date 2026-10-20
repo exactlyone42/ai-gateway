@@ -37,6 +37,7 @@ pub struct AppState {
     pub(crate) policies: PolicyEngine,
     pub(crate) quotas: QuotaEngine,
     pub(crate) routing: RoutingEngine,
+    pub(crate) jev: Option<crate::jev::JevRouter>,
     pub(crate) scheduler: Scheduler,
     pub(crate) credentials: CredentialService,
     pub(crate) admin: AdminService,
@@ -193,6 +194,7 @@ impl AppState {
             .read_timeout(config.provider_idle_timeout)
             .build()?;
         Ok(Self {
+            jev: config.jev.clone().map(crate::jev::JevRouter::new),
             config,
             client,
             bootstrap_key_hash,
