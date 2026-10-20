@@ -4,7 +4,10 @@ pub mod provider;
 pub mod response;
 pub mod stream;
 
-use axum::http::{HeaderMap, HeaderValue};
+use axum::{
+    body::Bytes,
+    http::{HeaderMap, HeaderValue},
+};
 
 use serde_json::Value;
 
@@ -341,7 +344,7 @@ pub fn prepare_for_provider(
         request.stream,
         &input,
     )?;
-    let body = if native.operation == plan.operation {
+    let mut body = if native.operation == plan.operation {
         adapter.encode_native(
             provider::NativePayload::new(&native.body, &native.document),
             provider_model_id,
@@ -349,11 +352,55 @@ pub fn prepare_for_provider(
     } else {
         adapter.encode_canonical(request, plan.operation, provider_model_id)?
     };
+    if profile.provider_key.starts_with("ollama")
+        && plan.operation == GatewayOperation::AnthropicMessages
+    {
+        body = ensure_ollama_user_text(body)?;
+    }
     if request.stream {
         adapter.stream(plan, body, profile, input)
     } else {
         adapter.send(plan, body, profile, input)
     }
+}
+
+fn ensure_ollama_user_text(body: Bytes) -> Result<Bytes, GatewayError> {
+    let mut document: Value =
+        serde_json::from_slice(&body).map_err(|_| GatewayError::UpstreamProtocol)?;
+    let Some(messages) = document.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(body);
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(content) = message.get_mut("content") else {
+            continue;
+        };
+        match content {
+            Value::String(text) if text.trim().is_empty() => {
+                *text = "Continue from this user turn.".to_owned();
+            }
+            Value::Array(blocks)
+                if !blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("text")
+                        && block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                }) =>
+            {
+                blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": "Continue from this user turn."
+                }));
+            }
+            _ => {}
+        }
+    }
+    serde_json::to_vec(&document)
+        .map(Bytes::from)
+        .map_err(|_| GatewayError::UpstreamProtocol)
 }
 
 #[cfg(test)]
@@ -755,6 +802,33 @@ mod tests {
             GatewayOperation::OpenAiChatCompletions => "/v1/chat/completions?native=true",
             GatewayOperation::GeminiGenerateContent => "/target-only",
         }
+    }
+
+    #[test]
+    fn ollama_anthropic_user_turns_always_include_text() {
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [
+                    {"role":"user","content":[{"type":"image","source":{"type":"base64","data":"a"}}]},
+                    {"role":"assistant","content":"done"},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":"ok"}]},
+                    {"role":"user","content":[{"type":"text","text":"keep me"}]}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let normalized: Value =
+            serde_json::from_slice(&super::ensure_ollama_user_text(body).unwrap()).unwrap();
+        assert_eq!(normalized["messages"][0]["content"][1]["type"], "text");
+        assert_eq!(normalized["messages"][2]["content"][1]["type"], "text");
+        assert_eq!(
+            normalized["messages"][3]["content"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     fn profile(dialect: ProviderDialect) -> ProviderProfile {
