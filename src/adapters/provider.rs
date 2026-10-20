@@ -1210,7 +1210,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{NativePayload, UsageAvailability, for_dialect, for_kind};
+    use super::{
+        AuthenticationMode, NativePayload, UsageAvailability, apply_authentication, for_dialect,
+        for_kind,
+    };
     use crate::{
         adapters::{ProviderRequestInput, protocol},
         canonical::{CanonicalUsage, PrincipalRef, RequestEnrichment},
@@ -1226,6 +1229,17 @@ mod tests {
             .encode_native(NativePayload::new(body, &document), "public")
             .unwrap();
         assert_eq!(encoded, Bytes::from_static(body));
+    }
+
+    #[test]
+    fn api_key_adapter_uses_bearer_when_profile_has_only_bearer_secret() {
+        let profile = profile(ProviderKind::Anthropic, true);
+        let mut headers = HeaderMap::new();
+
+        apply_authentication(&mut headers, AuthenticationMode::ApiKey, &profile).unwrap();
+
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer secret");
+        assert!(headers.get("x-api-key").is_none());
     }
 
     #[test]
