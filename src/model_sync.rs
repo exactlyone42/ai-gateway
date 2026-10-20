@@ -45,7 +45,7 @@ struct DiscoveredModel {
 
 pub async fn refresh(pool: &PgPool, client: &Client) -> Result<usize, sqlx::Error> {
     let providers = sqlx::query_as::<_, ProviderRow>(
-        "SELECT id, tenant_id, provider_key, base_url, supported_operations FROM providers WHERE lifecycle_state = 'active' AND provider_key LIKE 'ollama%'",
+        "SELECT id, tenant_id, provider_key, base_url, supported_operations FROM providers WHERE lifecycle_state = 'active' AND provider_type = 'local' AND provider_key LIKE 'ollama%'",
     )
     .fetch_all(pool)
     .await?;
