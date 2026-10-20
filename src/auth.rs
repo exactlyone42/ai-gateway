@@ -1,4 +1,5 @@
 use axum::http::{HeaderMap, header};
+use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -30,6 +31,22 @@ pub async fn authorize(
         (Some(value), _) | (_, Some(value)) => value,
         (None, None) => return Err(GatewayError::Unauthorized),
     };
+    if state.config.anthropic_client_oauth && token.starts_with("sk-ant-oat") {
+        validate_anthropic_oauth(state, token).await?;
+        return state
+            .credentials
+            .resolve_by_id(
+                state
+                    .config
+                    .anthropic_oauth_credential_id
+                    .ok_or(GatewayError::InvalidConfiguration)?,
+            )
+            .await
+            .map_err(|error| match error {
+                IdentityError::InvalidCredential => GatewayError::Unauthorized,
+                other => GatewayError::AuthenticationUnavailable(other),
+            });
+    }
     let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     if state
         .bootstrap_key_hash
@@ -46,6 +63,25 @@ pub async fn authorize(
             IdentityError::InvalidCredential => GatewayError::Unauthorized,
             other => GatewayError::AuthenticationUnavailable(other),
         })
+}
+
+async fn validate_anthropic_oauth(state: &AppState, token: &str) -> Result<(), GatewayError> {
+    let response = state
+        .client
+        .get(format!(
+            "{}/v1/models?limit=1",
+            state.config.anthropic_base_url
+        ))
+        .bearer_auth(token)
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await?;
+    match response.status() {
+        StatusCode::OK => Ok(()),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(GatewayError::Unauthorized),
+        _ => Err(GatewayError::ProviderUnavailable),
+    }
 }
 
 fn secret_equal(left: &str, right: &str) -> bool {

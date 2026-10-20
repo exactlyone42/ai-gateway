@@ -31,7 +31,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 | verification_date | 2026-09-11 |
 | custom_endpoint | `ANTHROPIC_BASE_URL`，可由 shell、`settings.json` 的 `env` 或 managed settings 設定 |
 | protocol | Anthropic Messages：`POST /v1/messages`；`POST /v1/messages/count_tokens` 可選 |
-| authentication | `ANTHROPIC_AUTH_TOKEN` 產生 bearer；`ANTHROPIC_API_KEY` 產生 `x-api-key` |
+| authentication | 一般模式用 Gateway credential；單一擁有者模式可保留 Claude OAuth，Gateway 每次向 Anthropic 驗證並對應既有 Principal，不保存 OAuth |
 | streaming | 必須增量轉送；SSE `ping`／comment 也算活動，預設靜默 300 秒會中止 |
 | tools | supported；工具 beta body 與 `anthropic-beta` 必須原樣成對轉送 |
 | reasoning | supported；Claude 4.6+ 可送 `thinking: {"type":"adaptive"}` |
@@ -53,6 +53,10 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 **實測證據**：2.1.267 指向本機 gateway，再到可控 Anthropic SSE mock；單次
 `claude -p --model claude-test --max-turns 1` 精確輸出 `W05_CLAUDE_CODE_OK`。這證明
 Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號、正式模型或計費。
+
+2026-10-20 另以 Claude Code 2.1.304 的既有 OAuth 經
+`https://gateway.exactlyone.dev` 實送，取得精確回覆 `CLAUDE_CODE_GATEWAY_OK`；Gateway
+選到 `anthropic-subscription`，沒有落到本機模型。
 
 **Gateway contract**：推論可打 `/v1/messages?beta=true`，所以比對 path 而非完整 URL；
 `anthropic-beta`／`anthropic-version`、錯誤 body、`system` 陣列、`cache_control` 與 SSE raw

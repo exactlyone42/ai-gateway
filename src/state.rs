@@ -81,7 +81,18 @@ impl AppState {
                 config.provider_allowed_tenant_ids.clone(),
                 Arc::<str>::from(config.openai_api_key.clone()),
             ),
-            if let Some(ref token) = config.anthropic_auth_token {
+            if config.anthropic_client_oauth {
+                ProviderProfile::client_bearer(
+                    "env://ANTHROPIC_CLIENT_OAUTH",
+                    config.anthropic_provider.clone(),
+                    config.anthropic_base_url.clone(),
+                    vec![
+                        GatewayOperation::AnthropicMessages,
+                        GatewayOperation::AnthropicCountTokens,
+                    ],
+                    config.provider_allowed_tenant_ids.clone(),
+                )
+            } else if let Some(ref token) = config.anthropic_auth_token {
                 ProviderProfile::bearer(
                     "env://ANTHROPIC_AUTH_TOKEN",
                     config.anthropic_provider.clone(),

@@ -5,6 +5,9 @@
 - Provider organization API keys and service accounts.
 - Enterprise cloud model endpoints such as approved Azure/AWS/GCP deployments.
 - Contractually approved provider gateways.
+- A single owner's Claude OAuth, validated by Anthropic on every request and
+  forwarded only to Anthropic without persistence. It maps to one existing
+  Gateway principal and cannot be pooled across users.
 
 ## Explicitly unsupported
 
@@ -22,7 +25,7 @@ a distinct integration only after legal/security review.
 | Client mode | What pays for inference | Gateway policy |
 | --- | --- | --- |
 | Claude Code with gateway credential | Provider account behind that credential; claude.ai subscription is not used | Supported |
-| Claude Code with only a base URL override | Developer's saved claude.ai login can remain active | Unsupported: do not relay personal OAuth subscription credentials |
+| Claude Code with only a base URL override | Developer's saved claude.ai login remains active | Supported only for the configured single-owner OAuth principal; access tokens are validated and relayed without persistence |
 | Codex signed in with ChatGPT | ChatGPT plan allowance and billing | Outside this gateway credential path |
 | Codex with an OpenAI API key against OpenAI | OpenAI API pricing, billed separately from ChatGPT | Outside the gateway credential path |
 | Codex custom provider with `env_key`/`auth` and `requires_openai_auth = false` | Gateway/provider contract; client-side ChatGPT plan-meter interaction is undocumented | Supported; no ChatGPT login token is forwarded |
