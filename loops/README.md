@@ -40,11 +40,11 @@
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
 | [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
+| [identity-groups](./identity-groups.loop.md) | W21 | PLANNED | P1 | 員工加 email、群組共用額度與權限、credential 啟停不刪除 |
 
 ## 現在該做哪一個
 
-W00–W19 共 20 份 loop 已全數交付。目前進行中的是 W20 `production-readiness`（分支
-`feature/production-readiness`、PR #54）；接手前先讀該 loop 的「下一步」，較早的輪次紀錄在
-`production-readiness.progress.md`。
+W00–W19 共 20 份 loop 已全數交付。W20 `production-readiness` 等待使用者決定。
+W21 `identity-groups` 已規劃，準備開工。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
