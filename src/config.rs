@@ -47,6 +47,8 @@ pub struct Config {
     pub anthropic_base_url: String,
     pub anthropic_api_key: String,
     pub anthropic_auth_token: Option<String>,
+    pub anthropic_client_oauth: bool,
+    pub anthropic_oauth_credential_id: Option<Uuid>,
     pub anthropic_provider: String,
     pub anthropic_request_max_bytes: usize,
     pub extra_provider_profiles: Vec<ExtraProviderProfile>,
@@ -144,6 +146,10 @@ pub enum ConfigError {
     InvalidLedgerSpoolCapacity(String),
     #[error("invalid ANTHROPIC_REQUEST_MAX_BYTES: {0}")]
     InvalidAnthropicRequestLimit(String),
+    #[error("ANTHROPIC_CLIENT_OAUTH and ANTHROPIC_OAUTH_CREDENTIAL_ID must be configured together")]
+    IncompleteAnthropicClientOauth,
+    #[error("invalid Anthropic client OAuth configuration: {0}")]
+    InvalidAnthropicClientOauth(String),
     #[error("invalid OPENAI_REQUEST_MAX_BYTES: {0}")]
     InvalidOpenAiRequestLimit(String),
     #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
@@ -208,8 +214,20 @@ impl Config {
             .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
+        let anthropic_client_oauth = setting("ANTHROPIC_CLIENT_OAUTH")
+            .unwrap_or_else(|_| "false".to_owned())
+            .parse::<bool>()
+            .map_err(|error| ConfigError::InvalidAnthropicClientOauth(error.to_string()))?;
+        let anthropic_oauth_credential_id = setting("ANTHROPIC_OAUTH_CREDENTIAL_ID")
+            .ok()
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()
+            .map_err(|error| ConfigError::InvalidAnthropicClientOauth(error.to_string()))?;
+        if anthropic_client_oauth != anthropic_oauth_credential_id.is_some() {
+            return Err(ConfigError::IncompleteAnthropicClientOauth);
+        }
         let anthropic_auth_token = setting("ANTHROPIC_AUTH_TOKEN").ok();
-        let anthropic_api_key = if anthropic_auth_token.is_some() {
+        let anthropic_api_key = if anthropic_auth_token.is_some() || anthropic_client_oauth {
             setting("ANTHROPIC_API_KEY").unwrap_or_default()
         } else {
             required("ANTHROPIC_API_KEY")?
@@ -471,6 +489,8 @@ impl Config {
             anthropic_base_url,
             anthropic_api_key,
             anthropic_auth_token,
+            anthropic_client_oauth,
+            anthropic_oauth_credential_id,
             anthropic_provider,
             anthropic_request_max_bytes,
             extra_provider_profiles,

@@ -229,12 +229,14 @@ fn prepare_request(
 ) -> Result<PreparedProviderRequest, GatewayError> {
     let mut headers = HeaderMap::new();
     for (name, value) in input.client_headers {
-        if (!plan.translated || name == header::CONTENT_TYPE || name == header::ACCEPT)
-            && adapter.allows_client_header(name)
-            && name != header::AUTHORIZATION
-            && name.as_str() != "x-api-key"
-            && name.as_str() != "x-goog-api-key"
-        {
+        let client_bearer = profile.uses_client_bearer() && name == header::AUTHORIZATION;
+        let regular_header =
+            (!plan.translated || name == header::CONTENT_TYPE || name == header::ACCEPT)
+                && adapter.allows_client_header(name)
+                && name != header::AUTHORIZATION
+                && name.as_str() != "x-api-key"
+                && name.as_str() != "x-goog-api-key";
+        if client_bearer || regular_header {
             headers.append(name.clone(), value.clone());
         }
     }
@@ -250,6 +252,31 @@ fn prepare_request(
             HeaderValue::from_static("2023-06-01"),
         );
     }
+    if profile.uses_client_bearer() {
+        headers.insert(
+            HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
+            HeaderValue::from_static("true"),
+        );
+        let beta_name = HeaderName::from_static("anthropic-beta");
+        let beta = headers
+            .get(&beta_name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !beta
+            .split(',')
+            .any(|value| value.trim() == "oauth-2025-04-20")
+        {
+            let value = if beta.is_empty() {
+                "oauth-2025-04-20".to_owned()
+            } else {
+                format!("{beta},oauth-2025-04-20")
+            };
+            headers.insert(
+                beta_name,
+                HeaderValue::from_str(&value).map_err(|_| GatewayError::InvalidConfiguration)?,
+            );
+        }
+    }
     if adapter.dialect() == ProviderDialect::OpenAi
         && !plan.translated
         && let Some(value) = input.idempotency_key
@@ -257,7 +284,13 @@ fn prepare_request(
         headers.insert(HeaderName::from_static("idempotency-key"), value);
     }
     logging::inject_context(&mut headers);
-    apply_authentication(&mut headers, plan.authentication, profile)?;
+    if profile.uses_client_bearer() {
+        if !headers.contains_key(header::AUTHORIZATION) {
+            return Err(GatewayError::Unauthorized);
+        }
+    } else {
+        apply_authentication(&mut headers, plan.authentication, profile)?;
+    }
     Ok(PreparedProviderRequest {
         plan,
         headers,
@@ -1240,6 +1273,55 @@ mod tests {
 
         assert_eq!(headers.get("authorization").unwrap(), "Bearer secret");
         assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn anthropic_client_bearer_is_forwarded_with_oauth_headers() {
+        let adapter = for_kind(ProviderKind::Anthropic).unwrap();
+        let profile = ProviderProfile::client_bearer(
+            "env://ANTHROPIC_CLIENT_OAUTH",
+            "anthropic-subscription",
+            "https://example.test",
+            vec![GatewayOperation::AnthropicMessages],
+            vec![Uuid::nil()],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer client-oauth".parse().unwrap());
+        headers.insert("anthropic-beta", "claude-code-20250219".parse().unwrap());
+        let input = ProviderRequestInput {
+            source_path_and_query: "/v1/messages",
+            client_headers: &headers,
+            idempotency_key: None,
+        };
+        let plan = adapter
+            .plan_for_target(
+                GatewayOperation::AnthropicMessages,
+                GatewayOperation::AnthropicMessages,
+                "provider-model",
+                false,
+                &input,
+            )
+            .unwrap();
+
+        let prepared = adapter
+            .send(plan, Bytes::from_static(b"{}"), &profile, input)
+            .unwrap();
+
+        assert_eq!(
+            prepared.headers().get("authorization").unwrap(),
+            "Bearer client-oauth"
+        );
+        assert_eq!(
+            prepared
+                .headers()
+                .get("anthropic-dangerous-direct-browser-access")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            prepared.headers().get("anthropic-beta").unwrap(),
+            "claude-code-20250219,oauth-2025-04-20"
+        );
     }
 
     #[test]

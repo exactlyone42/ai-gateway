@@ -362,6 +362,63 @@ impl CredentialService {
         Ok(principal)
     }
 
+    #[tracing::instrument(name = "auth.resolve_by_id", skip_all)]
+    pub async fn resolve_by_id(&self, id: Uuid) -> Result<PrincipalContext, IdentityError> {
+        let _resolution = self.lifecycle_gate.read().await;
+        sqlx::query_as::<_, PrincipalContext>(
+            r#"
+            WITH touched AS (
+                UPDATE credentials
+                SET last_used_at = now()
+                WHERE id = $1
+                  AND status = 'active'
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > now())
+                  AND (user_id IS NULL OR EXISTS (
+                      SELECT 1 FROM users
+                      WHERE users.tenant_id = credentials.tenant_id
+                        AND users.id = credentials.user_id AND users.status = 'active'
+                  ))
+                  AND (device_id IS NULL OR EXISTS (
+                      SELECT 1 FROM devices
+                      WHERE devices.tenant_id = credentials.tenant_id
+                        AND devices.id = credentials.device_id AND devices.status = 'active'
+                  ))
+                  AND (client_id IS NULL OR EXISTS (
+                      SELECT 1 FROM clients
+                      WHERE clients.tenant_id = credentials.tenant_id
+                        AND clients.id = credentials.client_id AND clients.status = 'active'
+                  ))
+                  AND (agent_id IS NULL OR EXISTS (
+                      SELECT 1 FROM agents
+                      WHERE agents.tenant_id = credentials.tenant_id
+                        AND agents.id = credentials.agent_id AND agents.status = 'active'
+                  ))
+                RETURNING *
+            )
+            SELECT c.tenant_id, c.id AS credential_id,
+                   c.display_name AS credential_name,
+                   c.user_id, u.display_name AS user_name,
+                   c.device_id, d.display_name AS device_name,
+                   c.client_id, cl.display_name AS client_name,
+                   c.agent_id, a.display_name AS agent_name
+            FROM touched c
+            LEFT JOIN users u
+              ON u.tenant_id = c.tenant_id AND u.id = c.user_id
+            LEFT JOIN devices d
+              ON d.tenant_id = c.tenant_id AND d.id = c.device_id
+            LEFT JOIN clients cl
+              ON cl.tenant_id = c.tenant_id AND cl.id = c.client_id
+            LEFT JOIN agents a
+              ON a.tenant_id = c.tenant_id AND a.id = c.agent_id
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(IdentityError::InvalidCredential)
+    }
+
     pub async fn revoke(&self, tenant_id: Uuid, id: Uuid) -> Result<(), IdentityError> {
         let _lifecycle = self.lifecycle_gate.write().await;
         self.cache_lock()?.invalidate(id);
@@ -876,6 +933,8 @@ mod tests {
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
+            anthropic_client_oauth: false,
+            anthropic_oauth_credential_id: None,
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),
@@ -1192,6 +1251,8 @@ mod tests {
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
+            anthropic_client_oauth: false,
+            anthropic_oauth_credential_id: None,
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),
@@ -1289,6 +1350,8 @@ mod tests {
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
+            anthropic_client_oauth: false,
+            anthropic_oauth_credential_id: None,
             anthropic_provider: "anthropic-test".to_owned(),
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),

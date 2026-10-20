@@ -350,6 +350,7 @@ pub struct ProviderProfile {
 enum ProviderAuthorization {
     Bearer(Arc<str>),
     ApiKey(Arc<str>),
+    ClientBearer,
     None,
 }
 
@@ -464,16 +465,43 @@ impl ProviderProfile {
         }
     }
 
+    pub fn client_bearer(
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: ProviderDialect::Anthropic,
+            kind: ProviderKind::Anthropic,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: ProviderAuthorization::ClientBearer,
+        }
+    }
+
+    pub fn uses_client_bearer(&self) -> bool {
+        matches!(self.authorization, ProviderAuthorization::ClientBearer)
+    }
+
     pub fn bearer_secret(&self) -> Option<&str> {
         match &self.authorization {
             ProviderAuthorization::Bearer(secret) => Some(secret),
-            ProviderAuthorization::ApiKey(_) | ProviderAuthorization::None => None,
+            ProviderAuthorization::ApiKey(_)
+            | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::None => None,
         }
     }
 
     pub fn api_key_secret(&self) -> Option<&str> {
         match &self.authorization {
-            ProviderAuthorization::Bearer(_) | ProviderAuthorization::None => None,
+            ProviderAuthorization::Bearer(_)
+            | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
         }
     }
