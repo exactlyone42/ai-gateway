@@ -97,6 +97,13 @@ shadow mode; they are not inferred from the offline fixture. Enabling live
 routing requires a separately reviewed shadow report and does not follow from
 classification accuracy alone.
 
+Operators can read the tenant-scoped shadow result from
+`GET /admin/v1/task-classification-shadow?from=<RFC3339>&to=<RFC3339>`. The
+report includes classified request count, Jev opinion and shortlist agreement,
+request success rate, end-to-end p95 latency, classifier and Jev p95 latency,
+route-change count, and observed inference cost. Jev does not return billable
+usage, so its incremental cost is reported as unavailable instead of zero.
+
 ## Sources and design inference
 
 - OpenAI's model-selection guidance recommends establishing an evaluation
