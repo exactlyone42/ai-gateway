@@ -1,0 +1,5 @@
+Migrations live here as `<timestamp>_<name>.sql`. The runner is wired into
+startup (src/db.rs), so adding a file here is the whole deployment step.
+
+Empty on purpose: this segment (W02) owns no tables. The first real migration
+arrives with W03 (identity) and W04 (usage ledger).

@@ -2,21 +2,40 @@ name: CI
 
 on:
   pull_request:
+  # `dev` is where segments are integrated, so it is the first branch where a
+  # combination nobody tested can appear. Without it, the state of the
+  # integration branch is only ever checked by whoever remembers to run the
+  # gates locally after a merge.
   push:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-pool-gateway]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      # Single source of truth for the gates, shared with local development.
+      # See docs/engineering-standards.md section 0.
+      - name: Run full checks
+        env:
+          PGHOST: github-runner-agent-pool-gateway-db
+          PGUSER: gateway
+          PGPASSWORD: ${{ secrets.RUNNER_DB_PASSWORD }}
+        run: |
+          database="ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          createdb "$database"
+          trap 'dropdb --if-exists "$database"' EXIT
+          DATABASE_URL="postgres://gateway:${PGPASSWORD}@${PGHOST}:5432/${database}" ./scripts/check.sh all

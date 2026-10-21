@@ -1,0 +1,138 @@
+# Local development stack: `docker compose -f deploy/docker-compose.yml up`.
+#
+# Ports bind to 127.0.0.1 only. A gateway that holds provider credentials must
+# not be reachable from the LAN because someone started it on a laptop in a
+# cafe.
+#
+# The OTLP backend is not in here. W07 already ships telemetry to an existing
+# collector through OTEL_EXPORTER_OTLP_ENDPOINT; standing up a second one would
+# be a backend nobody asked for. Leave the variable unset and the gateway runs
+# with no exporter at all.
+
+name: agent-pool-gateway
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway-dev}
+      POSTGRES_DB: gateway
+    ports:
+      # Not 5432: a developer machine usually already has something there, and
+      # a stack that refuses to start on a shared laptop is a stack nobody runs.
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BUILD_REVISION: ${BUILD_REVISION:-}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # 0.0.0.0 inside the container; the published port below is what keeps
+      # this off the LAN.
+      LISTEN_ADDRESS: 0.0.0.0:8080
+      DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:-gateway-dev}@postgres:5432/gateway
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-10}
+      ADMIN_DATABASE_MAX_CONNECTIONS: ${ADMIN_DATABASE_MAX_CONNECTIONS:-2}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-replace-me}
+      OPENAI_PROVIDER: ${OPENAI_PROVIDER:-openai}
+      OPENAI_REQUEST_MAX_BYTES: ${OPENAI_REQUEST_MAX_BYTES:-33554432}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-replace-me}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_PROVIDER: ${ANTHROPIC_PROVIDER:-anthropic}
+      ANTHROPIC_REQUEST_MAX_BYTES: ${ANTHROPIC_REQUEST_MAX_BYTES:-33554432}
+      STREAM_EVENT_MAX_BYTES: ${STREAM_EVENT_MAX_BYTES:-33554432}
+      # Everything below is forwarded with no default: the gateway treats an
+      # empty value as "not set" and uses its own default, so this file never
+      # holds a second copy that can drift. docs/operations.md derives the
+      # platform termination grace period from the two shutdown values, which
+      # is impossible if the container fixes them.
+      PROVIDER_IDLE_TIMEOUT_MS: ${PROVIDER_IDLE_TIMEOUT_MS:-}
+      PROVIDER_CONNECT_TIMEOUT_MS: ${PROVIDER_CONNECT_TIMEOUT_MS:-}
+      REQUEST_HEADER_MAX_BYTES: ${REQUEST_HEADER_MAX_BYTES:-}
+      DRAIN_TIMEOUT_MS: ${DRAIN_TIMEOUT_MS:-}
+      SHUTDOWN_FINALIZE_TIMEOUT_MS: ${SHUTDOWN_FINALIZE_TIMEOUT_MS:-}
+      ENABLE_DEVELOPMENT_BOOTSTRAP: ${ENABLE_DEVELOPMENT_BOOTSTRAP:-false}
+      BOOTSTRAP_CLIENT_KEY: ${BOOTSTRAP_CLIENT_KEY:-}
+      CREDENTIAL_HASH_KEY: ${CREDENTIAL_HASH_KEY:-development-only-credential-hash-key}
+      CREDENTIAL_HASH_KEY_ID: ${CREDENTIAL_HASH_KEY_ID:-v1}
+      CREDENTIAL_RETIRING_HASH_KEYS: ${CREDENTIAL_RETIRING_HASH_KEYS:-}
+      CREDENTIAL_ENVIRONMENT: ${CREDENTIAL_ENVIRONMENT:-dev}
+      CREDENTIAL_CACHE_CAPACITY: ${CREDENTIAL_CACHE_CAPACITY:-1024}
+      CREDENTIAL_CACHE_TTL_SECONDS: ${CREDENTIAL_CACHE_TTL_SECONDS:-60}
+      POLICY_CACHE_CAPACITY: ${POLICY_CACHE_CAPACITY:-1024}
+      POLICY_CACHE_TTL_SECONDS: ${POLICY_CACHE_TTL_SECONDS:-60}
+      ADMIN_BOOTSTRAP_TOKEN: ${ADMIN_BOOTSTRAP_TOKEN:-}
+      ADMIN_BOOTSTRAP_TENANT_ID: ${ADMIN_BOOTSTRAP_TENANT_ID:-}
+      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-900}
+      ADMIN_ALLOWED_ORIGIN: ${ADMIN_ALLOWED_ORIGIN:-http://127.0.0.1:5173}
+      ADMIN_TRUSTED_PROXY_IPS: ${ADMIN_TRUSTED_PROXY_IPS:-}
+      ALLOWED_MODELS: ${ALLOWED_MODELS:-company-default}
+      PROVIDER_ALLOWED_TENANT_IDS: ${PROVIDER_ALLOWED_TENANT_IDS:-}
+      LEDGER_SPOOL_DIR: /var/lib/agent-pool-gateway/ledger-spool
+      LEDGER_SPOOL_MAX_BYTES: ${LEDGER_SPOOL_MAX_BYTES:-67108864}
+      LEDGER_SPOOL_ENTRY_MAX_BYTES: ${LEDGER_SPOOL_ENTRY_MAX_BYTES:-32768}
+      # Routing and admission are sized for the host, so a deployment must be
+      # able to set them without forking this file.
+      ROUTING_HEALTH_AWARE: ${ROUTING_HEALTH_AWARE:-}
+      ROUTING_LOAD_AWARE: ${ROUTING_LOAD_AWARE:-}
+      ROUTING_COST_AWARE: ${ROUTING_COST_AWARE:-}
+      ROUTING_QUOTA_AWARE: ${ROUTING_QUOTA_AWARE:-}
+      ROUTING_AUTO_QUALITY: ${ROUTING_AUTO_QUALITY:-}
+      ROUTING_FAILURE_COOLDOWN_MS: ${ROUTING_FAILURE_COOLDOWN_MS:-}
+      SCHEDULER_ACTIVE_INTERACTIVE_RESERVED: ${SCHEDULER_ACTIVE_INTERACTIVE_RESERVED:-}
+      SCHEDULER_ACTIVE_SHARED: ${SCHEDULER_ACTIVE_SHARED:-}
+      SCHEDULER_ACTIVE_BACKGROUND_RESERVED: ${SCHEDULER_ACTIVE_BACKGROUND_RESERVED:-}
+      SCHEDULER_QUEUE_INTERACTIVE_RESERVED: ${SCHEDULER_QUEUE_INTERACTIVE_RESERVED:-}
+      SCHEDULER_QUEUE_SHARED: ${SCHEDULER_QUEUE_SHARED:-}
+      SCHEDULER_QUEUE_BACKGROUND_RESERVED: ${SCHEDULER_QUEUE_BACKGROUND_RESERVED:-}
+      SCHEDULER_QUEUE_PER_TENANT: ${SCHEDULER_QUEUE_PER_TENANT:-}
+      SCHEDULER_QUEUE_PER_CREDENTIAL: ${SCHEDULER_QUEUE_PER_CREDENTIAL:-}
+      SCHEDULER_PER_PROVIDER: ${SCHEDULER_PER_PROVIDER:-}
+      SCHEDULER_PER_MODEL: ${SCHEDULER_PER_MODEL:-}
+      SCHEDULER_PER_USER: ${SCHEDULER_PER_USER:-}
+      SCHEDULER_PER_DEVICE: ${SCHEDULER_PER_DEVICE:-}
+      SCHEDULER_PER_CLIENT: ${SCHEDULER_PER_CLIENT:-}
+      SCHEDULER_PER_AGENT: ${SCHEDULER_PER_AGENT:-}
+      SCHEDULER_PER_CREDENTIAL: ${SCHEDULER_PER_CREDENTIAL:-}
+      SCHEDULER_PER_WORKLOAD: ${SCHEDULER_PER_WORKLOAD:-}
+      SCHEDULER_AGING_ENABLED: ${SCHEDULER_AGING_ENABLED:-}
+      SCHEDULER_AGING_INTERVAL_MS: ${SCHEDULER_AGING_INTERVAL_MS:-}
+      SCHEDULER_HARD_QUEUE_TIMEOUT_MS: ${SCHEDULER_HARD_QUEUE_TIMEOUT_MS:-}
+      SCHEDULER_RESERVATIONS_ENABLED: ${SCHEDULER_RESERVATIONS_ENABLED:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: ${RUST_LOG:-info,opentelemetry_sdk=warn,opentelemetry_otlp=warn}
+    ports:
+      # The published port is configurable because a host that already runs
+      # something on 8080 must not force a fork of this file. The container
+      # side stays fixed: the health check and the Admin origin use it.
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - ledger-spool:/var/lib/agent-pool-gateway/ledger-spool
+    healthcheck:
+      # Readiness, not liveness: "the stack is up" should mean the gateway can
+      # actually reach its database.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
+  ledger-spool:

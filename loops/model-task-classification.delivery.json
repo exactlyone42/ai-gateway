@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "task": "model-task-classification",
+  "project": "/home/cash/work_space/private/agent-pool-gateway-model-task-classification",
+  "steps": {
+    "S01": {
+      "kind": "internal",
+      "reason": "Defines the versioned evaluation contract and fixtures; it does not change a usable gateway surface."
+    },
+    "S02": {
+      "kind": "internal",
+      "reason": "Adds expand-only storage and draft conversion data; no request path or Admin surface uses it yet."
+    },
+    "S03": {
+      "kind": "internal",
+      "reason": "Exposes draft control data but cannot classify or alter a request until the routing slice is connected."
+    },
+    "S04": {
+      "kind": "internal",
+      "reason": "Adds the control-plane UI, but the classifier and routing path are not connected yet."
+    },
+    "S05": {
+      "kind": "internal",
+      "reason": "Connects classification and shortlisting, but the decision is not externally inspectable until request-ledger observability is added."
+    },
+    "S06": {
+      "kind": "internal",
+      "reason": "Adds independent Jev review and fail-open behavior, but decision evidence is not externally inspectable until request-ledger observability is added."
+    },
+    "S07": {
+      "kind": "internal",
+      "reason": "Persists and displays the decision chain, while full browser acceptance is grouped into the final end-to-end step."
+    },
+    "S08": {
+      "kind": "internal",
+      "reason": "Produces the offline gate report; production shadow metrics require the final deployment step and remain intentionally unavailable before deployment."
+    },
+    "S09": {
+      "kind": "internal",
+      "reason": "Runs local and browser acceptance; production deployment and public version readback remain gated by shadow evidence."
+    }
+  }
+}

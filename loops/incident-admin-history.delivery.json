@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "task": "incident-admin-history",
+  "project": "/home/cash/work_space/private/agent-pool-gateway-incident-admin-history",
+  "steps": {
+    "S01": {"kind": "internal", "reason": "定義資料與權限契約，尚無可使用功能"},
+    "S02": {"kind": "internal", "reason": "資料結構準備，尚無管理者入口"},
+    "S03": {"kind": "internal", "reason": "API 需與頁面及匯入資料一起交付才可驗收"},
+    "S04": {"kind": "internal", "reason": "頁面需有既有事故資料才可完成瀏覽器驗收"},
+    "S05": {"kind": "internal", "reason": "匯入準備，尚未完成整體安全與瀏覽器驗收"},
+    "S06": {"kind": "internal", "reason": "發布前整體驗證，不是獨立功能"},
+    "S07": {
+      "kind": "milestone",
+      "environment": "production",
+      "surface": "browser",
+      "artifact": {"path": "delivery/incident-admin-history/release.tar", "sha256": "pending"},
+      "validation": {"path": "delivery/incident-admin-history/validation.json", "sha256": "pending"},
+      "authorization": {"path": "delivery/incident-admin-history/authorization.json", "sha256": "pending"},
+      "deploy": {"path": "delivery/incident-admin-history/deploy.sh", "sha256": "pending"},
+      "readback": {"path": "delivery/incident-admin-history/readback.sh", "sha256": "pending"},
+      "timeout_seconds": 900
+    }
+  }
+}
