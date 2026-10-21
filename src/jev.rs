@@ -94,7 +94,7 @@ impl JevRouter {
             ]
         });
         let response = tokio::time::timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(60),
             client.post(&self.config.qwen_url).json(&payload).send(),
         )
         .await
