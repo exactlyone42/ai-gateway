@@ -1,6 +1,6 @@
 # LOOP: incident-admin-history
 
-> 卡 #78｜分支 `feature/incident-admin-history`｜段落 `S12`
+> 卡 #78｜分支 `feature/incident-admin-history-v2`｜段落 `S12`
 
 | 欄位 | 值 |
 | --- | --- |
