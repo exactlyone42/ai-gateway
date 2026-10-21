@@ -24,6 +24,13 @@ pub struct PreparedQuota {
     pub task_routing: Value,
 }
 
+#[derive(Clone, Copy)]
+struct RoutingMeasurement {
+    classification_elapsed_us: Option<u64>,
+    jev_attempted: bool,
+    jev_elapsed_ms: Option<u64>,
+}
+
 pub async fn admit(
     state: &AppState,
     prepared: &PreparedPolicy,
@@ -99,6 +106,7 @@ pub async fn admit(
         return Err(GatewayError::ModelForbidden);
     }
     let original_candidates = candidates.clone();
+    let classification_started = std::time::Instant::now();
     let task_decision = if operation != GatewayOperation::AnthropicCountTokens {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -124,6 +132,12 @@ pub async fn admit(
     } else {
         None
     };
+    let classification_elapsed_us = task_decision.as_ref().map(|_| {
+        classification_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64
+    });
     if let Some(decision) = &task_decision {
         tracing::info!(
             task = decision.classification.task,
@@ -138,9 +152,13 @@ pub async fn admit(
             candidates = decision.candidates.clone();
         }
     }
+    let mut jev_attempted = false;
+    let mut jev_elapsed_ms = None;
     let routing_reason = if operation != GatewayOperation::AnthropicCountTokens
         && let Some(router) = &state.jev
     {
+        jev_attempted = true;
+        let jev_started = std::time::Instant::now();
         let mut routing_candidates = if prepared.selector.quality().is_some() {
             candidates
         } else {
@@ -173,6 +191,7 @@ pub async fn admit(
                 .select(&state.client, body, &mut routing_candidates)
                 .await
         };
+        jev_elapsed_ms = Some(jev_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
         if reason.is_some() {
             candidates = routing_candidates;
         } else {
@@ -181,6 +200,11 @@ pub async fn admit(
         reason
     } else {
         None
+    };
+    let measurement = RoutingMeasurement {
+        classification_elapsed_us,
+        jev_attempted,
+        jev_elapsed_ms,
     };
     let mut ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
@@ -216,6 +240,7 @@ pub async fn admit(
             prepared,
             routing_reason,
             &selection.public_model_id,
+            measurement,
         );
         return Ok(PreparedQuota {
             routing_reason,
@@ -267,6 +292,7 @@ pub async fn admit(
                 prepared,
                 routing_reason,
                 &admission.selection.public_model_id,
+                measurement,
             );
             Ok(PreparedQuota {
                 routing_reason,
@@ -292,6 +318,7 @@ fn task_routing_snapshot(
     prepared: &PreparedPolicy,
     routing_reason: &str,
     final_model: &str,
+    measurement: RoutingMeasurement,
 ) -> Value {
     let classification = decision.as_ref().map(|decision| {
         serde_json::json!({
@@ -306,6 +333,7 @@ fn task_routing_snapshot(
             "profile_id": decision.profile_id,
             "profile_version": decision.profile_version,
             "shortlist": decision.candidates.iter().take(16).map(|candidate| candidate.public_model_id.chars().take(128).collect::<String>()).collect::<Vec<_>>(),
+            "elapsed_us": measurement.classification_elapsed_us,
         })
     });
     serde_json::json!({
@@ -326,6 +354,8 @@ fn task_routing_snapshot(
             "budget_class": value_text(&prepared.policy.budget_class),
         },
         "original_model": prepared.requested_model,
+        "jev_attempted": measurement.jev_attempted,
+        "jev_elapsed_ms": measurement.jev_elapsed_ms,
         "jev_opinion": (routing_reason == "jev").then_some(final_model),
         "final_model": final_model,
         "selection_reason": routing_reason,

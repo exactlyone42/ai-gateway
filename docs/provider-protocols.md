@@ -16,7 +16,9 @@ LiteLLM is not involved:
 
 - Preserve the original path and ordered query string. The router may replace only the top-level
   JSON `model` value with the selected provider model; all other request semantics are preserved.
-- Forward `content-type`, `accept`, and every `anthropic-*` header unchanged.
+- Forward `content-type`, `accept`, every `anthropic-*` header, and Claude
+  Code's `x-claude-code-session-id`, `x-stainless-retry-count`, and
+  `x-cc-original-request-id` retry identity headers unchanged.
 - Never forward the client `authorization` or `x-api-key`; inject only the
   server-side `ANTHROPIC_API_KEY` as upstream `x-api-key`.
 - The target provider adapter owns the native endpoint, authentication mode,
@@ -106,6 +108,12 @@ wire sidecar preserves the same-dialect request bytes:
   bytes are not released until the durable ledger finish succeeds.
 - Dropping the downstream body drops the owned upstream response body, closing
   the provider connection. No claim is made that provider billing stops.
+- `STREAM_HEARTBEAT_INTERVAL_MS` defaults to 30 seconds and must stay below 60
+  seconds. The gateway emits an SSE comment while waiting for Anthropic
+  response headers and during later provider silence, so clients do not need
+  the provider itself to keep the downstream connection alive. If the provider
+  rejects after the gateway has opened that stream, the rejection is delivered
+  as an Anthropic SSE error because the HTTP status is already committed.
 - `PROVIDER_IDLE_TIMEOUT_MS` limits time between successful upstream reads and
   defaults to 120 seconds. Each successful read resets the timeout, so an
   active long-running stream is not capped by total lifetime. An idle timeout

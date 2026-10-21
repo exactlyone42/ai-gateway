@@ -86,8 +86,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 for name in (
                     "anthropic-beta",
                     "anthropic-version",
+                    "x-cc-original-request-id",
+                    "x-cc-retry-after-too-long",
                     "x-claude-code-agent-id",
+                    "x-claude-code-agent-type",
+                    "x-claude-code-compaction",
+                    "x-claude-code-context-compacted",
+                    "x-claude-code-parent-agent-id",
+                    "x-claude-code-prompt-id",
+                    "x-claude-code-request-class",
                     "x-claude-code-session-id",
+                    "x-stainless-retry-count",
                     "x-codex-session-id",
                 )
                 if self.headers.get(name) is not None

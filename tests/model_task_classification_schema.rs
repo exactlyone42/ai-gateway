@@ -192,23 +192,33 @@ async fn taxonomy_is_fixed_and_legacy_model_writes_still_work(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(first, 1);
+    assert_eq!(first, 8);
     assert_eq!(second, 0, "legacy conversion was not idempotent");
 
-    let row = sqlx::query(
+    let rows = sqlx::query(
         r#"
         SELECT task_kind, suitability_score, source, lifecycle_state
         FROM model_task_profiles
         WHERE tenant_id = $1 AND model_id = $2
+        ORDER BY task_kind
         "#,
     )
     .bind(TENANT_A)
     .bind(model_id)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("task_kind"), "general_assistance");
-    assert_eq!(row.get::<i16, _>("suitability_score"), 0);
-    assert_eq!(row.get::<String, _>("source"), "migration");
-    assert_eq!(row.get::<String, _>("lifecycle_state"), "draft");
+    assert_eq!(rows.len(), 8);
+    assert!(
+        rows.iter()
+            .all(|row| row.get::<i16, _>("suitability_score") > 0)
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.get::<String, _>("source") == "migration")
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.get::<String, _>("lifecycle_state") == "active")
+    );
 }
