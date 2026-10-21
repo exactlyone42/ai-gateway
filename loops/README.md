@@ -44,6 +44,8 @@
 | [request-evidence](./request-evidence.loop.md) | S08 | 已完成 | P1 | 記錄安全請求參數與可比較的可靠度、延遲及成本證據。卡 #64 |
 | [jev-fail-open](./jev-fail-open.loop.md) | S09 | 程式完成，實送受本機憑證阻擋 | P0 | Jev 無額度或不可用時仍沿用正常路由完成請求 |
 | [model-routing-admin](./model-routing-admin.loop.md) | S10 | 已完成 | P0 | 依能力與實測資料選模型，不把單一品質等級當成模型能力 |
+| [model-task-classification](./model-task-classification.loop.md) | S11 | 進行中（S01–S03 完成；S04 驗證中） | P0 | 先判斷工作種類，再挑真正適合且可用的模型。卡 #77 |
+| [incident-admin-history](./incident-admin-history.loop.md) | S12 | 未開始 | P1 | 後台看懂事故、根因、修正、預防與驗證證據。卡 #78 |
 
 ## 現在該做哪一個
 

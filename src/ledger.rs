@@ -119,6 +119,15 @@ impl RequestPolicySnapshot {
         }
         self
     }
+
+    pub fn with_task_routing(mut self, task_routing: Value) -> Self {
+        if let Value::Object(decision) = &mut self.decision
+            && let Some(Value::Object(routing)) = decision.get_mut("routing")
+        {
+            routing.insert("task_classification".to_owned(), task_routing);
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -1682,6 +1691,26 @@ mod tests {
     }
 
     #[test]
+    fn task_routing_is_nested_under_the_routing_decision() {
+        let snapshot = RequestPolicySnapshot::unevaluated("test")
+            .with_routing("jev")
+            .with_task_routing(serde_json::json!({
+                "original_model": "client-model",
+                "final_model": "reviewed-model",
+                "classification": {"task": "debugging", "confidence": 0.9}
+            }));
+
+        assert_eq!(
+            snapshot.decision["routing"]["task_classification"]["original_model"],
+            "client-model"
+        );
+        assert_eq!(
+            snapshot.decision["routing"]["task_classification"]["classification"]["task"],
+            "debugging"
+        );
+    }
+
+    #[test]
     fn gateway_overhead_excludes_queue_and_provider_time() {
         let received_at = Utc::now();
         let mut start = request_start("gateway-overhead");
@@ -2167,6 +2196,15 @@ mod tests {
         let directory = test_directory("recovery");
         let spool = Spool::open(directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         let mut envelope = RequestEnvelope::started(request_start("recovery-request"));
+        envelope.request.policy_decision = Some(
+            RequestPolicySnapshot::unevaluated("test")
+                .with_routing("jev")
+                .with_task_routing(serde_json::json!({
+                    "original_model": "client-model",
+                    "final_model": "reviewed-model"
+                }))
+                .decision,
+        );
         let request_id = envelope.request.id;
         spool.reserve(request_id, &envelope).unwrap();
         envelope.request.requested_parameters = Some(serde_json::json!({
@@ -2265,7 +2303,9 @@ mod tests {
                 (SELECT count(*) FROM request_parameter_snapshots) AS parameter_snapshots,
                 (SELECT cached_input_tokens FROM usage_records) AS cached,
                 (SELECT cache_write_input_tokens FROM usage_records) AS cache_write,
-                (SELECT reasoning_tokens FROM usage_records) AS reasoning
+                (SELECT reasoning_tokens FROM usage_records) AS reasoning,
+                (SELECT policy_decision->'routing'->'task_classification'->>'original_model'
+                 FROM gateway_requests WHERE request_id = 'recovery-request') AS original_model
             "#,
         )
         .fetch_one(&pool)
@@ -2278,6 +2318,7 @@ mod tests {
         assert_eq!(row.get::<i64, _>("cached"), 4);
         assert_eq!(row.get::<i64, _>("cache_write"), 2);
         assert_eq!(row.get::<i64, _>("reasoning"), 1);
+        assert_eq!(row.get::<String, _>("original_model"), "client-model");
 
         recovered
             .inner
