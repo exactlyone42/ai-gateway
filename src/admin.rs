@@ -22,9 +22,11 @@ use crate::policy::PolicyEngine;
 use crate::scheduler::Scheduler;
 
 mod accounts;
+mod incidents;
 mod reports;
 mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
+pub use incidents::{IncidentCreate, IncidentEventCreate, IncidentListQuery, IncidentPatch};
 pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, UsageQuery};
 pub use resources::{
     DeleteQuery, LifecycleInput, ListQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
@@ -148,6 +150,36 @@ pub const RBAC_RULES: &[RbacRule] = &[
         route: "/admin/v1/system-health",
         action: AdminAction::ReadResource,
         roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/incidents",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/incidents/{id}",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "POST",
+        route: "/admin/v1/incidents",
+        action: AdminAction::MutateResource,
+        roles: WRITERS,
+    },
+    RbacRule {
+        method: "PATCH",
+        route: "/admin/v1/incidents/{id}",
+        action: AdminAction::MutateResource,
+        roles: WRITERS,
+    },
+    RbacRule {
+        method: "POST",
+        route: "/admin/v1/incidents/{id}/events",
+        action: AdminAction::MutateResource,
+        roles: WRITERS,
     },
     RbacRule {
         method: "POST",
@@ -834,12 +866,14 @@ fn map_conflict(error: sqlx::Error) -> AdminError {
 mod tests {
     use std::{net::IpAddr, str::FromStr as _, time::Duration};
 
+    use chrono::Utc;
     use sha2::{Digest as _, Sha256};
     use sqlx::{PgPool, Row as _, postgres::PgPoolOptions};
     use uuid::Uuid;
 
     use super::{
-        AdminError, AdminRole, AdminService, AdminServiceConfig, BootstrapInput, authorize,
+        AdminContext, AdminError, AdminRole, AdminService, AdminServiceConfig, BootstrapInput,
+        IncidentCreate, IncidentEventCreate, IncidentListQuery, IncidentPatch, authorize,
     };
     use crate::identity::CredentialService;
 
@@ -851,6 +885,28 @@ mod tests {
         assert!(authorize("POST", route, AdminRole::Admin).is_some());
         assert!(authorize("POST", route, AdminRole::Operator).is_none());
         assert!(authorize("POST", route, AdminRole::Viewer).is_none());
+    }
+
+    #[test]
+    fn incident_reads_allow_all_admin_roles_but_writes_reject_viewers() {
+        for role in [AdminRole::Admin, AdminRole::Operator, AdminRole::Viewer] {
+            assert!(authorize("GET", "/admin/v1/incidents", role).is_some());
+            assert!(authorize("GET", "/admin/v1/incidents/{id}", role).is_some());
+        }
+        for route in [
+            "/admin/v1/incidents",
+            "/admin/v1/incidents/{id}",
+            "/admin/v1/incidents/{id}/events",
+        ] {
+            let method = if route == "/admin/v1/incidents/{id}" {
+                "PATCH"
+            } else {
+                "POST"
+            };
+            assert!(authorize(method, route, AdminRole::Admin).is_some());
+            assert!(authorize(method, route, AdminRole::Operator).is_some());
+            assert!(authorize(method, route, AdminRole::Viewer).is_none());
+        }
     }
 
     fn service(pool: PgPool, tenant_id: Uuid) -> AdminService {
@@ -885,6 +941,191 @@ mod tests {
                 session_ttl: Duration::from_secs(900),
             },
         )
+    }
+
+    #[sqlx::test]
+    async fn incident_service_keeps_history_and_rejects_sensitive_content(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let service = service(pool.clone(), tenant_id);
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let issued = service
+            .bootstrap(
+                BOOTSTRAP,
+                BootstrapInput {
+                    display_name: "owner".to_owned(),
+                    credential_name: "owner login".to_owned(),
+                },
+                source,
+                source,
+                "incident-bootstrap",
+            )
+            .await
+            .unwrap();
+        let session = service
+            .login(&issued.login_token, source, source, "incident-login")
+            .await
+            .unwrap();
+        let context = service
+            .resolve_session(&session.access_token)
+            .await
+            .unwrap();
+
+        let rejected = service
+            .create_incident(
+                &context,
+                IncidentCreate {
+                    title: "Unsafe".to_owned(),
+                    status: "investigating".to_owned(),
+                    service: "gateway".to_owned(),
+                    impact_scope: "system".to_owned(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    summary: "Authorization: Bearer secret".to_owned(),
+                    impact: "none".to_owned(),
+                    root_cause: None,
+                    temporary_fix: None,
+                    permanent_fix: None,
+                    prevention: None,
+                    validation_evidence: None,
+                },
+                source,
+                source,
+                "unsafe-create",
+            )
+            .await;
+        assert!(matches!(rejected, Err(AdminError::InvalidRequest)));
+        let unsafe_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM incidents WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unsafe_rows, 0, "rejected content left an incident behind");
+
+        let created = service
+            .create_incident(
+                &context,
+                IncidentCreate {
+                    title: "Slow first byte".to_owned(),
+                    status: "investigating".to_owned(),
+                    service: "gateway".to_owned(),
+                    impact_scope: "system".to_owned(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    summary: "Requests waited too long.".to_owned(),
+                    impact: "Interactive work stopped.".to_owned(),
+                    root_cause: None,
+                    temporary_fix: None,
+                    permanent_fix: None,
+                    prevention: None,
+                    validation_evidence: None,
+                },
+                source,
+                source,
+                "safe-create",
+            )
+            .await
+            .unwrap();
+        let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        let updated = service
+            .update_incident(
+                &context,
+                id,
+                IncidentPatch {
+                    version: 1,
+                    status: Some("mitigated".to_owned()),
+                    ended_at: None,
+                    summary: None,
+                    impact: None,
+                    root_cause: Some(
+                        "The client deadline was shorter than the first byte wait.".to_owned(),
+                    ),
+                    temporary_fix: Some("Raised the declared wait.".to_owned()),
+                    permanent_fix: None,
+                    prevention: None,
+                    validation_evidence: None,
+                },
+                source,
+                source,
+                "update",
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["version"], 2);
+        let stale = service
+            .update_incident(
+                &context,
+                id,
+                IncidentPatch {
+                    version: 1,
+                    status: Some("closed".to_owned()),
+                    ended_at: None,
+                    summary: None,
+                    impact: None,
+                    root_cause: None,
+                    temporary_fix: None,
+                    permanent_fix: None,
+                    prevention: None,
+                    validation_evidence: None,
+                },
+                source,
+                source,
+                "stale",
+            )
+            .await;
+        assert!(matches!(stale, Err(AdminError::Conflict)));
+        service
+            .append_incident_event(
+                &context,
+                id,
+                IncidentEventCreate {
+                    event_type: "verification".to_owned(),
+                    occurred_at: Utc::now(),
+                    message: Some("Four parallel requests completed.".to_owned()),
+                    gateway_request_id: None,
+                    deployment_version: Some("90cb105a84a9".to_owned()),
+                },
+                source,
+                source,
+                "append-event",
+            )
+            .await
+            .unwrap();
+        let detail = service.get_incident(&context, id).await.unwrap();
+        assert_eq!(detail["events"].as_array().unwrap().len(), 3);
+        let foreign_context = AdminContext {
+            tenant_id: Uuid::new_v4(),
+            account_id: context.account_id,
+            session_id: context.session_id,
+            role: context.role,
+        };
+        assert!(matches!(
+            service.get_incident(&foreign_context, id).await,
+            Err(AdminError::NotFound)
+        ));
+        let incident_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND target_id = $2 AND action LIKE 'incident.%'",
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(incident_audits, 3);
+        let listed = service
+            .list_incidents(
+                &context,
+                IncidentListQuery {
+                    status: Some("mitigated".to_owned()),
+                    service: Some("gateway".to_owned()),
+                    impact_scope: Some("system".to_owned()),
+                    from: None,
+                    until: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed["items"].as_array().unwrap().len(), 1);
     }
 
     #[sqlx::test]

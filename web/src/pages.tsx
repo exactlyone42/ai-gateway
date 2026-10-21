@@ -169,6 +169,61 @@ export function RequestsPage() {
   </Page>
 }
 
+export function IncidentsPage() {
+  const auth = useAuth()
+  const queryClient = useQueryClient()
+  const [filters, setFilters] = useState({ status: '', service: '', impact_scope: '', from: '', until: '' })
+  const [selected, setSelected] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value).map(([key, value]) => [key, ['from', 'until'].includes(key) ? new Date(value).toISOString() : value]))
+  const query = useAdminQuery<JsonObject>(['incidents', filters], `/incidents${params.size ? `?${params}` : ''}`)
+  const detail = useAdminQuery<JsonObject>(['incident', selected], `/incidents/${selected}`, selected !== null)
+  const canWrite = auth.role !== 'viewer'
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['incidents'] })
+    if (selected) await queryClient.invalidateQueries({ queryKey: ['incident', selected] })
+  }
+  const mutate = async (path: string, init: RequestInit) => {
+    setBusy(true); setError(null)
+    try { await adminRequest(path, auth.token!, auth.clear, init); await refresh() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
+    finally { setBusy(false) }
+  }
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const data = new FormData(event.currentTarget)
+    await mutate('/incidents', { method: 'POST', body: JSON.stringify({
+      title: data.get('title'), status: 'investigating', service: data.get('service'), impact_scope: data.get('impact_scope'),
+      started_at: new Date(String(data.get('started_at'))).toISOString(), ended_at: null,
+      summary: data.get('summary'), impact: data.get('impact'), root_cause: null, temporary_fix: null,
+      permanent_fix: null, prevention: null, validation_evidence: null,
+    }) })
+    setCreating(false)
+  }
+  const changeStatus = async (incident: JsonObject, status: string) => {
+    await mutate(`/incidents/${incident.id}`, { method: 'PATCH', body: JSON.stringify({ version: incident.version, status }) })
+  }
+  const appendEvent = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const data = new FormData(event.currentTarget)
+    await mutate(`/incidents/${selected}/events`, { method: 'POST', body: JSON.stringify({
+      event_type: data.get('event_type'), occurred_at: new Date().toISOString(), message: data.get('message') || null,
+      gateway_request_id: data.get('gateway_request_id') || null, deployment_version: data.get('deployment_version') || null,
+    }) })
+    event.currentTarget.reset()
+  }
+  const setFilter = (key: string, value: string) => setFilters((current) => ({ ...current, [key]: value }))
+  return <Page title="Incidents" actions={canWrite ? <button onClick={() => setCreating(true)}><Plus size={16} />Create incident</button> : undefined}>
+    {error && <div className="state error">{error}</div>}
+    <div className="toolbar"><select aria-label="Incident status" value={filters.status} onChange={(event) => setFilter('status', event.target.value)}><option value="">All statuses</option>{['investigating', 'mitigated', 'resolved', 'closed'].map((value) => <option key={value}>{value}</option>)}</select><input aria-label="Service" placeholder="Service" value={filters.service} onChange={(event) => setFilter('service', event.target.value)} /><select aria-label="Impact scope" value={filters.impact_scope} onChange={(event) => setFilter('impact_scope', event.target.value)}><option value="">All scopes</option>{['system', 'tenant', 'principal'].map((value) => <option key={value}>{value}</option>)}</select><input aria-label="From" type="datetime-local" value={filters.from} onChange={(event) => setFilter('from', event.target.value)} /><input aria-label="Until" type="datetime-local" value={filters.until} onChange={(event) => setFilter('until', event.target.value)} /></div>
+    <QueryBody query={query}>{(data) => <DataTable rows={data.items ?? []} onRow={(row) => setSelected(row.id)} columns={[{ key: 'started_at', label: 'Started', render: (row) => formatDate(row.started_at) }, { key: 'title', label: 'Incident' }, { key: 'service', label: 'Service' }, { key: 'impact_scope', label: 'Impact' }, { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> }]} />}</QueryBody>
+    {creating && <div className="dialog-backdrop"><form className="dialog" onSubmit={(event) => void create(event)}><header><h2>Create incident</h2><button type="button" className="icon-button" title="Close" onClick={() => setCreating(false)}><X /></button></header><label>Title<input name="title" required maxLength={512} /></label><label>Service<input name="service" required maxLength={128} /></label><label>Impact scope<select name="impact_scope"><option value="system">System</option><option value="tenant">Tenant</option><option value="principal">Principal</option></select></label><label>Started<input name="started_at" type="datetime-local" required /></label><label>Summary<textarea name="summary" required maxLength={8192} /></label><label>Impact<textarea name="impact" required maxLength={8192} /></label><footer><button type="button" className="secondary" onClick={() => setCreating(false)}>Cancel</button><button disabled={busy}>{busy ? 'Creating' : 'Create'}</button></footer></form></div>}
+    {selected && <div className="drawer-backdrop" onClick={() => setSelected(null)}><aside className="drawer" onClick={(event) => event.stopPropagation()}><header><h2>Incident detail</h2><button className="icon-button" title="Close" onClick={() => setSelected(null)}><X /></button></header><QueryBody query={detail}>{(data) => <><h3>{data.incident.title}</h3><dl className="detail-list"><dt>Status</dt><dd>{canWrite ? <select aria-label="Update status" value={data.incident.status} disabled={busy} onChange={(event) => void changeStatus(data.incident, event.target.value)}>{['investigating', 'mitigated', 'resolved', 'closed'].map((value) => <option key={value}>{value}</option>)}</select> : <Status value={data.incident.status} />}</dd><dt>Service</dt><dd>{data.incident.service}</dd><dt>Impact scope</dt><dd>{data.incident.impact_scope}</dd><dt>Summary</dt><dd>{data.incident.summary}</dd><dt>Impact</dt><dd>{data.incident.impact}</dd><dt>Root cause</dt><dd>{data.incident.root_cause ?? 'Pending'}</dd><dt>Temporary fix</dt><dd>{data.incident.temporary_fix ?? 'Pending'}</dd><dt>Permanent fix</dt><dd>{data.incident.permanent_fix ?? 'Pending'}</dd><dt>Prevention</dt><dd>{data.incident.prevention ?? 'Pending'}</dd><dt>Validation evidence</dt><dd>{data.incident.validation_evidence ?? 'Pending'}</dd></dl><h3>Timeline</h3><DataTable rows={data.events ?? []} columns={[{ key: 'occurred_at', label: 'Time', render: (row) => formatDate(row.occurred_at) }, { key: 'event_type', label: 'Type' }, { key: 'message', label: 'Details', render: (row) => row.message ?? row.gateway_request_id ?? row.deployment_version }, { key: 'actor_admin_id', label: 'Changed by' }]} />{canWrite && <form className="section" onSubmit={(event) => void appendEvent(event)}><h3>Add event</h3><label>Type<select name="event_type">{['timeline', 'analysis', 'remediation', 'verification', 'link'].map((value) => <option key={value}>{value}</option>)}</select></label><label>Details<textarea name="message" maxLength={8192} /></label><label>Request ID<input name="gateway_request_id" type="text" /></label><label>Deployment version<input name="deployment_version" maxLength={255} /></label><button disabled={busy}>{busy ? 'Saving' : 'Add event'}</button></form>}</>}</QueryBody></aside></div>}
+  </Page>
+}
+
 export function UsagePage() {
   const [range, setRange] = useState<RangeKey>('7d')
   const [dimension, setDimension] = useState('user')
@@ -286,7 +341,7 @@ export function GovernancePage() {
     finally { setBusy(false) }
   }
   const lifecycle = (kind: 'policy' | 'quota', row: JsonObject) => mutate(`/${kind}s/${row.id}/lifecycle`, { method: 'POST', body: JSON.stringify({ version: row.version, state: row.lifecycle_state === 'active' ? 'disabled' : 'active' }) })
-  return <Page title="Governance" actions={canWrite ? <div className="toolbar"><button onClick={() => setCreating('policy')}><Plus size={16} />Policy</button><button onClick={() => setCreating('quota')}><Plus size={16} />Quota</button></div> : undefined}>
+  return <Page title="Policies & Scheduler" actions={canWrite ? <div className="toolbar"><button onClick={() => setCreating('policy')}><Plus size={16} />Policy</button><button onClick={() => setCreating('quota')}><Plus size={16} />Quota</button></div> : undefined}>
     {error && <div className="state error">{error}</div>}
     <QueryBody query={query}>{(data) => <>
     <div className="health-summary governance-health"><div className="runtime-summary"><div><span>Policy runtime</span><Status value={data.policy_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.policy_runtime?.active_count ?? 0} active</small></div><div className="runtime-summary"><div><span>Quota runtime</span><Status value={data.quota_runtime?.available ? 'active' : 'unavailable'} /></div><small>{data.quota_runtime?.active_count ?? 0} active · {data.quota_runtime?.window_count ?? 0} windows · {data.quota_runtime?.timezone ?? 'UTC'}</small></div></div>

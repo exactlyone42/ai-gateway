@@ -71,6 +71,23 @@ actor account／role、action、target、before／after、DB timestamp、source 
 未授權回 401、RBAC 拒絕回 403、跨 tenant／不存在回 404、CAS 或 invariant 衝突回 409、DB／認證
 依賴失效回 503。所有回應沿用 gateway 的 JSON error envelope。
 
+## 事故記錄
+
+事故屬於登入 session 的 tenant；`system` 只表示影響該 tenant 的共用 Gateway，不能跨 tenant
+讀寫。清單可用狀態、發生日期、服務與影響範圍篩選。事故目前值包含標題、狀態、服務、影響範圍、
+開始／結束時間、摘要、影響、根因、暫時處理、永久修正、預防措施、驗證證據與版本。狀態固定為
+`investigating`、`mitigated`、`resolved`、`closed`。
+
+建立事故、變更狀態或追加時間線都必須在同一 transaction 寫入事故目前值、不可修改的事件及
+既有 audit。事件只追加，資料庫拒絕 update、delete 與 truncate；事故目前值用 version CAS 防止
+兩位管理者互相覆蓋。事件保存 actor、DB 時間、類型、改前／改後與安全說明。請求關聯只接受同
+tenant 的 request UUID；部署關聯只存版本識別字，不複製請求或回應內容。
+
+事故端點沿用 Admin session；admin 與 operator 可寫，viewer 只讀，Client API Key 一律 401。
+所有文字欄位在寫入前拒絕疑似 Gateway／Provider 金鑰、Bearer token、完整 Prompt 或 Response；
+拒絕時整個 transaction 不得留下事故、事件或 audit。輸入限制是防止意外保存，不取代日誌與
+回應的既有去敏檢查。
+
 ## 網路與設定
 
 Admin request body 上限 1 MiB。CORS 只允許 `ADMIN_ALLOWED_ORIGIN` 的單一 exact origin；production

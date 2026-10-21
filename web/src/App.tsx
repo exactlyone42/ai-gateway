@@ -1,14 +1,14 @@
-import { Activity, Boxes, FileClock, Fingerprint, Gauge, KeyRound, LogOut, Network, ScrollText, ShieldCheck, TimerReset } from 'lucide-react'
+import { Activity, Boxes, FileClock, Fingerprint, Gauge, KeyRound, LogOut, Network, ScrollText, ShieldCheck, TimerReset, TriangleAlert } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { adminRequest } from './api'
 import { useAuth } from './auth'
-import { AuditPage, CatalogPage, CredentialsPage, GovernancePage, HealthPage, IdentitiesPage, OverviewPage, RequestsPage, UsagePage } from './pages'
+import { AuditPage, CatalogPage, CredentialsPage, GovernancePage, HealthPage, IdentitiesPage, IncidentsPage, OverviewPage, RequestsPage, UsagePage } from './pages'
 
 const navigation = [
   ['/', 'Overview', Gauge], ['/identities', 'Identities', Network], ['/credentials', 'Credentials', KeyRound],
   ['/requests', 'Requests', ScrollText], ['/usage', 'Usage', Activity], ['/catalog', 'Models & Providers', Boxes],
-  ['/governance', 'Policies & Scheduler', ShieldCheck], ['/health', 'System Health', TimerReset], ['/audit', 'Audit', FileClock],
+  ['/governance', 'Policies & Scheduler', ShieldCheck], ['/incidents', 'Incidents', TriangleAlert], ['/health', 'System Health', TimerReset], ['/audit', 'Audit', FileClock],
 ] as const
 
 function Login() {
@@ -30,7 +30,7 @@ function Shell() {
     try { await adminRequest('/session', auth.token!, auth.clear, { method: 'DELETE' }) } finally { auth.clear() }
   }
   return <div className="shell"><aside className="sidebar"><header><div className="brand-mark"><Fingerprint /></div><div><strong>Gateway Control</strong><small>{auth.role}</small></div></header><nav>{navigation.map(([path, label, Icon]) => <NavLink key={path} to={path} end={path === '/'} title={label}><Icon /> <span>{label}</span></NavLink>)}</nav><footer><span>Session ends<br />{auth.expiresAt && new Date(auth.expiresAt).toLocaleTimeString()}</span><button className="icon-button" title="Sign out" onClick={() => void logout()}><LogOut /></button></footer></aside>
-    <div className="content"><Routes><Route path="/" element={<OverviewPage />} /><Route path="/identities" element={<IdentitiesPage />} /><Route path="/credentials" element={<CredentialsPage />} /><Route path="/requests" element={<RequestsPage />} /><Route path="/usage" element={<UsagePage />} /><Route path="/catalog" element={<CatalogPage />} /><Route path="/governance" element={<GovernancePage />} /><Route path="/health" element={<HealthPage />} /><Route path="/audit" element={<AuditPage />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div>
+    <div className="content"><Routes><Route path="/" element={<OverviewPage />} /><Route path="/identities" element={<IdentitiesPage />} /><Route path="/credentials" element={<CredentialsPage />} /><Route path="/requests" element={<RequestsPage />} /><Route path="/usage" element={<UsagePage />} /><Route path="/catalog" element={<CatalogPage />} /><Route path="/governance" element={<GovernancePage />} /><Route path="/incidents" element={<IncidentsPage />} /><Route path="/health" element={<HealthPage />} /><Route path="/audit" element={<AuditPage />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div>
   </div>
 }
 
