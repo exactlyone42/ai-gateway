@@ -99,9 +99,11 @@ pub async fn admit(
     let use_jev = state.jev.is_some()
         && prepared.selector.quality().is_some()
         && operation != GatewayOperation::AnthropicCountTokens;
-    if use_jev && let Some(router) = &state.jev {
-        router.select(&state.client, body, &mut candidates).await?;
-    }
+    let jev_selected = if use_jev && let Some(router) = &state.jev {
+        router.select(&state.client, body, &mut candidates).await
+    } else {
+        false
+    };
     let mut ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
@@ -127,7 +129,7 @@ pub async fn admit(
             .ok_or(GatewayError::ModelForbidden)?;
         selection.record_selected();
         let translation = validate_for_provider(request, &selection)?;
-        let routing_reason = if use_jev {
+        let routing_reason = if jev_selected {
             "jev"
         } else {
             ranked.reason_for(&selection, state.routing.quota_aware())
@@ -172,7 +174,7 @@ pub async fn admit(
         QuotaOutcome::Allowed(admission) => {
             admission.selection.record_selected();
             let translation = validate_for_provider(request, &admission.selection)?;
-            let routing_reason = if use_jev {
+            let routing_reason = if jev_selected {
                 "jev"
             } else {
                 ranked.reason_for(&admission.selection, state.routing.quota_aware())

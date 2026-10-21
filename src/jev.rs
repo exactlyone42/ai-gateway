@@ -32,7 +32,7 @@ impl JevRouter {
         client: &Client,
         body: &Value,
         candidates: &mut Vec<ModelSelection>,
-    ) -> Result<(), GatewayError> {
+    ) -> bool {
         let criteria = candidates
             .iter()
             .enumerate()
@@ -52,21 +52,15 @@ impl JevRouter {
                 (i.to_string(), description)
             })
             .collect::<BTreeMap<_, _>>();
-        let index = self
+        let result = self
             .decide(
                 client,
                 "https://api.typesafe.ai/v1/systemone",
                 &routing_state(body),
                 &criteria,
             )
-            .await?;
-        let selected = candidates
-            .get(index)
-            .cloned()
-            .ok_or(GatewayError::UpstreamProtocol)?;
-        candidates.clear();
-        candidates.push(selected);
-        Ok(())
+            .await;
+        apply_choice(candidates, result)
     }
 
     async fn decide(
@@ -126,11 +120,24 @@ impl JevRouter {
         if result.is_err() {
             tracing::warn!(
                 event.name = "jev.routing_failed",
-                "Jev routing failed; no model was called"
+                "Jev routing failed; normal provider routing will continue"
             );
         }
         result
     }
+}
+
+fn apply_choice<T>(candidates: &mut Vec<T>, result: Result<usize, GatewayError>) -> bool {
+    let Ok(index) = result else {
+        return false;
+    };
+    if index >= candidates.len() {
+        return false;
+    }
+    let selected = candidates.swap_remove(index);
+    candidates.clear();
+    candidates.push(selected);
+    true
 }
 
 fn routing_state(body: &Value) -> Value {
@@ -329,6 +336,25 @@ mod tests {
             1
         );
         server.abort();
+    }
+
+    #[test]
+    fn unavailable_jev_preserves_candidates_for_normal_routing() {
+        let mut candidates = vec!["primary", "secondary"];
+
+        assert!(!apply_choice(
+            &mut candidates,
+            Err(GatewayError::ProviderUnavailable)
+        ));
+        assert_eq!(candidates, ["primary", "secondary"]);
+    }
+
+    #[test]
+    fn available_jev_keeps_only_its_selected_candidate() {
+        let mut candidates = vec!["primary", "secondary"];
+
+        assert!(apply_choice(&mut candidates, Ok(1)));
+        assert_eq!(candidates, ["secondary"]);
     }
 
     #[test]
