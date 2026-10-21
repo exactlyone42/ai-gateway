@@ -16,7 +16,7 @@ jobs:
   rust:
     runs-on: [self-hosted, Linux, X64, agent-pool-gateway]
     env:
-      DATABASE_URL: postgres://gateway:gateway-dev@127.0.0.1:15432/gateway
+      DATABASE_URL: postgres://gateway:gateway-dev@127.0.0.1:15432/gateway_classification_push_20261021
       RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v5
