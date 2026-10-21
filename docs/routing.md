@@ -39,10 +39,12 @@ deferred.
 
 ## Health and audit
 
-HTTP 408, 429, 500, 502, 503, 504, transport unavailability, body transport
+HTTP 408, 500, 502, 503, 504, transport unavailability, body transport
 failure, and explicit Provider failure are transient health signals. A completed
 request clears the consecutive-failure score. Cancellation does not penalize a
-Provider because it may be caused by the client.
+Provider because it may be caused by the client. HTTP 429 is returned to the
+caller but does not open the Gateway circuit: the Provider owns its rate limit,
+and one rejection must not turn later requests into Gateway-generated 503s.
 
 The durable policy snapshot stores `routing.attempt_kind=initial`, the selected
 reason (`registry`, `health`, `load`, `cost`, `quota`, or `quality`), and

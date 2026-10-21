@@ -631,6 +631,8 @@ pub async fn models(
             "description": model.description,
             "context_window": model.context_window,
             "max_output_tokens": model.max_output_tokens,
+            "stream_idle_timeout_ms": 600000,
+            "stream_max_retries": 0,
             "capabilities": {
                 "streaming": model.supports_streaming,
                 "tools": model.supports_tools,
