@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-pool-gateway]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -29,4 +29,13 @@ jobs:
       - run: npm ci --prefix web
       # Single source of truth for the gates, shared with local development.
       # See docs/engineering-standards.md section 0.
-      - run: ./scripts/check.sh all
+      - name: Run full checks
+        env:
+          PGHOST: github-runner-agent-pool-gateway-db
+          PGUSER: gateway
+          PGPASSWORD: ${{ secrets.RUNNER_DB_PASSWORD }}
+        run: |
+          database="ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          createdb "$database"
+          trap 'dropdb --if-exists "$database"' EXIT
+          DATABASE_URL="postgres://gateway:${PGPASSWORD}@${PGHOST}:5432/${database}" ./scripts/check.sh all
