@@ -160,6 +160,7 @@ mod tests {
             anthropic_request_max_bytes: 32 * 1024 * 1024,
             extra_provider_profiles: Vec::new(),
             stream_event_max_bytes: 32 * 1024 * 1024,
+            stream_heartbeat_interval: Duration::from_secs(30),
             provider_idle_timeout: Duration::from_secs(120),
             provider_connect_timeout: Duration::from_secs(10),
             request_header_max_bytes: 64 * 1024,
@@ -2858,6 +2859,93 @@ mod tests {
 
         state.ledger.wait_for_idle().await;
         drop(log_guard);
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_sends_heartbeat_before_delayed_provider_headers() {
+        let started = Arc::new(Notify::new());
+        let started_by_server = Arc::clone(&started);
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let started = Arc::clone(&started_by_server);
+                async move {
+                    started.notify_one();
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    (
+                        [("content-type", "text/event-stream")],
+                        concat!(
+                            "event: message_start\n",
+                            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_slow\"}}\n\n",
+                            "event: message_stop\n",
+                            "data: {\"type\":\"message_stop\"}\n\n"
+                        ),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        config.stream_heartbeat_interval = Duration::from_millis(30);
+        let spool_dir = config.ledger_spool_dir.clone();
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+
+        let request = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/messages")
+                            .header("x-api-key", "client-key")
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"model":"claude-test","stream":true}"#))
+                            .unwrap(),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("gateway did not call the provider");
+        let response = tokio::time::timeout(Duration::from_millis(150), request)
+            .await
+            .expect("gateway did not open the stream before provider headers")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let heartbeat = tokio::time::timeout(Duration::from_millis(100), body.next())
+            .await
+            .expect("gateway did not send a heartbeat")
+            .unwrap()
+            .unwrap();
+        assert_eq!(heartbeat, ": keepalive\n\n");
+        let remainder = tokio::time::timeout(Duration::from_millis(600), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            bytes
+        })
+        .await
+        .expect("provider response did not finish");
+        assert!(
+            String::from_utf8(remainder)
+                .unwrap()
+                .contains("message_stop")
+        );
+
+        state.ledger.wait_for_idle().await;
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
     }

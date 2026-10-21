@@ -108,6 +108,12 @@ wire sidecar preserves the same-dialect request bytes:
   bytes are not released until the durable ledger finish succeeds.
 - Dropping the downstream body drops the owned upstream response body, closing
   the provider connection. No claim is made that provider billing stops.
+- `STREAM_HEARTBEAT_INTERVAL_MS` defaults to 30 seconds and must stay below 60
+  seconds. The gateway emits an SSE comment while waiting for Anthropic
+  response headers and during later provider silence, so clients do not need
+  the provider itself to keep the downstream connection alive. If the provider
+  rejects after the gateway has opened that stream, the rejection is delivered
+  as an Anthropic SSE error because the HTTP status is already committed.
 - `PROVIDER_IDLE_TIMEOUT_MS` limits time between successful upstream reads and
   defaults to 120 seconds. Each successful read resets the timeout, so an
   active long-running stream is not capped by total lifetime. An idle timeout

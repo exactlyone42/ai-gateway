@@ -58,6 +58,7 @@ services:
       ANTHROPIC_PROVIDER: ${ANTHROPIC_PROVIDER:-anthropic}
       ANTHROPIC_REQUEST_MAX_BYTES: ${ANTHROPIC_REQUEST_MAX_BYTES:-33554432}
       STREAM_EVENT_MAX_BYTES: ${STREAM_EVENT_MAX_BYTES:-33554432}
+      STREAM_HEARTBEAT_INTERVAL_MS: ${STREAM_HEARTBEAT_INTERVAL_MS:-}
       # Everything below is forwarded with no default: the gateway treats an
       # empty value as "not set" and uses its own default, so this file never
       # holds a second copy that can drift. docs/operations.md derives the

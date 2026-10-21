@@ -369,7 +369,10 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                     )
                     .map_err(|_| GatewayError::InvalidConfiguration)?,
                 ),
-                state.config.stream_event_max_bytes,
+                crate::services::streaming::RelayLimits {
+                    event_max_bytes: state.config.stream_event_max_bytes,
+                    heartbeat_interval: state.config.stream_heartbeat_interval,
+                },
             )
             .await?
         } else {
@@ -380,7 +383,10 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 model,
                 provider.clone(),
                 request.operation.observer(canonical.source_document())?,
-                state.config.stream_event_max_bytes,
+                crate::services::streaming::RelayLimits {
+                    event_max_bytes: state.config.stream_event_max_bytes,
+                    heartbeat_interval: state.config.stream_heartbeat_interval,
+                },
             )
             .await?
         };

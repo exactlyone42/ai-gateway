@@ -54,6 +54,9 @@ pub struct Config {
     pub extra_provider_profiles: Vec<ExtraProviderProfile>,
     /// Maximum bytes in one decoded SSE event and in the held terminal tail.
     pub stream_event_max_bytes: usize,
+    /// Maximum silence visible to a streaming client while the provider is
+    /// still preparing or producing its response.
+    pub stream_heartbeat_interval: Duration,
     /// Maximum silence between provider response reads. This does not cap the
     /// total lifetime of an active stream.
     pub provider_idle_timeout: Duration,
@@ -154,6 +157,8 @@ pub enum ConfigError {
     InvalidOpenAiRequestLimit(String),
     #[error("invalid STREAM_EVENT_MAX_BYTES: {0}")]
     InvalidStreamEventLimit(String),
+    #[error("invalid STREAM_HEARTBEAT_INTERVAL_MS: {0}")]
+    InvalidStreamHeartbeatInterval(String),
     #[error("invalid PROVIDER_IDLE_TIMEOUT_MS: {0}")]
     InvalidProviderIdleTimeout(String),
     #[error("invalid PROVIDER_CONNECT_TIMEOUT_MS: {0}")]
@@ -268,6 +273,16 @@ impl Config {
             ));
         }
         let provider_idle_timeout = Duration::from_millis(provider_idle_timeout_ms);
+        let stream_heartbeat_interval_ms = setting("STREAM_HEARTBEAT_INTERVAL_MS")
+            .unwrap_or_else(|_| "30000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidStreamHeartbeatInterval(error.to_string()))?;
+        if stream_heartbeat_interval_ms == 0 || stream_heartbeat_interval_ms >= 60_000 {
+            return Err(ConfigError::InvalidStreamHeartbeatInterval(
+                "must be between 1 and 59999".to_owned(),
+            ));
+        }
+        let stream_heartbeat_interval = Duration::from_millis(stream_heartbeat_interval_ms);
         let provider_connect_timeout_ms = setting("PROVIDER_CONNECT_TIMEOUT_MS")
             .unwrap_or_else(|_| "10000".to_owned())
             .parse::<u64>()
@@ -495,6 +510,7 @@ impl Config {
             anthropic_request_max_bytes,
             extra_provider_profiles,
             stream_event_max_bytes,
+            stream_heartbeat_interval,
             provider_idle_timeout,
             provider_connect_timeout,
             request_header_max_bytes,

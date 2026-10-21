@@ -268,15 +268,93 @@ pub(super) async fn proxy(
     reservation
         .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
         .await?;
-    let upstream = match provider::send(
-        &state.client,
-        &profile.base_url,
-        upstream_request,
-        &profile.provider_key,
-        &provider_model,
-    )
-    .await
-    {
+    let send_state = Arc::clone(&state);
+    let send_base_url = profile.base_url.clone();
+    let send_provider = profile.provider_key.clone();
+    let send_model = provider_model.clone();
+    let mut send = Box::pin(async move {
+        provider::send(
+            &send_state.client,
+            &send_base_url,
+            upstream_request,
+            &send_provider,
+            &send_model,
+        )
+        .await
+    });
+    let upstream = tokio::select! {
+        result = &mut send => Some(result),
+        () = tokio::time::sleep(state.config.stream_heartbeat_interval), if is_stream && !translation.translated => None,
+    };
+    if upstream.is_none() {
+        reservation.set_client_first_byte_at(Utc::now());
+        let heartbeat_interval = state.config.stream_heartbeat_interval;
+        let event_max_bytes = state.config.stream_event_max_bytes;
+        let deferred = async_stream::stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n"));
+            let mut heartbeat = tokio::time::interval(heartbeat_interval);
+            heartbeat.tick().await;
+            let upstream = loop {
+                tokio::select! {
+                    result = &mut send => break result,
+                    _ = heartbeat.tick() => {
+                        yield Ok(Bytes::from_static(b": keepalive\n\n"));
+                    }
+                }
+            };
+            match upstream {
+                Ok(response) if response.status().is_success()
+                    && response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("text/event-stream")) =>
+                {
+                    match streaming::relay(
+                        response,
+                        reservation,
+                        attempt,
+                        model,
+                        provider,
+                        MetadataParser::default(),
+                        streaming::RelayLimits {
+                            event_max_bytes,
+                            heartbeat_interval,
+                        },
+                    ).await {
+                        Ok(body) => {
+                            let mut body = body.into_data_stream();
+                            while let Some(item) = body.next().await {
+                                yield item.map_err(std::io::Error::other);
+                            }
+                        }
+                        Err(error) => yield Err(std::io::Error::other(error)),
+                    }
+                }
+                Ok(response) => {
+                    let completed_at = Utc::now();
+                    let status = response.status();
+                    attempt.conclude("failed", Some(status.as_u16().to_string()), completed_at);
+                    if let Err(error) = reservation.finish(completion(status, model, provider, attempt, completed_at)).await {
+                        tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %error);
+                    }
+                    yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream rejected the request after streaming began\"}}\n\n"));
+                }
+                Err(error) => {
+                    let completed_at = Utc::now();
+                    attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
+                    if let Err(finish_error) = reservation.finish(completion(StatusCode::BAD_GATEWAY, model, provider, attempt, completed_at)).await {
+                        tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %finish_error);
+                    }
+                    yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream request failed after streaming began\"}}\n\n"));
+                }
+            }
+        };
+        let mut response = build_response(
+            StatusCode::OK,
+            &translated_stream_headers(),
+            Body::from_stream(deferred),
+        )?;
+        response.extensions_mut().insert(StreamingResponse);
+        return Ok(response);
+    }
+    let upstream = match upstream.ok_or(GatewayError::InvalidConfiguration)? {
         Ok(value) => value,
         Err(error) => {
             let completed_at = Utc::now();
@@ -477,7 +555,10 @@ pub(super) async fn proxy(
                 )
                 .map_err(|_| GatewayError::InvalidConfiguration)?,
             ),
-            state.config.stream_event_max_bytes,
+            streaming::RelayLimits {
+                event_max_bytes: state.config.stream_event_max_bytes,
+                heartbeat_interval: state.config.stream_heartbeat_interval,
+            },
         )
         .await?
     } else {
@@ -488,7 +569,10 @@ pub(super) async fn proxy(
             model,
             provider,
             MetadataParser::default(),
-            state.config.stream_event_max_bytes,
+            streaming::RelayLimits {
+                event_max_bytes: state.config.stream_event_max_bytes,
+                heartbeat_interval: state.config.stream_heartbeat_interval,
+            },
         )
         .await?
     };
