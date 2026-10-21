@@ -92,6 +92,15 @@ impl PreparedProviderRequest {
         &self.plan.path_and_query
     }
 
+    pub(crate) fn parameter_snapshot(&self) -> Result<Value, GatewayError> {
+        let document =
+            serde_json::from_slice(&self.body).map_err(|_| GatewayError::InvalidConfiguration)?;
+        Ok(crate::request_parameters::snapshot(
+            self.plan.operation,
+            &document,
+        ))
+    }
+
     #[cfg(test)]
     pub fn body(&self) -> &Bytes {
         &self.body

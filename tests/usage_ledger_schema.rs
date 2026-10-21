@@ -32,6 +32,50 @@ async fn ledger_schema_is_tenant_safe_idempotent_and_append_only(pool: PgPool) {
     let truncate = sqlx::query("TRUNCATE usage_records").execute(&pool).await;
     assert!(truncate.is_err(), "append-only rows accepted a truncate");
 
+    sqlx::query(
+        "INSERT INTO request_parameter_snapshots \
+         (tenant_id, gateway_request_id, stage, parameters) \
+         VALUES ($1, $2, 'requested', \
+         '{\"schema_version\":1,\"operation\":\"anthropic_messages\",\"message_count\":1}')",
+    )
+    .bind(TENANT)
+    .bind(REQUEST_ONE)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let unsafe_snapshot = sqlx::query(
+        "INSERT INTO request_parameter_snapshots \
+         (tenant_id, gateway_request_id, stage, parameters) \
+         VALUES ($1, $2, 'provider', '{\"prompt\":\"sentinel-secret\"}')",
+    )
+    .bind(TENANT)
+    .bind(REQUEST_ONE)
+    .execute(&pool)
+    .await;
+    assert!(
+        unsafe_snapshot.is_err(),
+        "a non-allowlisted parameter was stored"
+    );
+    let nested_secret = sqlx::query(
+        "INSERT INTO request_parameter_snapshots \
+         (tenant_id, gateway_request_id, stage, parameters) \
+         VALUES ($1, $2, 'provider', \
+         '{\"schema_version\":1,\"operation\":\"anthropic_messages\",\
+           \"reasoning\":{\"secret\":\"sentinel-secret\"}}')",
+    )
+    .bind(TENANT)
+    .bind(REQUEST_ONE)
+    .execute(&pool)
+    .await;
+    assert!(nested_secret.is_err(), "a nested secret field was stored");
+    let update_snapshot = sqlx::query(
+        "UPDATE request_parameter_snapshots SET parameters = '{}' WHERE gateway_request_id = $1",
+    )
+    .bind(REQUEST_ONE)
+    .execute(&pool)
+    .await;
+    assert!(update_snapshot.is_err(), "a parameter snapshot was mutable");
+
     sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'retained')")
         .bind(Uuid::from_u128(8))
         .bind(TENANT)

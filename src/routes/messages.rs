@@ -147,6 +147,8 @@ pub(super) async fn proxy(
             return Err(GatewayError::from(error));
         }
     };
+    let requested_parameters =
+        crate::request_parameters::snapshot(gateway_operation, decoded.document());
     let prepared = request_policy::prepare(&state, &headers, selector, rejection).await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(gateway_operation, decoded.document());
@@ -202,6 +204,7 @@ pub(super) async fn proxy(
             idempotency_key: None,
         },
     )?;
+    let provider_parameters = upstream_request.parameter_snapshot()?;
     let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
     let mut reservation = state
         .ledger
@@ -227,6 +230,7 @@ pub(super) async fn proxy(
             quota_snapshot,
         )
         .await?;
+    reservation.annotate_parameters(requested_parameters, provider_parameters);
     reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(
         operation.name(),

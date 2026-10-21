@@ -52,6 +52,22 @@ tenant-scoped runtime active/queued state plus durable P50/P95, rejected and exp
 Team reporting is unavailable because no team membership exists in the Principal or ledger schema.
 Full spans remain in the configured OTLP backend and are not represented as gateway-persisted data.
 
+## Evidence for improvement claims
+
+Request detail stores two append-only parameter snapshots: `requested` is what the client asked
+for and `provider` is what the gateway actually sent. The allowlist contains model, output limit,
+sampling values, reasoning mode, streaming flags, and counts or lengths for messages, text, tools,
+images, and structured output. It never contains prompt or response text, system instructions,
+tool names or arguments, headers, or credentials. Each snapshot is limited to 4 KiB by PostgreSQL.
+
+An improvement claim must compare fixed time windows or a controlled A/B cohort and report sample
+size alongside the result. Reliability uses completed requests divided by all terminal requests;
+latency reports median and P95 separately; cost uses provider-reported usage when available and
+must state the unreconciled count. Model-routing savings require a priced baseline model and the
+same workload cohort. The gateway must not call an estimate a saving when either price, usage, or
+quality acceptance is missing. Parameter snapshots explain whether a result followed a changed
+model or generation setting; they do not prove response quality by themselves.
+
 ## Browser security
 
 The SPA is served from `/admin/` by the gateway. API routes under `/admin/v1` take precedence.

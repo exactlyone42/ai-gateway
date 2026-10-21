@@ -274,6 +274,14 @@ impl AdminService {
             )
             SELECT jsonb_build_object(
                 'request', to_jsonb(gr) - 'tenant_id',
+                'parameters', jsonb_build_object(
+                    'requested', (SELECT rps.parameters FROM request_parameter_snapshots rps
+                        WHERE rps.tenant_id = $1 AND rps.gateway_request_id = $2
+                          AND rps.stage = 'requested'),
+                    'provider', (SELECT rps.parameters FROM request_parameter_snapshots rps
+                        WHERE rps.tenant_id = $1 AND rps.gateway_request_id = $2
+                          AND rps.stage = 'provider')
+                ),
                 'principal', jsonb_build_object(
                     'user', CASE WHEN u.id IS NULL THEN NULL ELSE jsonb_build_object('id', u.id, 'name', u.display_name) END,
                     'device', CASE WHEN d.id IS NULL THEN NULL ELSE jsonb_build_object('id', d.id, 'name', d.display_name) END,

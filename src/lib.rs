@@ -18,6 +18,7 @@ mod model_registry;
 mod model_sync;
 mod policy;
 mod quota;
+mod request_parameters;
 mod routes;
 mod routing;
 mod scheduler;
