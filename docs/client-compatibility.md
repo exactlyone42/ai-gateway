@@ -15,7 +15,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 
 | Client | 狀態 | 自訂端點 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.267 已通過 |
+| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.306 驗證中 |
 | Codex CLI | supported | `model_providers` | OpenAI Responses | 0.153.0 已通過 |
 | Claude Desktop | pending | Claude apps gateway `/user/bootstrap` | apps gateway 私有協定 | 未做 |
 | VS Code Copilot Chat | supported | Custom Endpoint | Chat/Responses/Messages | 未安裝，未做 |
@@ -63,8 +63,10 @@ Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號�
 bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發現為
 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
 只顯示 id 含 `claude` 或 `anthropic` 的模型。每個模型另回傳
-`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，避免慢回應在 60 秒被誤判斷線，
-也避免 Client 自動重送可能已執行的工作。`x-claude-code-agent-id` 是 agent，不是人。
+`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，避免串流途中被誤判斷線，
+也避免 Client 自動重送可能已執行的工作。Claude Code 2.1.306 的首筆回應另受
+`CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` 控制；長工作需在 Client 設為 `600000`，
+`CLAUDE_STREAM_IDLE_TIMEOUT_MS` 不能取代它。`x-claude-code-agent-id` 是 agent，不是人。
 
 ## Codex CLI
 

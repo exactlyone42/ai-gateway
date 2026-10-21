@@ -35,8 +35,8 @@ if [ "$mode" = all ] || [ "$mode" = claude ]; then command -v claude >/dev/null;
 if [ "$mode" = all ] || [ "$mode" = codex ]; then command -v codex >/dev/null; fi
 if [ "$mode" = all ] || [ "$mode" = claude ]; then
   case "$(claude --version)" in
-    *2.1.267*) ;;
-    *) echo "expected Claude Code 2.1.267; update the versioned evidence first" >&2; exit 1 ;;
+    *2.1.306*) ;;
+    *) echo "expected Claude Code 2.1.306; update the versioned evidence first" >&2; exit 1 ;;
   esac
 fi
 if [ "$mode" = all ] || [ "$mode" = codex ]; then
@@ -72,7 +72,7 @@ cargo build --quiet --manifest-path "$root/Cargo.toml"
 env \
   LISTEN_ADDRESS="127.0.0.1:$gateway_port" \
   DATABASE_URL="$database_url" \
-  DATABASE_MAX_CONNECTIONS=2 \
+  DATABASE_MAX_CONNECTIONS=3 \
   ADMIN_DATABASE_MAX_CONNECTIONS=1 \
   OPENAI_BASE_URL="http://127.0.0.1:$mock_port" \
   OPENAI_API_KEY=fixture-provider-key \
@@ -110,7 +110,7 @@ if [ "$mode" = all ] || [ "$mode" = claude ]; then
       >"$runtime/claude.out"
   grep -Fxq 'W05_CLAUDE_CODE_OK' "$runtime/claude.out"
   diff -u \
-    "$root/tests/fixtures/client-roundtrip/captures/claude-code-2.1.267.json" \
+    "$root/tests/fixtures/client-roundtrip/captures/claude-code-2.1.306.json" \
     "$runtime/captures/claude-code.json"
 fi
 

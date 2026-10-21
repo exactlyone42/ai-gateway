@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use chrono::Utc;
@@ -11,6 +12,12 @@ use crate::{
 };
 
 const DEFAULT_EVENT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub struct RelayLimits {
+    pub event_max_bytes: usize,
+    pub heartbeat_interval: Duration,
+}
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -128,7 +135,7 @@ pub async fn relay<O: StreamObserver>(
     model: String,
     provider: String,
     observer: O,
-    event_max_bytes: usize,
+    limits: RelayLimits,
 ) -> Result<Body, crate::ledger::LedgerError> {
     relay_inner(
         response,
@@ -140,7 +147,7 @@ pub async fn relay<O: StreamObserver>(
             observer,
             encoder: None,
         },
-        event_max_bytes,
+        limits,
     )
     .await
 }
@@ -152,7 +159,7 @@ pub async fn relay_transcoded<O: StreamObserver, E: StreamEncoder>(
     model: String,
     provider: String,
     transcoder: (O, E),
-    event_max_bytes: usize,
+    limits: RelayLimits,
 ) -> Result<Body, crate::ledger::LedgerError> {
     relay_inner(
         response,
@@ -164,7 +171,7 @@ pub async fn relay_transcoded<O: StreamObserver, E: StreamEncoder>(
             observer: transcoder.0,
             encoder: Some(Box::new(transcoder.1)),
         },
-        event_max_bytes,
+        limits,
     )
     .await
 }
@@ -176,7 +183,7 @@ async fn relay_inner<O: StreamObserver>(
     model: String,
     provider: String,
     mut protocol: RelayProtocol<O>,
-    event_max_bytes: usize,
+    limits: RelayLimits,
 ) -> Result<Body, crate::ledger::LedgerError> {
     // The stream owns provider capacity until its final frame is yielded or the
     // client drops the body. Ledger completion can happen before that yield.
@@ -194,7 +201,7 @@ async fn relay_inner<O: StreamObserver>(
     let stream = async_stream::stream! {
         let _scheduler_lease = scheduler_lease;
         let mut upstream = response.bytes_stream();
-        let mut decoder = EventDecoder::new(event_max_bytes);
+        let mut decoder = EventDecoder::new(limits.event_max_bytes);
         let mut reservation = Some(reservation);
         let mut attempt = attempt;
         let mut first_provider_byte = false;
@@ -204,19 +211,30 @@ async fn relay_inner<O: StreamObserver>(
         let mut holding_terminal = false;
         let translated = protocol.encoder.is_some();
         let response_max_bytes = if translated {
-            event_max_bytes.saturating_mul(8)
+            limits.event_max_bytes.saturating_mul(8)
         } else {
             usize::MAX
         };
         let terminal_max_bytes = if translated {
             response_max_bytes
         } else {
-            event_max_bytes
+            limits.event_max_bytes
         };
         let mut provider_bytes = 0usize;
         let mut client_bytes = 0usize;
+        let mut heartbeat = tokio::time::interval(limits.heartbeat_interval);
+        heartbeat.tick().await;
 
-        while let Some(item) = upstream.next().await {
+        loop {
+            let item = tokio::select! {
+                item = upstream.next() => item,
+                _ = heartbeat.tick() => {
+                    mark_client_first_byte(&mut reservation, &mut first_client_byte);
+                    yield Ok::<Bytes, io::Error>(Bytes::from_static(b": keepalive\n\n"));
+                    continue;
+                }
+            };
+            let Some(item) = item else { break; };
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error) => {

@@ -141,6 +141,9 @@ per-protocol limits. Provider DNS/connect/TLS setup is bounded by
 `PROVIDER_CONNECT_TIMEOUT_MS`; provider headers and each later stream read are
 bounded by `PROVIDER_IDLE_TIMEOUT_MS`. None of these paths retries a provider
 request.
+Streaming clients receive a gateway SSE heartbeat every
+`STREAM_HEARTBEAT_INTERVAL_MS` (30 seconds by default), including while the
+gateway is still waiting for Anthropic response headers.
 
 ## Alerts
 
