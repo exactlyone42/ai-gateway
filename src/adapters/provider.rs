@@ -471,9 +471,14 @@ impl ProviderAdapter for AnthropicProviderAdapter {
     }
 
     fn allows_client_header(&self, name: &HeaderName) -> bool {
+        let text = name.as_str();
         name == header::CONTENT_TYPE
             || name == header::ACCEPT
-            || name.as_str().starts_with("anthropic-")
+            || text.starts_with("anthropic-")
+            || matches!(
+                text,
+                "x-claude-code-session-id" | "x-stainless-retry-count" | "x-cc-original-request-id"
+            )
     }
 
     fn encode_canonical(
@@ -1330,6 +1335,54 @@ mod tests {
         assert_eq!(
             prepared.headers().get("anthropic-beta").unwrap(),
             "claude-code-20250219,oauth-2025-04-20"
+        );
+    }
+
+    #[test]
+    fn anthropic_preserves_claude_code_retry_identity_headers() {
+        let adapter = for_kind(ProviderKind::Anthropic).unwrap();
+        let profile = profile(ProviderKind::Anthropic, true);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-claude-code-session-id", "session-one".parse().unwrap());
+        headers.insert("x-stainless-retry-count", "2".parse().unwrap());
+        headers.insert("x-cc-original-request-id", "request-one".parse().unwrap());
+        headers.insert("x-untrusted-client-metadata", "blocked".parse().unwrap());
+        let input = ProviderRequestInput {
+            source_path_and_query: "/v1/messages",
+            client_headers: &headers,
+            idempotency_key: None,
+        };
+        let plan = adapter
+            .plan_for_target(
+                GatewayOperation::AnthropicMessages,
+                GatewayOperation::AnthropicMessages,
+                "provider-model",
+                true,
+                &input,
+            )
+            .unwrap();
+
+        let prepared = adapter
+            .stream(plan, Bytes::from_static(b"{}"), &profile, input)
+            .unwrap();
+
+        assert_eq!(
+            prepared.headers().get("x-claude-code-session-id").unwrap(),
+            "session-one"
+        );
+        assert_eq!(
+            prepared.headers().get("x-stainless-retry-count").unwrap(),
+            "2"
+        );
+        assert_eq!(
+            prepared.headers().get("x-cc-original-request-id").unwrap(),
+            "request-one"
+        );
+        assert!(
+            prepared
+                .headers()
+                .get("x-untrusted-client-metadata")
+                .is_none()
         );
     }
 

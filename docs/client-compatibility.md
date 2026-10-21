@@ -15,7 +15,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 
 | Client | 狀態 | 自訂端點 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.267 已通過 |
+| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.306 驗證中 |
 | Codex CLI | supported | `model_providers` | OpenAI Responses | 0.153.0 已通過 |
 | Claude Desktop | pending | Claude apps gateway `/user/bootstrap` | apps gateway 私有協定 | 未做 |
 | VS Code Copilot Chat | supported | Custom Endpoint | Chat/Responses/Messages | 未安裝，未做 |
