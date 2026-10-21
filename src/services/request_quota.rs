@@ -7,7 +7,7 @@ use crate::{
     canonical::CanonicalRequest,
     error::GatewayError,
     ledger::{RequestStart, TokenUsage},
-    model_registry::{CapabilityRequirements, GatewayOperation},
+    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, QualityTier},
     policy::value_text,
     quota::{QuotaAdmission, QuotaEstimate, QuotaOutcome, QuotaRejection},
     routing::HalfOpenClaim,
@@ -96,12 +96,45 @@ pub async fn admit(
         .await?;
         return Err(GatewayError::ModelForbidden);
     }
-    let use_jev = state.jev.is_some()
-        && prepared.selector.quality().is_some()
-        && operation != GatewayOperation::AnthropicCountTokens;
-    if use_jev && let Some(router) = &state.jev {
-        router.select(&state.client, body, &mut candidates).await?;
-    }
+    let original_candidates = candidates.clone();
+    let routing_reason = if operation != GatewayOperation::AnthropicCountTokens
+        && let Some(router) = &state.jev
+    {
+        let mut routing_candidates = if prepared.selector.quality().is_some() {
+            candidates
+        } else {
+            state
+                .models
+                .candidates(
+                    prepared.rejection.principal.tenant_id,
+                    prepared.rejection.principal.is_development_bootstrap(),
+                    operation,
+                    ModelSelector::Quality(QualityTier::Premium),
+                    required,
+                )
+                .await
+                .unwrap_or_default()
+        };
+        routing_candidates.retain(|candidate| {
+            prepared.policy.allows_model(&candidate.public_model_id)
+                && validate_for_provider(request, candidate).is_ok()
+        });
+        let reason = if routing_candidates.is_empty() {
+            None
+        } else {
+            router
+                .select(&state.client, body, &mut routing_candidates)
+                .await
+        };
+        if reason.is_some() {
+            candidates = routing_candidates;
+        } else {
+            candidates = original_candidates;
+        }
+        reason
+    } else {
+        None
+    };
     let mut ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
@@ -127,11 +160,8 @@ pub async fn admit(
             .ok_or(GatewayError::ModelForbidden)?;
         selection.record_selected();
         let translation = validate_for_provider(request, &selection)?;
-        let routing_reason = if use_jev {
-            "jev"
-        } else {
-            ranked.reason_for(&selection, state.routing.quota_aware())
-        };
+        let routing_reason = routing_reason
+            .unwrap_or_else(|| ranked.reason_for(&selection, state.routing.quota_aware()));
         let routing_claim = ranked.take_claim_for(&selection);
         return Ok(PreparedQuota {
             routing_reason,
@@ -172,11 +202,9 @@ pub async fn admit(
         QuotaOutcome::Allowed(admission) => {
             admission.selection.record_selected();
             let translation = validate_for_provider(request, &admission.selection)?;
-            let routing_reason = if use_jev {
-                "jev"
-            } else {
+            let routing_reason = routing_reason.unwrap_or_else(|| {
                 ranked.reason_for(&admission.selection, state.routing.quota_aware())
-            };
+            });
             let routing_claim = ranked.take_claim_for(&admission.selection);
             Ok(PreparedQuota {
                 routing_reason,
