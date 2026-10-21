@@ -180,6 +180,7 @@ pub(super) async fn proxy(
     .await?;
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
+    let task_routing = prepared_quota.task_routing;
     let translation = prepared_quota.translation;
     let crate::quota::QuotaAdmission {
         selection,
@@ -222,7 +223,12 @@ pub(super) async fn proxy(
                     .as_ref()
                     .map(request_quota::estimated_tokens),
                 selection: selection_snapshot.clone(),
-                policy: Some(policy.ledger_snapshot().with_routing(routing_reason)),
+                policy: Some(
+                    policy
+                        .ledger_snapshot()
+                        .with_routing(routing_reason)
+                        .with_task_routing(task_routing),
+                ),
                 principal: principal.clone(),
                 created_at: received_at,
             },

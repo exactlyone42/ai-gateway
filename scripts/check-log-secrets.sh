@@ -32,6 +32,7 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
 cargo build --quiet
+binary="${CARGO_TARGET_DIR:-target}/debug/agent-pool-gateway"
 
 # The gateway runs its migrations at startup, so booting it for real now needs
 # a real database. Docker does the waiting through the compose health check --
@@ -58,7 +59,7 @@ CREDENTIAL_HASH_KEY="$credential_hash_key" \
 CREDENTIAL_HASH_KEY_ID="v2" \
 CREDENTIAL_RETIRING_HASH_KEYS="v1=$retiring_hash_key" \
 ALLOWED_MODELS="company-default" \
-  ./target/debug/agent-pool-gateway >"$log" 2>&1 &
+  "$binary" >"$log" 2>&1 &
 pid=$!
 # shellcheck disable=SC2064
 trap "kill $pid 2>/dev/null || true; rm -f '$log'" EXIT
