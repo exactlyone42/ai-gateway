@@ -977,9 +977,6 @@ fn load_jev() -> Result<Option<crate::jev::JevConfig>, ConfigError> {
     Ok(Some(crate::jev::JevConfig {
         api_key,
         model,
-        qwen_url: setting("QWEN_ROUTER_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434/api/chat".into()),
-        qwen_model: setting("QWEN_ROUTER_MODEL").unwrap_or_else(|_| "qwen3.8:27b".into()),
         descriptions,
     }))
 }

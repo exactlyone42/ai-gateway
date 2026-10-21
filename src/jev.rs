@@ -11,8 +11,6 @@ use crate::{error::GatewayError, model_registry::ModelSelection};
 pub struct JevConfig {
     pub api_key: String,
     pub model: String,
-    pub qwen_url: String,
-    pub qwen_model: String,
     pub descriptions: BTreeMap<String, String>,
 }
 
@@ -66,59 +64,7 @@ impl JevRouter {
         if apply_choice(candidates, result) {
             return Some("jev");
         }
-        let result = self.decide_with_qwen(client, &state, &criteria).await;
-        if apply_choice(candidates, result) {
-            Some("qwen")
-        } else {
-            tracing::warn!(
-                event.name = "qwen.routing_failed",
-                "local routing failed; the caller's requested model will be used"
-            );
-            None
-        }
-    }
-
-    async fn decide_with_qwen(
-        &self,
-        client: &Client,
-        state: &Value,
-        criteria: &BTreeMap<String, String>,
-    ) -> Result<usize, GatewayError> {
-        let payload = json!({
-            "model": self.config.qwen_model,
-            "stream": false,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": "Choose the best model. Return only JSON: {\"route\":\"candidate number\"}. Use only a supplied candidate number."},
-                {"role": "user", "content": json!({"state": state, "candidates": criteria}).to_string()}
-            ]
-        });
-        let response = tokio::time::timeout(
-            Duration::from_secs(60),
-            client.post(&self.config.qwen_url).json(&payload).send(),
-        )
-        .await
-        .map_err(|_| GatewayError::ProviderUnavailable)?
-        .map_err(|_| GatewayError::ProviderUnavailable)?;
-        if !response.status().is_success() {
-            return Err(GatewayError::ProviderUnavailable);
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|_| GatewayError::UpstreamProtocol)?;
-        let content = value["message"]["content"]
-            .as_str()
-            .ok_or(GatewayError::UpstreamProtocol)?;
-        let answer: Value =
-            serde_json::from_str(content).map_err(|_| GatewayError::UpstreamProtocol)?;
-        let choice = answer["route"]
-            .as_str()
-            .ok_or(GatewayError::UpstreamProtocol)?;
-        if !criteria.contains_key(choice) {
-            return Err(GatewayError::UpstreamProtocol);
-        }
-        choice.parse().map_err(|_| GatewayError::UpstreamProtocol)
+        None
     }
 
     async fn decide(
@@ -178,7 +124,7 @@ impl JevRouter {
         if result.is_err() {
             tracing::warn!(
                 event.name = "jev.routing_failed",
-                "Jev routing failed; local Qwen routing will be tried"
+                "Jev routing failed; the caller's requested model will be used"
             );
         }
         result
@@ -304,8 +250,6 @@ mod tests {
         let router = JevRouter::new(JevConfig {
             api_key: "test-secret".into(),
             model: "test-version".into(),
-            qwen_url: "http://127.0.0.1:1/api/chat".into(),
-            qwen_model: "qwen-test".into(),
             descriptions: BTreeMap::new(),
         });
         let client = Client::builder()
@@ -347,33 +291,6 @@ mod tests {
         json!({"answers":{"route":{"type":"choice","choice":choice,"confidence":confidence}}})
     }
 
-    #[tokio::test]
-    async fn qwen_returns_a_bounded_candidate_choice() {
-        let app = Router::new().route(
-            "/api/chat",
-            post(|| async { Json(json!({"message":{"content":"{\"route\":\"1\"}"}})) }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/api/chat", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let router = JevRouter::new(JevConfig {
-            api_key: "test-secret".into(),
-            model: "test-version".into(),
-            qwen_url: endpoint,
-            qwen_model: "qwen-test".into(),
-            descriptions: BTreeMap::new(),
-        });
-
-        assert_eq!(
-            router
-                .decide_with_qwen(&Client::new(), &json!({"messages": []}), &criteria())
-                .await
-                .unwrap(),
-            1
-        );
-        server.abort();
-    }
-
     #[test]
     fn rejects_unknown_low_confidence_and_malformed_choices() {
         assert_eq!(parse_choice(&answer("1", 0.9), &criteria()).unwrap(), 1);
@@ -412,8 +329,6 @@ mod tests {
         let router = JevRouter::new(JevConfig {
             api_key: "test-secret".into(),
             model: "test-version".into(),
-            qwen_url: "http://127.0.0.1:1/api/chat".into(),
-            qwen_model: "qwen-test".into(),
             descriptions: BTreeMap::new(),
         });
         let body = json!({"messages":[{"role":"user","content":"Earlier request"},{"role":"user","content":"Continue"}]});
