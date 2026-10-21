@@ -191,6 +191,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     .await?;
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
+    let task_routing = prepared_quota.task_routing;
     let translation = prepared_quota.translation;
     let response_max_bytes = if translation.translated {
         state.config.stream_event_max_bytes.saturating_mul(8)
@@ -235,7 +236,12 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 budget_class: Some(canonical.budget_class.clone()),
                 estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
                 selection: selection_snapshot.clone(),
-                policy: Some(policy.ledger_snapshot().with_routing(routing_reason)),
+                policy: Some(
+                    policy
+                        .ledger_snapshot()
+                        .with_routing(routing_reason)
+                        .with_task_routing(task_routing),
+                ),
                 principal: request.principal.clone(),
                 created_at: request.received_at,
             },

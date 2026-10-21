@@ -119,6 +119,15 @@ impl RequestPolicySnapshot {
         }
         self
     }
+
+    pub fn with_task_routing(mut self, task_routing: Value) -> Self {
+        if let Value::Object(decision) = &mut self.decision
+            && let Some(Value::Object(routing)) = decision.get_mut("routing")
+        {
+            routing.insert("task_classification".to_owned(), task_routing);
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -1110,15 +1119,22 @@ impl RequestEnvelope {
             })
             .collect();
 
-        self.request.gateway_overhead_ms = self
-            .request
-            .client_first_byte_at
-            .zip(
-                self.attempts
-                    .first()
-                    .and_then(|attempt| attempt.provider_first_byte_at),
-            )
-            .map(|(client, provider)| (client - provider).num_milliseconds());
+        self.request.gateway_overhead_ms = self.attempts.first().and_then(|attempt| {
+            let request_processing = self
+                .request
+                .request_received_at
+                .zip(attempt.provider_request_at)
+                .map(|(received, provider)| {
+                    (provider - received).num_milliseconds().max(0)
+                        - self.request.queue_duration_ms.unwrap_or(0).max(0)
+                })?;
+            let response_processing = self
+                .request
+                .client_first_byte_at
+                .zip(attempt.provider_first_byte_at)
+                .map(|(client, provider)| (client - provider).num_milliseconds().max(0))?;
+            Some(request_processing.max(0) + response_processing)
+        });
 
         self.usage_records.clear();
         for attempt in &self.attempts {
@@ -1675,6 +1691,63 @@ mod tests {
     }
 
     #[test]
+    fn task_routing_is_nested_under_the_routing_decision() {
+        let snapshot = RequestPolicySnapshot::unevaluated("test")
+            .with_routing("jev")
+            .with_task_routing(serde_json::json!({
+                "original_model": "client-model",
+                "final_model": "reviewed-model",
+                "classification": {"task": "debugging", "confidence": 0.9}
+            }));
+
+        assert_eq!(
+            snapshot.decision["routing"]["task_classification"]["original_model"],
+            "client-model"
+        );
+        assert_eq!(
+            snapshot.decision["routing"]["task_classification"]["classification"]["task"],
+            "debugging"
+        );
+    }
+
+    #[test]
+    fn gateway_overhead_excludes_queue_and_provider_time() {
+        let received_at = Utc::now();
+        let mut start = request_start("gateway-overhead");
+        start.created_at = received_at;
+        let mut envelope = RequestEnvelope::started(start);
+        envelope.request.queue_duration_ms = Some(40);
+        envelope.request.client_first_byte_at =
+            Some(received_at + chrono::Duration::milliseconds(230));
+
+        let provider_request_at = received_at + chrono::Duration::milliseconds(100);
+        let mut attempt = ProviderAttempt::begin(
+            "test-provider".to_owned(),
+            "company-default".to_owned(),
+            None,
+            provider_request_at,
+            TokenUsage::default(),
+        );
+        attempt.observe_first_byte(received_at + chrono::Duration::milliseconds(200));
+        attempt.conclude(
+            "completed",
+            None,
+            received_at + chrono::Duration::milliseconds(500),
+        );
+
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: Some("company-default".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: vec![attempt],
+            completed_at: received_at + chrono::Duration::milliseconds(500),
+        });
+
+        assert_eq!(envelope.request.gateway_overhead_ms, Some(90));
+        assert_eq!(envelope.request.total_latency_ms, Some(500));
+    }
+
+    #[test]
     fn startup_recovers_each_side_of_the_completion_rename() {
         let interrupted_directory = test_directory("interrupted-workspace");
         let interrupted = Spool::open(
@@ -2123,6 +2196,15 @@ mod tests {
         let directory = test_directory("recovery");
         let spool = Spool::open(directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         let mut envelope = RequestEnvelope::started(request_start("recovery-request"));
+        envelope.request.policy_decision = Some(
+            RequestPolicySnapshot::unevaluated("test")
+                .with_routing("jev")
+                .with_task_routing(serde_json::json!({
+                    "original_model": "client-model",
+                    "final_model": "reviewed-model"
+                }))
+                .decision,
+        );
         let request_id = envelope.request.id;
         spool.reserve(request_id, &envelope).unwrap();
         envelope.request.requested_parameters = Some(serde_json::json!({
@@ -2221,7 +2303,9 @@ mod tests {
                 (SELECT count(*) FROM request_parameter_snapshots) AS parameter_snapshots,
                 (SELECT cached_input_tokens FROM usage_records) AS cached,
                 (SELECT cache_write_input_tokens FROM usage_records) AS cache_write,
-                (SELECT reasoning_tokens FROM usage_records) AS reasoning
+                (SELECT reasoning_tokens FROM usage_records) AS reasoning,
+                (SELECT policy_decision->'routing'->'task_classification'->>'original_model'
+                 FROM gateway_requests WHERE request_id = 'recovery-request') AS original_model
             "#,
         )
         .fetch_one(&pool)
@@ -2234,6 +2318,7 @@ mod tests {
         assert_eq!(row.get::<i64, _>("cached"), 4);
         assert_eq!(row.get::<i64, _>("cache_write"), 2);
         assert_eq!(row.get::<i64, _>("reasoning"), 1);
+        assert_eq!(row.get::<String, _>("original_model"), "client-model");
 
         recovered
             .inner

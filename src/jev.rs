@@ -386,6 +386,17 @@ mod tests {
     }
 
     #[test]
+    fn no_jev_opinion_preserves_the_client_model() {
+        for invalid in [answer("0", 0.2), answer("unknown", 1.0), json!({})] {
+            let mut candidates = vec!["client-model", "shortlisted-alternative"];
+            let result = parse_choice(&invalid, &criteria());
+
+            assert!(!apply_choice(&mut candidates, result));
+            assert_eq!(candidates[0], "client-model");
+        }
+    }
+
+    #[test]
     fn available_jev_prioritizes_its_choice_without_hiding_fallbacks() {
         let mut candidates = vec!["primary", "secondary"];
 
