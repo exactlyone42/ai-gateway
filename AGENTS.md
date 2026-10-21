@@ -9,11 +9,14 @@
 | 看板 | DnaBoss Project **#2** `Agent Pool Gateway`（`PROJECT_NUMBER=2`、狀態欄位 `Workflow`） |
 | loop 檔 | `loops/<slug>.loop.md`，索引 `loops/README.md` |
 | 分支 | `feature/<slug>`，off `dev` |
-| 整合分支 | `dev`；`main` = 正式（合 `main` 才部署） |
-| merge gate | AI 可自行合 `dev`。合 `main` 需 CI 全綠 ＋ 該段落 loop 的完成判準全綠 |
+| 整合與部署分支 | `dev`；每個任務完成並合入 `dev` 後立即部署目前服務 |
+| merge gate | `./scripts/check.sh all` 本機全綠且 PR 可合即可合併；GitHub Actions、看板同步、額度或排隊狀態只作參考，不得阻擋合併與部署 |
 | 迭代檢查 | `./scripts/check.sh gate` |
 | PR 前檢查 | `./scripts/check.sh all` |
 | 記帳 | `docs/task-ledger.md`，由 `./scripts/token-ledger.sh` 產生 |
+
+完成任務的固定收尾是：本機完整檢查 → 合入 `dev` → 立即部署 → 驗證 `/health`、`/ready` 與線上版本。
+不等待 GitHub CI、看板或額外人工核准；部署失敗仍須依部署腳本自動回退並如實回報。
 
 ## 文件索引（遇到什麼問題才讀，不要一開始全載）
 

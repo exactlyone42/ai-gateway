@@ -316,8 +316,9 @@ Provider API secret、閘道金鑰（明文或雜湊）、密碼、access token�
 | 開分支後 | **立刻 `git push -u` 並開 draft PR**（base=`dev`，標題掛卡號） |
 | Commit | Conventional Commits（`feat:`／`fix:`／`docs:`／`refactor:`／`chore:`）。每個 commit 獨立可編譯 |
 | 行為保持的重構 | 與功能變更**分開提交** |
-| 合 `dev` | AI 可自行合，需 `check.sh all` 全綠 |
-| 合 `main` | ＝部署正式。需 CI 全綠 ＋ 該段落 loop 的完成判準全綠 |
+| 合 `dev` | `check.sh all` 本機全綠且 GitHub 顯示可合就直接合；外部 CI／看板狀態不構成門檻 |
+| 部署 | 每個任務合入 `dev` 後立即部署，並驗 `/health`、`/ready` 與版本；不再等 `main`、GitHub CI 或人工核准 |
+| 合 `main` | 發布標記用途，不是日常部署門檻 |
 | 看板 | DnaBoss Project #2，狀態欄位叫 `Workflow`（不是 `Status`），由 `scripts/board-sync.sh` 自動只往前推進 |
 
 **為什麼開分支就要推**：分支只在本機時，其他 session 查 `gh pr list` 看到的是「這張卡沒人做」，
