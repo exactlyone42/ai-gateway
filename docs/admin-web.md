@@ -21,8 +21,7 @@ Usage selects one canonical row per provider attempt: `provider_reported` first,
 | Total tokens | `total_tokens` | canonical input + output | 0 |
 | Cache read | `cached_input_tokens` | canonical usage | 0 |
 | Cache write | `cache_write_input_tokens` | canonical usage | 0 |
-| P95 latency | `p95_latency_ms` | completed request latency | unavailable when absent |
-| P95 TTFT | `p95_ttft_ms` | provider attempt TTFT | unavailable when absent |
+| P95 Gateway processing | `p95_gateway_overhead_ms` | Gateway request processing plus first response processing, excluding queue and provider time | unavailable when absent |
 | Cost | `cost_microusd` | canonical usage cost | unavailable with reason until pricing is active |
 
 Queue state is adjacent operational status, not an invented eleventh metric. W13 supplies
@@ -35,8 +34,8 @@ tenant-scoped runtime active/queued state plus durable P50/P95, rejected and exp
 | 1 | Is request traffic arriving? | Overview `requests` |
 | 2 | What share succeeds? | Overview `success_rate` |
 | 3 | How many requests are unsuccessful? | Overview `unsuccessful_requests` |
-| 4 | Is end-to-end latency degrading? | Overview `p95_latency_ms` |
-| 5 | Is provider first-token latency degrading? | Overview `p95_ttft_ms` |
+| 4 | Is Gateway processing time degrading? | Overview `p95_gateway_overhead_ms` |
+| 5 | Is provider first-token latency degrading? | Request/provider attempt detail |
 | 6 | How many tokens are consumed? | Overview totals and Usage groups |
 | 7 | How much usage is estimated? | Overview and Usage `unreconciled_attempts` |
 | 8 | What does usage cost? | Cost or an explicit unavailable reason |

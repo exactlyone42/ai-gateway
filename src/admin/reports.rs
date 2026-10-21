@@ -64,6 +64,9 @@ impl AdminService {
                        percentile_cont(0.95) WITHIN GROUP (
                            ORDER BY extract(epoch FROM total_latency) * 1000
                        ) FILTER (WHERE total_latency IS NOT NULL) AS p95_latency_ms,
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY extract(epoch FROM gateway_overhead) * 1000
+                       ) FILTER (WHERE gateway_overhead IS NOT NULL) AS p95_gateway_overhead_ms,
                        percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
                          FILTER (WHERE queue_duration IS NOT NULL) AS queue_p50_ms,
                        percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
@@ -100,6 +103,7 @@ impl AdminService {
                 'cached_input_tokens', us.cached_input_tokens,
                 'cache_write_input_tokens', us.cache_write_input_tokens,
                 'p95_latency_ms', rs.p95_latency_ms,
+                'p95_gateway_overhead_ms', rs.p95_gateway_overhead_ms,
                 'p95_ttft_ms', ats.p95_ttft_ms,
                 'cost_microusd', us.cost_microusd,
                 'unreconciled_attempts', us.unreconciled,
@@ -896,23 +900,23 @@ mod tests {
                 INSERT INTO gateway_requests (
                     id, tenant_id, request_id, requested_model, selected_model,
                     selected_provider, status, created_at, started_at, completed_at,
-                    operation, request_received_at, total_latency
+                    operation, request_received_at, total_latency, gateway_overhead
                 ) VALUES (
                     $1, $5, 'request-one', 'model-one', 'model-one', 'provider-one',
                     'completed', now() - interval '1 minute', now() - interval '1 minute',
                     now() - interval '59 seconds', 'responses', now() - interval '1 minute',
-                    interval '1 second'
+                    interval '1 second', interval '40 milliseconds'
                 ) RETURNING id
             ), second_request AS (
                 INSERT INTO gateway_requests (
                     id, tenant_id, request_id, requested_model, selected_model,
                     selected_provider, status, created_at, started_at, completed_at,
-                    operation, request_received_at, total_latency
+                    operation, request_received_at, total_latency, gateway_overhead
                 ) VALUES (
                     $2, $5, 'request-two', 'model-two', 'model-two', 'provider-two',
                     'failed', now() - interval '1 minute', now() - interval '1 minute',
                     now() - interval '59 seconds', 'messages', now() - interval '1 minute',
-                    interval '1 second'
+                    interval '1 second', interval '20 milliseconds'
                 ) RETURNING id
             ), other_request AS (
                 INSERT INTO gateway_requests (
@@ -1009,6 +1013,7 @@ mod tests {
         assert_eq!(overview["requests"], 2);
         assert_eq!(overview["input_tokens"], 17);
         assert_eq!(overview["output_tokens"], 8);
+        assert_eq!(overview["p95_gateway_overhead_ms"], 39.0);
         assert_eq!(overview["unreconciled_attempts"], 1);
         assert!(overview["cost_microusd"].is_null());
         assert_eq!(overview["queue"]["available"], false);
