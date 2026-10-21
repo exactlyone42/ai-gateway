@@ -63,6 +63,9 @@ pub async fn refresh(pool: &PgPool, client: &Client) -> Result<usize, sqlx::Erro
             ),
         }
     }
+    sqlx::query("SELECT seed_model_task_profiles()")
+        .execute(pool)
+        .await?;
     tracing::info!(
         event.name = "model_catalog.refreshed",
         models = total,

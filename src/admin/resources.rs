@@ -26,6 +26,8 @@ pub enum ResourceKind {
     Providers,
     Models,
     ModelAliases,
+    ModelTaskProfiles,
+    TaskClassifierConfigs,
     Policies,
     Quotas,
 }
@@ -55,6 +57,8 @@ impl FromStr for ResourceKind {
             "providers" => Ok(Self::Providers),
             "models" => Ok(Self::Models),
             "model-aliases" => Ok(Self::ModelAliases),
+            "model-task-profiles" => Ok(Self::ModelTaskProfiles),
+            "task-classifier-configs" => Ok(Self::TaskClassifierConfigs),
             "policies" => Ok(Self::Policies),
             "quotas" => Ok(Self::Quotas),
             _ => Err(AdminError::NotFound),
@@ -73,6 +77,8 @@ impl ResourceKind {
             Self::Providers => "providers",
             Self::Models => "models",
             Self::ModelAliases => "model-aliases",
+            Self::ModelTaskProfiles => "model-task-profiles",
+            Self::TaskClassifierConfigs => "task-classifier-configs",
             Self::Policies => "policies",
             Self::Quotas => "quotas",
         }
@@ -88,6 +94,8 @@ impl ResourceKind {
             Self::Providers => "provider",
             Self::Models => "model",
             Self::ModelAliases => "model_alias",
+            Self::ModelTaskProfiles => "model_task_profile",
+            Self::TaskClassifierConfigs => "task_classifier_config",
             Self::Policies => "policy",
             Self::Quotas => "quota",
         }
@@ -119,6 +127,8 @@ const LIST_RESOURCES: &str = r#"
         UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers
         UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models
         UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases
+        UNION ALL SELECT 'model-task-profiles', id, tenant_id, to_jsonb(model_task_profiles) FROM model_task_profiles
+        UNION ALL SELECT 'task-classifier-configs', id, tenant_id, to_jsonb(task_classifier_configs) FROM task_classifier_configs
         UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies
         UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas
     ) resources
@@ -137,6 +147,8 @@ const GET_RESOURCE: &str = r#"
         UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers
         UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models
         UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases
+        UNION ALL SELECT 'model-task-profiles', id, tenant_id, to_jsonb(model_task_profiles) FROM model_task_profiles
+        UNION ALL SELECT 'task-classifier-configs', id, tenant_id, to_jsonb(task_classifier_configs) FROM task_classifier_configs
         UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies
         UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas
     ) resources
@@ -243,6 +255,29 @@ struct ModelAliasCreate {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ModelTaskProfileCreate {
+    model_id: Uuid,
+    taxonomy_version: String,
+    task_kind: String,
+    suitability_score: i16,
+    confidence: f64,
+    source: String,
+    source_ref: Option<String>,
+    rationale: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskClassifierConfigCreate {
+    taxonomy_version: String,
+    classifier_model_id: Option<Uuid>,
+    mode: String,
+    minimum_confidence: f64,
+    timeout_ms: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyCreate {
     policy_key: String,
     revision: i64,
@@ -327,6 +362,28 @@ struct ModelAliasPatch {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ModelTaskProfilePatch {
+    version: i64,
+    suitability_score: Option<i16>,
+    confidence: Option<f64>,
+    source: Option<String>,
+    source_ref: Option<String>,
+    rationale: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskClassifierConfigPatch {
+    version: i64,
+    taxonomy_version: Option<String>,
+    classifier_model_id: Option<Uuid>,
+    mode: Option<String>,
+    minimum_confidence: Option<f64>,
+    timeout_ms: Option<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigurationPatch {
     version: i64,
     configuration: serde_json::Map<String, Value>,
@@ -372,6 +429,12 @@ impl AdminService {
             }
             ResourceKind::ModelAliases => {
                 "SELECT to_jsonb(model_aliases) FROM model_aliases WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
+            }
+            ResourceKind::ModelTaskProfiles => {
+                "SELECT to_jsonb(model_task_profiles) FROM model_task_profiles WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
+            }
+            ResourceKind::TaskClassifierConfigs => {
+                "SELECT to_jsonb(task_classifier_configs) FROM task_classifier_configs WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
             }
             ResourceKind::Policies => {
                 "SELECT to_jsonb(policies) FROM policies WHERE tenant_id = $1 AND id = $2 FOR UPDATE"
@@ -608,6 +671,59 @@ impl AdminService {
                 .bind(input.operation)
                 .bind(input.quality_tier)
                 .bind(input.model_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                (value, None)
+            }
+            ResourceKind::ModelTaskProfiles => {
+                let input: ModelTaskProfileCreate = decode(payload)?;
+                if input.source == "migration" {
+                    return Err(AdminError::InvalidRequest);
+                }
+                let value: Value = sqlx::query_scalar(
+                    r#"
+                    INSERT INTO model_task_profiles (
+                        id, tenant_id, model_id, taxonomy_version, task_kind,
+                        suitability_score, confidence, source, source_ref, rationale
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING to_jsonb(model_task_profiles)
+                    "#,
+                )
+                .bind(id)
+                .bind(context.tenant_id)
+                .bind(input.model_id)
+                .bind(input.taxonomy_version)
+                .bind(input.task_kind)
+                .bind(input.suitability_score)
+                .bind(input.confidence)
+                .bind(input.source)
+                .bind(input.source_ref)
+                .bind(input.rationale)
+                .fetch_one(&mut *transaction)
+                .await?;
+                (value, None)
+            }
+            ResourceKind::TaskClassifierConfigs => {
+                let input: TaskClassifierConfigCreate = decode(payload)?;
+                if input.mode == "enforced" && context.role != super::AdminRole::Admin {
+                    return Err(AdminError::Forbidden);
+                }
+                let value: Value = sqlx::query_scalar(
+                    r#"
+                    INSERT INTO task_classifier_configs (
+                        id, tenant_id, taxonomy_version, classifier_model_id,
+                        mode, minimum_confidence, timeout_ms
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    RETURNING to_jsonb(task_classifier_configs)
+                    "#,
+                )
+                .bind(id)
+                .bind(context.tenant_id)
+                .bind(input.taxonomy_version)
+                .bind(input.classifier_model_id)
+                .bind(input.mode)
+                .bind(input.minimum_confidence)
+                .bind(input.timeout_ms)
                 .fetch_one(&mut *transaction)
                 .await?;
                 (value, None)
@@ -996,6 +1112,69 @@ impl AdminService {
                 .await?
                 .ok_or(AdminError::Conflict)?
             }
+            ResourceKind::ModelTaskProfiles => {
+                let input: ModelTaskProfilePatch = decode(payload)?;
+                if input.source.as_deref() == Some("migration") {
+                    return Err(AdminError::InvalidRequest);
+                }
+                sqlx::query_scalar(
+                    r#"
+                    UPDATE model_task_profiles SET
+                        suitability_score = COALESCE($4, suitability_score),
+                        confidence = COALESCE($5, confidence),
+                        source = COALESCE($6, source),
+                        source_ref = COALESCE($7, source_ref),
+                        rationale = COALESCE($8, rationale),
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND id = $2 AND version = $3
+                      AND lifecycle_state IN ('draft', 'disabled')
+                    RETURNING to_jsonb(model_task_profiles)
+                    "#,
+                )
+                .bind(context.tenant_id)
+                .bind(id)
+                .bind(input.version)
+                .bind(input.suitability_score)
+                .bind(input.confidence)
+                .bind(input.source)
+                .bind(input.source_ref)
+                .bind(input.rationale)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(AdminError::Conflict)?
+            }
+            ResourceKind::TaskClassifierConfigs => {
+                let input: TaskClassifierConfigPatch = decode(payload)?;
+                if input.mode.as_deref() == Some("enforced")
+                    && context.role != super::AdminRole::Admin
+                {
+                    return Err(AdminError::Forbidden);
+                }
+                sqlx::query_scalar(
+                    r#"
+                    UPDATE task_classifier_configs SET
+                        taxonomy_version = COALESCE($4, taxonomy_version),
+                        classifier_model_id = COALESCE($5, classifier_model_id),
+                        mode = COALESCE($6, mode),
+                        minimum_confidence = COALESCE($7, minimum_confidence),
+                        timeout_ms = COALESCE($8, timeout_ms),
+                        version = version + 1, updated_at = now()
+                    WHERE tenant_id = $1 AND id = $2 AND version = $3
+                    RETURNING to_jsonb(task_classifier_configs)
+                    "#,
+                )
+                .bind(context.tenant_id)
+                .bind(id)
+                .bind(input.version)
+                .bind(input.taxonomy_version)
+                .bind(input.classifier_model_id)
+                .bind(input.mode)
+                .bind(input.minimum_confidence)
+                .bind(input.timeout_ms)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(AdminError::Conflict)?
+            }
         };
         append_audit(
             &mut transaction,
@@ -1056,11 +1235,15 @@ impl AdminService {
             ResourceKind::Providers
             | ResourceKind::Models
             | ResourceKind::ModelAliases
+            | ResourceKind::ModelTaskProfiles
             | ResourceKind::Policies
             | ResourceKind::Quotas => {
                 return self
                     .archive_draft(context, target, version, source_ip, peer_ip, request_id)
                     .await;
+            }
+            ResourceKind::TaskClassifierConfigs => {
+                json!({"version": version, "mode": "disabled"})
             }
         };
         self.update_resource(context, target, payload, source_ip, peer_ip, request_id)
@@ -1088,6 +1271,7 @@ impl AdminService {
             ResourceKind::Providers
                 | ResourceKind::Models
                 | ResourceKind::ModelAliases
+                | ResourceKind::ModelTaskProfiles
                 | ResourceKind::Policies
                 | ResourceKind::Quotas
         ) {
@@ -1287,6 +1471,21 @@ impl AdminService {
             }
             (ResourceKind::ModelAliases, "disabled") => {
                 "UPDATE model_aliases SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(model_aliases)"
+            }
+            (ResourceKind::ModelTaskProfiles, "active") => {
+                r#"
+                UPDATE model_task_profiles profile SET lifecycle_state = 'active',
+                    version = profile.version + 1, updated_at = now()
+                FROM models model
+                WHERE (model.tenant_id, model.id) = (profile.tenant_id, profile.model_id)
+                  AND profile.tenant_id = $1 AND profile.id = $2 AND profile.version = $3
+                  AND profile.lifecycle_state IN ('draft', 'disabled')
+                  AND profile.source <> 'migration' AND model.lifecycle_state = 'active'
+                RETURNING to_jsonb(profile)
+                "#
+            }
+            (ResourceKind::ModelTaskProfiles, "disabled") => {
+                "UPDATE model_task_profiles SET lifecycle_state = 'disabled', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state = 'active' RETURNING to_jsonb(model_task_profiles)"
             }
             (ResourceKind::Policies, "active") => {
                 "UPDATE policies SET lifecycle_state = 'active', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(policies)"
@@ -1517,6 +1716,9 @@ impl AdminService {
             }
             ResourceKind::ModelAliases => {
                 "UPDATE model_aliases SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(model_aliases)"
+            }
+            ResourceKind::ModelTaskProfiles => {
+                "UPDATE model_task_profiles SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(model_task_profiles)"
             }
             ResourceKind::Policies => {
                 "UPDATE policies SET lifecycle_state = 'archived', version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lifecycle_state IN ('draft', 'disabled') RETURNING to_jsonb(policies)"
@@ -3127,5 +3329,182 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active, 1);
+    }
+
+    #[sqlx::test]
+    async fn task_classification_resources_are_tenant_safe_audited_and_role_guarded(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let other_tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO admin_accounts (id, tenant_id, display_name, role) VALUES ($1, $2, 'operator', 'operator')",
+        )
+        .bind(actor_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let provider_id = Uuid::new_v4();
+        let model_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO providers (
+                id, tenant_id, provider_key, display_name, provider_type,
+                base_url, credential_ref, supported_operations, lifecycle_state
+            ) VALUES ($1, $2, 'task-provider', 'provider', 'openai',
+                      'https://example.invalid', 'env://PROVIDER_KEY',
+                      ARRAY['openai_responses'], 'active')
+            "#,
+        )
+        .bind(provider_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, lifecycle_state
+            ) VALUES ($1, $2, $3, 'task-model', 'provider-task-model',
+                      'task model', ARRAY['openai_responses'], 'active')
+            "#,
+        )
+        .bind(model_id)
+        .bind(tenant_id)
+        .bind(provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let operator = AdminContext {
+            tenant_id,
+            account_id: actor_id,
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Operator,
+        };
+        let admin = AdminContext {
+            role: AdminRole::Admin,
+            ..operator.clone()
+        };
+        let other_tenant = AdminContext {
+            tenant_id: other_tenant_id,
+            role: AdminRole::Viewer,
+            ..operator.clone()
+        };
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+
+        let profile = service
+            .create_resource(
+                &operator,
+                ResourceKind::ModelTaskProfiles,
+                json!({
+                    "model_id": model_id,
+                    "taxonomy_version": "task-taxonomy-v1",
+                    "task_kind": "debugging",
+                    "suitability_score": 90,
+                    "confidence": 0.95,
+                    "source": "manual",
+                    "source_ref": "operator-review",
+                    "rationale": "Validated against the fixed case set"
+                }),
+                source,
+                source,
+                "create-task-profile",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .get_resource(&other_tenant, ResourceKind::ModelTaskProfiles, id(&profile))
+                .await,
+            Err(AdminError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .set_registry_lifecycle(
+                    &operator,
+                    ResourceTarget::new(ResourceKind::ModelTaskProfiles, id(&profile)),
+                    LifecycleInput {
+                        version: 1,
+                        state: "active".to_owned()
+                    },
+                    source,
+                    source,
+                    "operator-activate-profile",
+                )
+                .await,
+            Err(AdminError::Forbidden)
+        ));
+        service
+            .set_registry_lifecycle(
+                &admin,
+                ResourceTarget::new(ResourceKind::ModelTaskProfiles, id(&profile)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".to_owned(),
+                },
+                source,
+                source,
+                "admin-activate-profile",
+            )
+            .await
+            .unwrap();
+
+        let config = service
+            .create_resource(
+                &operator,
+                ResourceKind::TaskClassifierConfigs,
+                json!({
+                    "taxonomy_version": "task-taxonomy-v1",
+                    "classifier_model_id": model_id,
+                    "mode": "shadow",
+                    "minimum_confidence": 0.8,
+                    "timeout_ms": 500
+                }),
+                source,
+                source,
+                "create-classifier-config",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .update_resource(
+                    &operator,
+                    ResourceTarget::new(ResourceKind::TaskClassifierConfigs, id(&config)),
+                    json!({"version": 1, "mode": "enforced"}),
+                    source,
+                    source,
+                    "operator-enforce-classifier",
+                )
+                .await,
+            Err(AdminError::Forbidden)
+        ));
+        service
+            .update_resource(
+                &admin,
+                ResourceTarget::new(ResourceKind::TaskClassifierConfigs, id(&config)),
+                json!({"version": 1, "mode": "enforced"}),
+                source,
+                source,
+                "admin-enforce-classifier",
+            )
+            .await
+            .unwrap();
+
+        let audits: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*) FROM audit_logs
+            WHERE tenant_id = $1 AND target_type IN (
+                'model_task_profile', 'task_classifier_config'
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 4);
     }
 }

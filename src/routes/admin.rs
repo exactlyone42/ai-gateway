@@ -13,7 +13,8 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, LifecycleInput, ListQuery,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, IncidentCreate,
+        IncidentEventCreate, IncidentListQuery, IncidentPatch, LifecycleInput, ListQuery,
         ReportListQuery, ReportWindowQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
         ResourceTarget, RotateCredentialInput, SessionOutput, UsageQuery, authorize,
     },
@@ -25,6 +26,10 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/admin/v1/session", delete(logout))
         .route("/admin/v1/overview", get(overview))
+        .route(
+            "/admin/v1/task-classification-shadow",
+            get(task_classification_shadow),
+        )
         .route("/admin/v1/identity-map", get(identity_map))
         .route("/admin/v1/requests", get(request_page))
         .route("/admin/v1/requests/{id}", get(request_report))
@@ -33,6 +38,18 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/v1/catalog", get(catalog_report))
         .route("/admin/v1/governance", get(governance_report))
         .route("/admin/v1/system-health", get(system_health_report))
+        .route(
+            "/admin/v1/incidents",
+            get(list_incidents).post(create_incident),
+        )
+        .route(
+            "/admin/v1/incidents/{id}",
+            get(get_incident).patch(update_incident),
+        )
+        .route(
+            "/admin/v1/incidents/{id}/events",
+            post(append_incident_event),
+        )
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
             "/admin/v1/{resource}/{id}/lifecycle",
@@ -68,12 +85,103 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .layer(cors(state.config.admin_allowed_origin.as_deref()))
 }
 
+async fn list_incidents(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<IncidentListQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.list_incidents(&context, query).await?))
+}
+
+async fn get_incident(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.get_incident(&context, id).await?))
+}
+
+async fn create_incident(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<IncidentCreate>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    let output = state
+        .admin
+        .create_incident(&context, input, source, peer.ip(), request_id(&headers)?)
+        .await?;
+    Ok((StatusCode::CREATED, Json(output)))
+}
+
+async fn update_incident(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<IncidentPatch>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    Ok(Json(
+        state
+            .admin
+            .update_incident(
+                &context,
+                id,
+                input,
+                source,
+                peer.ip(),
+                request_id(&headers)?,
+            )
+            .await?,
+    ))
+}
+
+async fn append_incident_event(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<IncidentEventCreate>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    let output = state
+        .admin
+        .append_incident_event(
+            &context,
+            id,
+            input,
+            source,
+            peer.ip(),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(output)))
+}
+
 async fn overview(
     State(state): State<Arc<AppState>>,
     Extension(context): Extension<AdminContext>,
     Query(query): Query<ReportWindowQuery>,
 ) -> Result<Json<serde_json::Value>, AdminError> {
     Ok(Json(state.admin.overview_report(&context, query).await?))
+}
+
+async fn task_classification_shadow(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportWindowQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .task_classification_shadow_report(&context, query)
+            .await?,
+    ))
 }
 
 async fn identity_map(

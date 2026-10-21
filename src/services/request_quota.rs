@@ -13,6 +13,7 @@ use crate::{
     routing::HalfOpenClaim,
     services::request_policy::PreparedPolicy,
     state::AppState,
+    task_classification::{self, ClassifierMode},
 };
 
 pub struct PreparedQuota {
@@ -20,6 +21,14 @@ pub struct PreparedQuota {
     pub translation: ValidatedTranslationPlan,
     pub routing_reason: &'static str,
     pub routing_claim: Option<HalfOpenClaim>,
+    pub task_routing: Value,
+}
+
+#[derive(Clone, Copy)]
+struct RoutingMeasurement {
+    classification_elapsed_us: Option<u64>,
+    jev_attempted: bool,
+    jev_elapsed_ms: Option<u64>,
 }
 
 pub async fn admit(
@@ -97,9 +106,59 @@ pub async fn admit(
         return Err(GatewayError::ModelForbidden);
     }
     let original_candidates = candidates.clone();
+    let classification_started = std::time::Instant::now();
+    let task_decision = if operation != GatewayOperation::AnthropicCountTokens {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            task_classification::decide(
+                &state.pool,
+                prepared.rejection.principal.tenant_id,
+                body,
+                &candidates,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "task classification failed; preserving original model");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("task classification timed out; preserving original model");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let classification_elapsed_us = task_decision.as_ref().map(|_| {
+        classification_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64
+    });
+    if let Some(decision) = &task_decision {
+        tracing::info!(
+            task = decision.classification.task,
+            confidence = decision.classification.confidence,
+            reason = decision.classification.reason,
+            profile_id = ?decision.profile_id,
+            profile_version = ?decision.profile_version,
+            mode = ?decision.mode,
+            "task classification produced a capable model shortlist"
+        );
+        if decision.mode == ClassifierMode::Enforced {
+            candidates = decision.candidates.clone();
+        }
+    }
+    let mut jev_attempted = false;
+    let mut jev_elapsed_ms = None;
     let routing_reason = if operation != GatewayOperation::AnthropicCountTokens
         && let Some(router) = &state.jev
     {
+        jev_attempted = true;
+        let jev_started = std::time::Instant::now();
         let mut routing_candidates = if prepared.selector.quality().is_some() {
             candidates
         } else {
@@ -117,6 +176,13 @@ pub async fn admit(
         routing_candidates.retain(|candidate| {
             prepared.policy.allows_model(&candidate.public_model_id)
                 && validate_for_provider(request, candidate).is_ok()
+                && task_decision.as_ref().is_none_or(|decision| {
+                    decision.mode != ClassifierMode::Enforced
+                        || decision
+                            .candidates
+                            .iter()
+                            .any(|shortlisted| shortlisted.model_id == candidate.model_id)
+                })
         });
         let reason = if routing_candidates.is_empty() {
             None
@@ -125,6 +191,7 @@ pub async fn admit(
                 .select(&state.client, body, &mut routing_candidates)
                 .await
         };
+        jev_elapsed_ms = Some(jev_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
         if reason.is_some() {
             candidates = routing_candidates;
         } else {
@@ -133,6 +200,11 @@ pub async fn admit(
         reason
     } else {
         None
+    };
+    let measurement = RoutingMeasurement {
+        classification_elapsed_us,
+        jev_attempted,
+        jev_elapsed_ms,
     };
     let mut ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
@@ -162,9 +234,18 @@ pub async fn admit(
         let routing_reason = routing_reason
             .unwrap_or_else(|| ranked.reason_for(&selection, state.routing.quota_aware()));
         let routing_claim = ranked.take_claim_for(&selection);
+        let task_routing = task_routing_snapshot(
+            &task_decision,
+            required,
+            prepared,
+            routing_reason,
+            &selection.public_model_id,
+            measurement,
+        );
         return Ok(PreparedQuota {
             routing_reason,
             routing_claim,
+            task_routing,
             admission: QuotaAdmission {
                 selection,
                 estimated_usage: TokenUsage {
@@ -205,9 +286,18 @@ pub async fn admit(
                 ranked.reason_for(&admission.selection, state.routing.quota_aware())
             });
             let routing_claim = ranked.take_claim_for(&admission.selection);
+            let task_routing = task_routing_snapshot(
+                &task_decision,
+                required,
+                prepared,
+                routing_reason,
+                &admission.selection.public_model_id,
+                measurement,
+            );
             Ok(PreparedQuota {
                 routing_reason,
                 routing_claim,
+                task_routing,
                 admission: *admission,
                 translation,
             })
@@ -220,6 +310,57 @@ pub async fn admit(
             })
         }
     }
+}
+
+fn task_routing_snapshot(
+    decision: &Option<task_classification::TaskRoutingDecision>,
+    required: CapabilityRequirements,
+    prepared: &PreparedPolicy,
+    routing_reason: &str,
+    final_model: &str,
+    measurement: RoutingMeasurement,
+) -> Value {
+    let classification = decision.as_ref().map(|decision| {
+        serde_json::json!({
+            "taxonomy_version": "task-taxonomy-v1",
+            "task": decision.classification.task,
+            "confidence": decision.classification.confidence,
+            "reason": decision.classification.reason,
+            "mode": match decision.mode {
+                ClassifierMode::Shadow => "shadow",
+                ClassifierMode::Enforced => "enforced",
+            },
+            "profile_id": decision.profile_id,
+            "profile_version": decision.profile_version,
+            "shortlist": decision.candidates.iter().take(16).map(|candidate| candidate.public_model_id.chars().take(128).collect::<String>()).collect::<Vec<_>>(),
+            "elapsed_us": measurement.classification_elapsed_us,
+        })
+    });
+    serde_json::json!({
+        "classification": classification,
+        "capability_version": "model-capabilities-v1",
+        "required_capabilities": {
+            "streaming": required.streaming,
+            "tools": required.tools,
+            "reasoning": required.reasoning,
+            "images": required.images,
+            "structured_output": required.structured_output,
+        },
+        "service_objective_version": "service-objective-v1",
+        "service_objective": {
+            "workload_class": value_text(&prepared.policy.workload_class),
+            "urgency": value_text(&prepared.policy.urgency),
+            "quality": value_text(&prepared.policy.quality),
+            "budget_class": value_text(&prepared.policy.budget_class),
+        },
+        "original_model": prepared.requested_model,
+        "jev_attempted": measurement.jev_attempted,
+        "jev_elapsed_ms": measurement.jev_elapsed_ms,
+        "jev_opinion": (routing_reason == "jev").then_some(final_model),
+        "final_model": final_model,
+        "selection_reason": routing_reason,
+        "changed": prepared.requested_model != final_model,
+    })
 }
 
 fn output_multiplier(operation: GatewayOperation, body: &Value) -> Result<u64, GatewayError> {

@@ -36,6 +36,84 @@ pub struct CursorPage {
 }
 
 impl AdminService {
+    pub async fn task_classification_shadow_report(
+        &self,
+        context: &AdminContext,
+        query: ReportWindowQuery,
+    ) -> Result<Value, AdminError> {
+        validate_window(query.from, query.to)?;
+        let report = sqlx::query_scalar(
+            r#"
+            WITH shadow_requests AS (
+                SELECT *, policy_decision->'routing'->'task_classification' AS routing
+                FROM gateway_requests
+                WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3
+                  AND policy_decision->'routing'->'task_classification'
+                      ->'classification'->>'mode' = 'shadow'
+            ), ranked_usage AS (
+                SELECT ur.*, row_number() OVER (
+                    PARTITION BY ur.tenant_id, ur.provider_attempt_id
+                    ORDER BY CASE ur.source WHEN 'provider_reported' THEN 0 ELSE 1 END
+                ) AS preference
+                FROM usage_records ur
+                JOIN shadow_requests sr
+                  ON (sr.tenant_id, sr.id) = (ur.tenant_id, ur.gateway_request_id)
+            ), stats AS (
+                SELECT count(*)::bigint AS requests,
+                       count(*) FILTER (WHERE status = 'completed')::bigint AS successful,
+                       count(*) FILTER (WHERE (routing->>'jev_attempted')::boolean)::bigint AS jev_attempted,
+                       count(*) FILTER (WHERE routing->>'jev_opinion' IS NOT NULL)::bigint AS jev_opinions,
+                       count(*) FILTER (
+                           WHERE routing->>'jev_opinion' IS NOT NULL
+                             AND (routing->'classification'->'shortlist')
+                                 ? (routing->>'jev_opinion')
+                       )::bigint AS jev_agreements,
+                       count(*) FILTER (WHERE (routing->>'changed')::boolean)::bigint AS route_changes,
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY extract(epoch FROM total_latency) * 1000
+                       ) FILTER (WHERE total_latency IS NOT NULL) AS p95_latency_ms,
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY (routing->'classification'->>'elapsed_us')::double precision
+                       ) FILTER (WHERE routing->'classification'->>'elapsed_us' IS NOT NULL)
+                           AS classifier_p95_us,
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY (routing->>'jev_elapsed_ms')::double precision
+                       ) FILTER (WHERE routing->>'jev_elapsed_ms' IS NOT NULL) AS jev_p95_ms
+                FROM shadow_requests
+            ), usage_stats AS (
+                SELECT sum(cost_microusd)::bigint AS cost_microusd
+                FROM ranked_usage WHERE preference = 1
+            )
+            SELECT jsonb_build_object(
+                'from', $2, 'to', $3,
+                'requests', s.requests,
+                'successful_requests', s.successful,
+                'success_rate', CASE WHEN s.requests = 0 THEN NULL
+                    ELSE s.successful::double precision / s.requests END,
+                'jev_attempted', s.jev_attempted,
+                'jev_opinions', s.jev_opinions,
+                'jev_agreements', s.jev_agreements,
+                'jev_agreement_rate', CASE WHEN s.jev_opinions = 0 THEN NULL
+                    ELSE s.jev_agreements::double precision / s.jev_opinions END,
+                'route_changes', s.route_changes,
+                'p95_latency_ms', s.p95_latency_ms,
+                'classifier_p95_us', s.classifier_p95_us,
+                'jev_p95_ms', s.jev_p95_ms,
+                'observed_inference_cost_microusd', u.cost_microusd,
+                'routing_cost_microusd', NULL,
+                'routing_cost_unavailable_reason',
+                    'Jev does not return billable usage; classifier runs locally'
+            ) FROM stats s CROSS JOIN usage_stats u
+            "#,
+        )
+        .bind(context.tenant_id)
+        .bind(query.from)
+        .bind(query.to)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(report)
+    }
+
     pub async fn overview_report(
         &self,
         context: &AdminContext,
@@ -64,6 +142,9 @@ impl AdminService {
                        percentile_cont(0.95) WITHIN GROUP (
                            ORDER BY extract(epoch FROM total_latency) * 1000
                        ) FILTER (WHERE total_latency IS NOT NULL) AS p95_latency_ms,
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY extract(epoch FROM gateway_overhead) * 1000
+                       ) FILTER (WHERE gateway_overhead IS NOT NULL) AS p95_gateway_overhead_ms,
                        percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
                          FILTER (WHERE queue_duration IS NOT NULL) AS queue_p50_ms,
                        percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM queue_duration) * 1000)
@@ -100,6 +181,7 @@ impl AdminService {
                 'cached_input_tokens', us.cached_input_tokens,
                 'cache_write_input_tokens', us.cache_write_input_tokens,
                 'p95_latency_ms', rs.p95_latency_ms,
+                'p95_gateway_overhead_ms', rs.p95_gateway_overhead_ms,
                 'p95_ttft_ms', ats.p95_ttft_ms,
                 'cost_microusd', us.cost_microusd,
                 'unreconciled_attempts', us.unreconciled,
@@ -896,23 +978,45 @@ mod tests {
                 INSERT INTO gateway_requests (
                     id, tenant_id, request_id, requested_model, selected_model,
                     selected_provider, status, created_at, started_at, completed_at,
-                    operation, request_received_at, total_latency
+                    operation, request_received_at, total_latency, gateway_overhead,
+                    policy_decision
                 ) VALUES (
                     $1, $5, 'request-one', 'model-one', 'model-one', 'provider-one',
                     'completed', now() - interval '1 minute', now() - interval '1 minute',
                     now() - interval '59 seconds', 'responses', now() - interval '1 minute',
-                    interval '1 second'
+                    interval '1 second', interval '40 milliseconds',
+                    jsonb_build_object('routing', jsonb_build_object(
+                        'task_classification', jsonb_build_object(
+                            'classification', jsonb_build_object(
+                                'mode', 'shadow', 'elapsed_us', 25,
+                                'shortlist', jsonb_build_array('model-one', 'model-three')
+                            ),
+                            'jev_attempted', true, 'jev_elapsed_ms', 12,
+                            'jev_opinion', 'model-one', 'changed', false
+                        )
+                    ))
                 ) RETURNING id
             ), second_request AS (
                 INSERT INTO gateway_requests (
                     id, tenant_id, request_id, requested_model, selected_model,
                     selected_provider, status, created_at, started_at, completed_at,
-                    operation, request_received_at, total_latency
+                    operation, request_received_at, total_latency, gateway_overhead,
+                    policy_decision
                 ) VALUES (
                     $2, $5, 'request-two', 'model-two', 'model-two', 'provider-two',
                     'failed', now() - interval '1 minute', now() - interval '1 minute',
                     now() - interval '59 seconds', 'messages', now() - interval '1 minute',
-                    interval '1 second'
+                    interval '1 second', interval '20 milliseconds',
+                    jsonb_build_object('routing', jsonb_build_object(
+                        'task_classification', jsonb_build_object(
+                            'classification', jsonb_build_object(
+                                'mode', 'shadow', 'elapsed_us', 50,
+                                'shortlist', jsonb_build_array('model-one')
+                            ),
+                            'jev_attempted', true, 'jev_elapsed_ms', 24,
+                            'jev_opinion', 'model-two', 'changed', true
+                        )
+                    ))
                 ) RETURNING id
             ), other_request AS (
                 INSERT INTO gateway_requests (
@@ -1009,9 +1113,25 @@ mod tests {
         assert_eq!(overview["requests"], 2);
         assert_eq!(overview["input_tokens"], 17);
         assert_eq!(overview["output_tokens"], 8);
+        assert_eq!(overview["p95_gateway_overhead_ms"], 39.0);
         assert_eq!(overview["unreconciled_attempts"], 1);
         assert!(overview["cost_microusd"].is_null());
         assert_eq!(overview["queue"]["available"], false);
+
+        let shadow = service
+            .task_classification_shadow_report(&context, ReportWindowQuery { from, to })
+            .await
+            .unwrap();
+        assert_eq!(shadow["requests"], 2);
+        assert_eq!(shadow["successful_requests"], 1);
+        assert_eq!(shadow["success_rate"], 0.5);
+        assert_eq!(shadow["jev_opinions"], 2);
+        assert_eq!(shadow["jev_agreements"], 1);
+        assert_eq!(shadow["jev_agreement_rate"], 0.5);
+        assert_eq!(shadow["route_changes"], 1);
+        assert_eq!(shadow["classifier_p95_us"], 48.75);
+        assert_eq!(shadow["jev_p95_ms"], 23.4);
+        assert!(shadow["routing_cost_microusd"].is_null());
 
         let usage = service
             .usage_report(

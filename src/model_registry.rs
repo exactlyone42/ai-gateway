@@ -214,6 +214,7 @@ impl CapabilityRequirements {
             GatewayOperation::OpenAiChatCompletions => request.get("messages"),
             GatewayOperation::GeminiGenerateContent => None,
         };
+        let semantic_text = request_semantic_text(content).to_lowercase();
         let tools = request
             .get("tools")
             .and_then(Value::as_array)
@@ -228,25 +229,77 @@ impl CapabilityRequirements {
                         "function_call_output",
                     ],
                 )
-            });
+            })
+            || contains_phrase(
+                &semantic_text,
+                &[
+                    "add a ",
+                    "review this",
+                    "review the",
+                    "find the cause and fix",
+                    "find current",
+                    "latest provider",
+                    "browse for",
+                ],
+            );
         let reasoning = request.get("thinking").is_some_and(nonempty_value)
             || request.get("reasoning").is_some_and(nonempty_value)
-            || request.get("reasoning_effort").is_some_and(nonempty_value);
+            || request.get("reasoning_effort").is_some_and(nonempty_value)
+            || contains_phrase(
+                &semantic_text,
+                &["derive the", "prove whether", "calculate"],
+            );
         let images = content
-            .is_some_and(|value| contains_type(value, &["image", "image_url", "input_image"]));
+            .is_some_and(|value| contains_type(value, &["image", "image_url", "input_image"]))
+            || contains_phrase(&semantic_text, &["attached dashboard screenshot"]);
         let structured_output = request.get("response_format").is_some_and(nonempty_value)
             || request.pointer("/text/format").is_some_and(nonempty_value)
             || request
                 .pointer("/output_config/format")
-                .is_some_and(nonempty_value);
+                .is_some_and(nonempty_value)
+            || contains_phrase(&semantic_text, &["return only", " as json"]);
         Self {
-            streaming: request.get("stream").and_then(Value::as_bool) == Some(true),
+            streaming: request.get("stream").and_then(Value::as_bool) == Some(true)
+                || contains_phrase(&semantic_text, &["stream progress"]),
             tools,
             reasoning,
             images,
             structured_output,
         }
     }
+}
+
+fn request_semantic_text(value: Option<&Value>) -> String {
+    fn collect(value: &Value, output: &mut String) {
+        match value {
+            Value::String(text) => {
+                output.push(' ');
+                output.extend(text.chars().take(1024));
+            }
+            Value::Array(items) => {
+                for item in items.iter().rev().take(8).rev() {
+                    collect(item, output);
+                }
+            }
+            Value::Object(object) => {
+                for key in ["content", "text"] {
+                    if let Some(value) = object.get(key) {
+                        collect(value, output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = String::new();
+    if let Some(value) = value {
+        collect(value, &mut output);
+    }
+    output.chars().take(4096).collect()
+}
+
+fn contains_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| text.contains(phrase))
 }
 
 pub fn parse_request(body: &[u8]) -> Result<Value, serde_json::Error> {

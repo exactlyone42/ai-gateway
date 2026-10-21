@@ -28,7 +28,7 @@ DB 只存 domain-separated HMAC、fingerprint 與非秘密 key id。Session 絕�
 
 | 操作 | admin | operator | viewer |
 | --- | --- | --- | --- |
-| 讀取十類資源 | allow | allow | allow |
+| 讀取十二類資源 | allow | allow | allow |
 | 建立、修改、停用、撤銷、封存、輪替 | allow | allow | deny + audit |
 | 列出、建立、修改 Admin account／角色 | allow | deny | deny |
 | 登出自己的 session | allow | allow | allow |
@@ -41,6 +41,8 @@ admin 並行降級時仍至少留下一位 active admin。
 
 `{resource}` 只接受 `users`、`devices`、`clients`、`agents`、`credentials`、`providers`、
 `models`、`model-aliases`、`policies`、`quotas`。
+另接受 `model-task-profiles` 與 `task-classifier-configs`；前者保存模型適合的任務、信心、來源與人工覆寫，
+後者保存分類器模型、taxonomy、模式、最低信心及逾時，兩者都沿用 tenant 隔離、版本 CAS 與既有 audit。
 
 | 動作 | 端點 | 契約 |
 | --- | --- | --- |
@@ -50,7 +52,7 @@ admin 並行降級時仍至少留下一位 active admin。
 | update | `PATCH /admin/v1/{resource}/{id}` | body 必帶目前 `version` |
 | delete semantics | `DELETE /admin/v1/{resource}/{id}?version=N` | identity 停用、credential 撤銷、draft 封存 |
 | rotate key | `POST /admin/v1/credentials/{id}/rotate` | body 帶 `version`、1..900 秒 overlap |
-| lifecycle | `POST /admin/v1/{providers|models|model-aliases|policies|quotas}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
+| lifecycle | `POST /admin/v1/{providers|models|model-aliases|model-task-profiles|policies|quotas}/{id}/lifecycle` | Admin only；body 帶 `version` 與 `active`/`disabled` |
 
 所有 mutable resource 使用 version CAS；stale version 回 409。User／Device／Client／Agent 是四個
 獨立 Principal 維度，一把 credential 可同時指向多個維度，但至少一個；停用任一已關聯維度會在
@@ -64,12 +66,33 @@ quota window 的 quota、limit kind、current、maximum 與 UTC reset time；Req
 immutable quota decision。事故重建可在同一 tenant lock 下執行
 `SELECT recompute_quota_windows('<tenant-uuid>')`，其來源是不可變 reservation 與 reconciliation event。
 
+舊模型轉換只建立 `draft`、零分、零信心的未分類 placeholder，不會參與路由。Operator 可建立與修改
+profile 或設定 shadow 模式；只有 Admin 能啟用 profile 或把分類器改成 `enforced`。`migration` 來源不能由
+Admin API 偽造；要啟用舊資料必須改成有來源的人工、供應商或 benchmark 設定。
+
 ## 稽核與錯誤
 
 每次成功 mutation 與 audit insert 在同一 transaction：audit 失敗時 mutation rollback。記錄包含
 actor account／role、action、target、before／after、DB timestamp、source IP、peer IP、request ID。
 未授權回 401、RBAC 拒絕回 403、跨 tenant／不存在回 404、CAS 或 invariant 衝突回 409、DB／認證
 依賴失效回 503。所有回應沿用 gateway 的 JSON error envelope。
+
+## 事故記錄
+
+事故屬於登入 session 的 tenant；`system` 只表示影響該 tenant 的共用 Gateway，不能跨 tenant
+讀寫。清單可用狀態、發生日期、服務與影響範圍篩選。事故目前值包含標題、狀態、服務、影響範圍、
+開始／結束時間、摘要、影響、根因、暫時處理、永久修正、預防措施、驗證證據與版本。狀態固定為
+`investigating`、`mitigated`、`resolved`、`closed`。
+
+建立事故、變更狀態或追加時間線都必須在同一 transaction 寫入事故目前值、不可修改的事件及
+既有 audit。事件只追加，資料庫拒絕 update、delete 與 truncate；事故目前值用 version CAS 防止
+兩位管理者互相覆蓋。事件保存 actor、DB 時間、類型、改前／改後與安全說明。請求關聯只接受同
+tenant 的 request UUID；部署關聯只存版本識別字，不複製請求或回應內容。
+
+事故端點沿用 Admin session；admin 與 operator 可寫，viewer 只讀，Client API Key 一律 401。
+所有文字欄位在寫入前拒絕疑似 Gateway／Provider 金鑰、Bearer token、完整 Prompt 或 Response；
+拒絕時整個 transaction 不得留下事故、事件或 audit。輸入限制是防止意外保存，不取代日誌與
+回應的既有去敏檢查。
 
 ## 網路與設定
 
@@ -84,5 +107,5 @@ pool；控制面失敗不會中斷已進行的推論。
 ## 驗收
 
 `./scripts/check.sh all` 會跑 migration、tenant/FK、bootstrap one-shot、session 撤銷、角色版本失效、
-並行最後-admin 保護、十類 CRUD/CAS/audit、viewer 403、body 上限、credential cache 失效及 pool 隔離。
+並行最後-admin 保護、十二類 CRUD/CAS/audit、viewer 403、body 上限、credential cache 失效及 pool 隔離。
 RBAC 陰性對照必須實際移除 middleware 檢查，確認 viewer mutation 測試變紅後再還原。
