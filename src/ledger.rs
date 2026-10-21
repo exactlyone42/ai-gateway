@@ -1119,15 +1119,22 @@ impl RequestEnvelope {
             })
             .collect();
 
-        self.request.gateway_overhead_ms = self
-            .request
-            .client_first_byte_at
-            .zip(
-                self.attempts
-                    .first()
-                    .and_then(|attempt| attempt.provider_first_byte_at),
-            )
-            .map(|(client, provider)| (client - provider).num_milliseconds());
+        self.request.gateway_overhead_ms = self.attempts.first().and_then(|attempt| {
+            let request_processing = self
+                .request
+                .request_received_at
+                .zip(attempt.provider_request_at)
+                .map(|(received, provider)| {
+                    (provider - received).num_milliseconds().max(0)
+                        - self.request.queue_duration_ms.unwrap_or(0).max(0)
+                })?;
+            let response_processing = self
+                .request
+                .client_first_byte_at
+                .zip(attempt.provider_first_byte_at)
+                .map(|(client, provider)| (client - provider).num_milliseconds().max(0))?;
+            Some(request_processing.max(0) + response_processing)
+        });
 
         self.usage_records.clear();
         for attempt in &self.attempts {
@@ -1701,6 +1708,43 @@ mod tests {
             snapshot.decision["routing"]["task_classification"]["classification"]["task"],
             "debugging"
         );
+    }
+
+    #[test]
+    fn gateway_overhead_excludes_queue_and_provider_time() {
+        let received_at = Utc::now();
+        let mut start = request_start("gateway-overhead");
+        start.created_at = received_at;
+        let mut envelope = RequestEnvelope::started(start);
+        envelope.request.queue_duration_ms = Some(40);
+        envelope.request.client_first_byte_at =
+            Some(received_at + chrono::Duration::milliseconds(230));
+
+        let provider_request_at = received_at + chrono::Duration::milliseconds(100);
+        let mut attempt = ProviderAttempt::begin(
+            "test-provider".to_owned(),
+            "company-default".to_owned(),
+            None,
+            provider_request_at,
+            TokenUsage::default(),
+        );
+        attempt.observe_first_byte(received_at + chrono::Duration::milliseconds(200));
+        attempt.conclude(
+            "completed",
+            None,
+            received_at + chrono::Duration::milliseconds(500),
+        );
+
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: Some("company-default".to_owned()),
+            selected_provider: Some("test-provider".to_owned()),
+            attempts: vec![attempt],
+            completed_at: received_at + chrono::Duration::milliseconds(500),
+        });
+
+        assert_eq!(envelope.request.gateway_overhead_ms, Some(90));
+        assert_eq!(envelope.request.total_latency_ms, Some(500));
     }
 
     #[test]
