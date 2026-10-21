@@ -131,11 +131,6 @@ async fn sync_provider(
         capability_values.push("auto_discovered".to_owned());
         let capabilities = json!(capability_values);
         let has = |capability: &str| model.capabilities.iter().any(|item| item == capability);
-        let quality = if model.name.to_ascii_lowercase().contains("coder") {
-            "premium"
-        } else {
-            "standard"
-        };
         sqlx::query(
             r#"
             INSERT INTO models (
@@ -151,8 +146,6 @@ async fn sync_provider(
             )
             ON CONFLICT (tenant_id, public_model_id) DO UPDATE SET
                 provider_model_id = EXCLUDED.provider_model_id,
-                description = EXCLUDED.description,
-                quality_tier = EXCLUDED.quality_tier,
                 context_window = EXCLUDED.context_window,
                 supported_operations = EXCLUDED.supported_operations,
                 capabilities = EXCLUDED.capabilities,
@@ -174,7 +167,7 @@ async fn sync_provider(
             model.name,
             model.capabilities.join(", ")
         ))
-        .bind(quality)
+        .bind(Option::<String>::None)
         .bind(model.context_window)
         .bind(&provider.supported_operations)
         .bind(capabilities)

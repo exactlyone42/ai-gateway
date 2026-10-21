@@ -7,7 +7,7 @@ use crate::{
     canonical::CanonicalRequest,
     error::GatewayError,
     ledger::{RequestStart, TokenUsage},
-    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, QualityTier},
+    model_registry::{CapabilityRequirements, GatewayOperation},
     policy::value_text,
     quota::{QuotaAdmission, QuotaEstimate, QuotaOutcome, QuotaRejection},
     routing::HalfOpenClaim,
@@ -105,11 +105,10 @@ pub async fn admit(
         } else {
             state
                 .models
-                .candidates(
+                .routing_candidates(
                     prepared.rejection.principal.tenant_id,
                     prepared.rejection.principal.is_development_bootstrap(),
                     operation,
-                    ModelSelector::Quality(QualityTier::Premium),
                     required,
                 )
                 .await

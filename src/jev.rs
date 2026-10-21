@@ -37,18 +37,12 @@ impl JevRouter {
             .iter()
             .enumerate()
             .map(|(i, candidate)| {
-                let description = self
+                let configured = self
                     .config
                     .descriptions
                     .get(&candidate.public_model_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        format!(
-                            "Model {}; quality tier {}",
-                            candidate.public_model_id,
-                            candidate.selector.quality().unwrap_or("unspecified")
-                        )
-                    });
+                    .map(String::as_str);
+                let description = routing_description(candidate, configured);
                 (i.to_string(), description)
             })
             .collect::<BTreeMap<_, _>>();
@@ -131,6 +125,45 @@ impl JevRouter {
     }
 }
 
+fn routing_description(candidate: &ModelSelection, configured: Option<&str>) -> String {
+    let mut capabilities = Vec::new();
+    for (enabled, name) in [
+        (candidate.supports_streaming, "streaming"),
+        (candidate.supports_tools, "tools"),
+        (candidate.supports_reasoning, "reasoning"),
+        (candidate.supports_images, "image input"),
+        (candidate.supports_structured_output, "structured output"),
+    ] {
+        if enabled {
+            capabilities.push(name);
+        }
+    }
+    let capabilities = if capabilities.is_empty() {
+        "text".to_owned()
+    } else {
+        capabilities.join(", ")
+    };
+    let cost_metadata = candidate
+        .cost_metadata
+        .to_string()
+        .chars()
+        .take(512)
+        .collect::<String>();
+    format!(
+        "Model {}; purpose: {}; capabilities: {}; context tokens: {}; latency class: {}; cost metadata: {}",
+        candidate.public_model_id,
+        configured
+            .or(candidate.description.as_deref())
+            .unwrap_or("general purpose"),
+        capabilities,
+        candidate
+            .context_window
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+        candidate.latency_class.as_deref().unwrap_or("unknown"),
+        cost_metadata
+    )
+}
+
 fn apply_choice<T>(candidates: &mut Vec<T>, result: Result<usize, GatewayError>) -> bool {
     let Ok(index) = result else {
         return false;
@@ -138,9 +171,8 @@ fn apply_choice<T>(candidates: &mut Vec<T>, result: Result<usize, GatewayError>)
     if index >= candidates.len() {
         return false;
     }
-    let selected = candidates.swap_remove(index);
-    candidates.clear();
-    candidates.push(selected);
+    let selected = candidates.remove(index);
+    candidates.insert(0, selected);
     true
 }
 
@@ -354,11 +386,11 @@ mod tests {
     }
 
     #[test]
-    fn available_jev_keeps_only_its_selected_candidate() {
+    fn available_jev_prioritizes_its_choice_without_hiding_fallbacks() {
         let mut candidates = vec!["primary", "secondary"];
 
         assert!(apply_choice(&mut candidates, Ok(1)));
-        assert_eq!(candidates, ["secondary"]);
+        assert_eq!(candidates, ["secondary", "primary"]);
     }
 
     #[test]

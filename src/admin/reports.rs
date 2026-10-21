@@ -508,10 +508,27 @@ impl AdminService {
                     ORDER BY p.provider_key
                 ) FROM providers p WHERE p.tenant_id = $1), '[]'::jsonb),
                 'models', COALESCE((SELECT jsonb_agg(
-                    (to_jsonb(m) - 'tenant_id') || jsonb_build_object('provider_key', p.provider_key)
+                    (to_jsonb(m) - 'tenant_id') || jsonb_build_object(
+                        'provider_key', p.provider_key,
+                        'observed_requests', metrics.requests,
+                        'observed_success_rate', metrics.success_rate,
+                        'observed_avg_latency_ms', metrics.avg_latency_ms
+                    )
                     ORDER BY m.public_model_id
                 ) FROM models m JOIN providers p
                     ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+                  LEFT JOIN (
+                    SELECT r.tenant_id, r.selected_model_id,
+                           count(*)::bigint AS requests,
+                           count(*) FILTER (WHERE r.status = 'completed')::double precision
+                             / NULLIF(count(*), 0) AS success_rate,
+                           avg(extract(epoch FROM r.total_latency) * 1000)
+                             FILTER (WHERE r.total_latency IS NOT NULL) AS avg_latency_ms
+                    FROM gateway_requests r
+                    WHERE r.tenant_id = $1
+                      AND r.created_at >= now() - INTERVAL '30 days'
+                    GROUP BY r.tenant_id, r.selected_model_id
+                  ) metrics ON (metrics.tenant_id, metrics.selected_model_id) = (m.tenant_id, m.id)
                   WHERE m.tenant_id = $1), '[]'::jsonb),
                 'aliases', COALESCE((SELECT jsonb_agg(
                     (to_jsonb(a) - 'tenant_id') || jsonb_build_object(
