@@ -516,6 +516,7 @@ impl AdminService {
                 'aliases', COALESCE((SELECT jsonb_agg(
                     (to_jsonb(a) - 'tenant_id') || jsonb_build_object(
                         'public_model_id', m.public_model_id,
+                        'provider_model_id', m.provider_model_id,
                         'provider_key', p.provider_key
                     ) ORDER BY a.operation, a.quality_tier
                 ) FROM model_aliases a
@@ -948,6 +949,38 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query(
+            r#"
+            WITH provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $4, 'ollama', 'Ollama', 'local', 'http://127.0.0.1:11434',
+                    'env://OLLAMA_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            ), model AS (
+                INSERT INTO models (
+                    id, tenant_id, provider_id, public_model_id, provider_model_id,
+                    display_name, supported_operations, lifecycle_state
+                ) VALUES (
+                    $2, $4, $1, 'local-code', 'qwen3-coder:30b', 'Local code',
+                    ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO model_aliases (
+                id, tenant_id, operation, quality_tier, model_id, lifecycle_state
+            ) VALUES ($3, $4, 'anthropic_messages', 'premium', $2, 'active')
+            "#,
+        )
+        .bind(Uuid::from_u128(601))
+        .bind(Uuid::from_u128(602))
+        .bind(Uuid::from_u128(603))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let service = service(pool);
         let context = context(tenant_id);
         let from = Utc::now() - Duration::hours(1);
@@ -1060,7 +1093,12 @@ mod tests {
         assert!(audit.items[0]["before"].get("fingerprint").is_none());
 
         assert!(service.identity_map(&context).await.unwrap()["paths"].is_array());
-        assert!(service.catalog_report(&context).await.is_ok());
+        let catalog = service.catalog_report(&context).await.unwrap();
+        assert_eq!(catalog["aliases"][0]["public_model_id"], "local-code");
+        assert_eq!(
+            catalog["aliases"][0]["provider_model_id"],
+            "qwen3-coder:30b"
+        );
         service.governance_report(&context).await.unwrap();
         assert!(service.system_health_report(&context, false).await.is_ok());
     }
