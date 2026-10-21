@@ -481,7 +481,6 @@ fn is_transient(error_type: &str) -> bool {
     matches!(
         error_type,
         "408"
-            | "429"
             | "500"
             | "502"
             | "503"
@@ -546,6 +545,22 @@ mod tests {
         let _probe = engine
             .begin("primary", started + Duration::seconds(31), claim)
             .unwrap();
+    }
+
+    #[test]
+    fn provider_rate_limit_does_not_open_the_gateway_circuit() {
+        let engine = RoutingEngine::new(RoutingConfig::default(), ["primary".to_owned()]);
+        let started = Utc::now();
+        let mut attempt = engine.begin("primary", started, None).unwrap();
+        attempt.conclude(started + Duration::milliseconds(1), false, Some("429"));
+
+        let ranked = engine
+            .rank_at(
+                vec![candidate("primary", QualityTier::Advanced, 4)],
+                started + Duration::milliseconds(2),
+            )
+            .unwrap();
+        assert_eq!(ranked.candidates[0].provider_key, "primary");
     }
 
     #[test]

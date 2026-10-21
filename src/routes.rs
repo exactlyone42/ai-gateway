@@ -3394,6 +3394,8 @@ mod tests {
         let models: serde_json::Value =
             serde_json::from_slice(&to_bytes(models.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(models["data"][0]["id"], "claude-test");
+        assert_eq!(models["data"][0]["stream_idle_timeout_ms"], 600_000);
+        assert_eq!(models["data"][0]["stream_max_retries"], 0);
 
         let hello = router(state.clone())
             .oneshot(

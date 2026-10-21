@@ -32,7 +32,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 | custom_endpoint | `ANTHROPIC_BASE_URL`，可由 shell、`settings.json` 的 `env` 或 managed settings 設定 |
 | protocol | Anthropic Messages：`POST /v1/messages`；`POST /v1/messages/count_tokens` 可選 |
 | authentication | 一般模式用 Gateway credential；單一擁有者模式可保留 Claude OAuth，Gateway 每次向 Anthropic 驗證並對應既有 Principal，不保存 OAuth |
-| streaming | 必須增量轉送；SSE `ping`／comment 也算活動，預設靜默 300 秒會中止 |
+| streaming | 必須增量轉送；模型發現回傳 600 秒靜默上限，且不由 Gateway 自動重送 |
 | tools | supported；工具 beta body 與 `anthropic-beta` 必須原樣成對轉送 |
 | reasoning | supported；Claude 4.6+ 可送 `thinking: {"type":"adaptive"}` |
 | seat_subscription_behavior | 有 gateway credential 時不使用 claude.ai 訂閱，按 token 計給上游憑證擁有者；只換 base URL 而沒換 credential 時仍使用登入訂閱 |
@@ -62,7 +62,9 @@ Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號�
 `anthropic-beta`／`anthropic-version`、錯誤 body、`system` 陣列、`cache_control` 與 SSE raw
 bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發現為
 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
-只顯示 id 含 `claude` 或 `anthropic` 的模型。`x-claude-code-agent-id` 是 agent，不是人。
+只顯示 id 含 `claude` 或 `anthropic` 的模型。每個模型另回傳
+`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，避免慢回應在 60 秒被誤判斷線，
+也避免 Client 自動重送可能已執行的工作。`x-claude-code-agent-id` 是 agent，不是人。
 
 ## Codex CLI
 
