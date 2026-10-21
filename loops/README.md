@@ -43,6 +43,7 @@
 | [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
 | [request-evidence](./request-evidence.loop.md) | S08 | 已完成 | P1 | 記錄安全請求參數與可比較的可靠度、延遲及成本證據。卡 #64 |
 | [jev-fail-open](./jev-fail-open.loop.md) | S09 | 程式完成，實送受本機憑證阻擋 | P0 | Jev 無額度或不可用時仍沿用正常路由完成請求 |
+| [model-routing-admin](./model-routing-admin.loop.md) | S10 | 已完成 | P0 | 依能力與實測資料選模型，不把單一品質等級當成模型能力 |
 
 ## 現在該做哪一個
 

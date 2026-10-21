@@ -93,6 +93,14 @@ A `quality:<tier>` model selector is also a quality hint. Malformed hints return
 allowlist failures return `403 model_forbidden`. Policy headers are gateway-only
 metadata and are not forwarded to providers.
 
+Quality tiers are compatibility aliases for callers and policy limits, not a
+universal rating of model intelligence. Automatic routing first removes models
+that cannot perform the requested operation or capability. Jev prioritizes the
+remaining models using their declared purpose, capability flags, context,
+latency class, and pricing metadata; the router then applies live provider
+health, latency, load, and cost. If Jev cannot decide, the caller's original
+model is preserved. The Admin catalog separately shows 30-day measurements.
+
 `max_quality` constrains `quality:<tier>` selection. A caller using an explicit
 public model ID is constrained by `allowed_models`; model quality labels are not
 inferred from names. The deadline is checked again immediately before a

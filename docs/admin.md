@@ -8,6 +8,8 @@ session；`x-api-key` 與資料面的 Client API Key 一律拒絕。Tenant 只�
 
 Provider、Model 與 Model Alias 可由 W10 建立、修改、啟用、停用或封存。Policy 由 W11 啟用，
 Quota 由 W12 啟用；Admin API 出現 draft/disabled 資料列不代表資料面已套用。
+Models 畫面另顯示用途、能力旗標與最近 30 天的實際成功率及平均延遲；啟用中的模型也能修改
+這些路由資料。`quality_tier` 只保留作舊 Client 的相容別名，不代表跨用途的絕對品質。
 
 ## 認證與 bootstrap
 

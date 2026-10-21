@@ -613,6 +613,14 @@ pub struct ModelSelection {
     pub provider_id: Uuid,
     pub provider_version: i64,
     pub provider_key: String,
+    pub description: Option<String>,
+    pub context_window: Option<i64>,
+    pub latency_class: Option<String>,
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_images: bool,
+    pub supports_structured_output: bool,
     pub max_output_tokens: Option<i64>,
     pub cost_metadata: Value,
     pub profile: ProviderProfile,
@@ -635,6 +643,9 @@ struct SelectionRow {
     provider_type: String,
     base_url: String,
     credential_ref: String,
+    description: Option<String>,
+    context_window: Option<i64>,
+    latency_class: Option<String>,
     supports_streaming: bool,
     supports_tools: bool,
     supports_reasoning: bool,
@@ -823,6 +834,45 @@ impl ModelRegistry {
         Ok(selections)
     }
 
+    pub async fn routing_candidates(
+        &self,
+        tenant_id: Uuid,
+        development_bootstrap: bool,
+        operation: GatewayOperation,
+        required: CapabilityRequirements,
+    ) -> Result<Vec<ModelSelection>, RegistryError> {
+        if development_bootstrap {
+            return Err(RegistryError::ModelUnavailable);
+        }
+        if tenant_id.is_nil() {
+            return Err(RegistryError::ModelUnavailable);
+        }
+        let rows = sqlx::query_as::<_, SelectionRow>(ROUTING_CANDIDATES_SQL)
+            .bind(tenant_id)
+            .bind(operation.as_str())
+            .fetch_all(&self.pool)
+            .await?;
+        let mut selections = Vec::new();
+        let mut capability_error = None;
+        for row in rows {
+            let selector = row
+                .quality_tier
+                .as_deref()
+                .and_then(QualityTier::parse)
+                .map(ModelSelector::Quality)
+                .unwrap_or_else(|| ModelSelector::Model(row.public_model_id.clone()));
+            match self.selection_from_row(tenant_id, selector, row, required) {
+                Ok(selection) => selections.push(selection),
+                Err(error @ RegistryError::CapabilityMismatch(_)) => capability_error = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        if selections.is_empty() {
+            return Err(capability_error.unwrap_or(RegistryError::ModelUnavailable));
+        }
+        Ok(selections)
+    }
+
     fn selection_from_row(
         &self,
         tenant_id: Uuid,
@@ -851,6 +901,14 @@ impl ModelRegistry {
             provider_id: row.provider_id,
             provider_version: row.provider_version,
             provider_key: row.provider_key,
+            description: row.description,
+            context_window: row.context_window,
+            latency_class: row.latency_class,
+            supports_streaming: row.supports_streaming,
+            supports_tools: row.supports_tools,
+            supports_reasoning: row.supports_reasoning,
+            supports_images: row.supports_images,
+            supports_structured_output: row.supports_structured_output,
             max_output_tokens: row.max_output_tokens,
             cost_metadata: row.cost_metadata,
             profile,
@@ -899,6 +957,14 @@ impl ModelRegistry {
             provider_id: Uuid::nil(),
             provider_version: 1,
             provider_key: profile.provider_key.clone(),
+            description: None,
+            context_window: None,
+            latency_class: None,
+            supports_streaming: false,
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_images: false,
+            supports_structured_output: false,
             max_output_tokens: None,
             cost_metadata: serde_json::json!({}),
             profile,
@@ -996,6 +1062,7 @@ const SELECTION_SQL: &str = r#"
                NULL::text AS quality_tier,
                m.id AS model_id, m.version AS model_version,
                m.public_model_id, m.provider_model_id, m.provider_id,
+               m.description, m.context_window, m.latency_class,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
                m.supports_images, m.supports_structured_output,
                m.max_output_tokens, m.cost_metadata,
@@ -1006,6 +1073,7 @@ const SELECTION_SQL: &str = r#"
         UNION ALL
         SELECT a.id, a.version, a.quality_tier, m.id, m.version,
                m.public_model_id, m.provider_model_id, m.provider_id,
+               m.description, m.context_window, m.latency_class,
                m.supports_streaming, m.supports_tools, m.supports_reasoning,
                m.supports_images, m.supports_structured_output,
                m.max_output_tokens, m.cost_metadata,
@@ -1031,6 +1099,7 @@ const QUALITY_CANDIDATES_SQL: &str = r#"
     SELECT a.id AS alias_id, a.version AS alias_version, a.quality_tier,
            m.id AS model_id, m.version AS model_version,
            m.public_model_id, m.provider_model_id, m.provider_id,
+           m.description, m.context_window, m.latency_class,
            m.supports_streaming, m.supports_tools, m.supports_reasoning,
            m.supports_images, m.supports_structured_output,
            m.max_output_tokens, m.cost_metadata
@@ -1041,6 +1110,7 @@ const QUALITY_CANDIDATES_SQL: &str = r#"
     UNION ALL
     SELECT NULL::uuid, NULL::bigint, m.quality_tier,
            m.id, m.version, m.public_model_id, m.provider_model_id, m.provider_id,
+           m.description, m.context_window, m.latency_class,
            m.supports_streaming, m.supports_tools, m.supports_reasoning,
            m.supports_images, m.supports_structured_output,
            m.max_output_tokens, m.cost_metadata
@@ -1074,6 +1144,25 @@ const QUALITY_CANDIDATES_SQL: &str = r#"
             WHEN 'economy' THEN 0 WHEN 'standard' THEN 1
             WHEN 'advanced' THEN 2 WHEN 'premium' THEN 3
           END DESC, c.public_model_id, c.model_id
+"#;
+
+const ROUTING_CANDIDATES_SQL: &str = r#"
+    SELECT NULL::uuid AS alias_id, NULL::bigint AS alias_version,
+           m.quality_tier, m.id AS model_id, m.version AS model_version,
+           m.public_model_id, m.provider_model_id, m.provider_id,
+           m.description, m.context_window, m.latency_class,
+           m.supports_streaming, m.supports_tools, m.supports_reasoning,
+           m.supports_images, m.supports_structured_output,
+           m.max_output_tokens, m.cost_metadata,
+           p.version AS provider_version, p.provider_key,
+           p.base_url, p.credential_ref, p.provider_type,
+           m.supported_operations AS model_supported_operations,
+           p.supported_operations AS provider_supported_operations
+    FROM models m
+    JOIN providers p ON (p.tenant_id, p.id) = (m.tenant_id, m.provider_id)
+    WHERE m.tenant_id = $1 AND m.lifecycle_state = 'active'
+      AND p.lifecycle_state = 'active' AND $2 = ANY(m.supported_operations)
+    ORDER BY m.public_model_id, m.id
 "#;
 
 #[cfg(test)]
@@ -1457,7 +1546,8 @@ mod tests {
             Arc::<str>::from("server-secret"),
         )])
         .unwrap();
-        let candidates = ModelRegistry::new(pool, profiles, Vec::new())
+        let registry = ModelRegistry::new(pool, profiles, Vec::new());
+        let candidates = registry
             .candidates(
                 tenant_id,
                 false,
@@ -1472,6 +1562,40 @@ mod tests {
             .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].model_id, standard_id);
+        let routing_candidates = registry
+            .routing_candidates(
+                tenant_id,
+                false,
+                GatewayOperation::OpenAiResponses,
+                CapabilityRequirements::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(routing_candidates.len(), 2);
+        assert!(
+            routing_candidates
+                .iter()
+                .any(|candidate| candidate.model_id == premium_id)
+        );
+        assert!(
+            routing_candidates
+                .iter()
+                .any(|candidate| candidate.model_id == standard_id)
+        );
+        let image_candidates = registry
+            .routing_candidates(
+                tenant_id,
+                false,
+                GatewayOperation::OpenAiResponses,
+                CapabilityRequirements {
+                    images: true,
+                    ..CapabilityRequirements::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(image_candidates.len(), 1);
+        assert_eq!(image_candidates[0].model_id, standard_id);
     }
 
     #[sqlx::test]

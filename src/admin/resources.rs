@@ -556,6 +556,7 @@ impl AdminService {
                     input.latency_class.as_deref(),
                     &input.supported_operations,
                     &input.cost_metadata,
+                    input.quality_tier.as_deref(),
                 )?;
                 let value: Value = sqlx::query_scalar(
                     r#"
@@ -917,7 +918,7 @@ impl AdminService {
                         latency_class = COALESCE($18, latency_class),
                         version = version + 1, updated_at = now()
                     WHERE tenant_id = $1 AND id = $2 AND version = $3
-                      AND lifecycle_state IN ('draft', 'disabled')
+                      AND lifecycle_state IN ('draft', 'disabled', 'active')
                     RETURNING to_jsonb(models)
                     "#,
                 )
@@ -1584,6 +1585,7 @@ fn validate_model_fields(
     latency_class: Option<&str>,
     operations: &[String],
     cost_metadata: &serde_json::Map<String, Value>,
+    quality_tier: Option<&str>,
 ) -> Result<(), AdminError> {
     if public_model_id.trim() != public_model_id
         || provider_model_id.trim() != provider_model_id
@@ -1595,6 +1597,7 @@ fn validate_model_fields(
         || description.is_some_and(|value| value.trim().is_empty() || value.len() > 1024)
         || latency_class.is_some_and(|value| value.len() > 64)
         || serde_json::to_vec(cost_metadata).map_or(true, |value| value.len() > 4096)
+        || quality_tier.is_some_and(|value| !is_quality_tier(value))
     {
         return Err(AdminError::InvalidRequest);
     }
@@ -1618,6 +1621,10 @@ fn validate_optional_model_fields(input: &ModelPatch) -> Result<(), AdminError> 
             .cost_metadata
             .as_ref()
             .is_some_and(|value| serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > 4096))
+        || input
+            .quality_tier
+            .as_deref()
+            .is_some_and(|value| !is_quality_tier(value))
     {
         return Err(AdminError::InvalidRequest);
     }
@@ -1625,6 +1632,10 @@ fn validate_optional_model_fields(input: &ModelPatch) -> Result<(), AdminError> 
         validate_operations(operations)?;
     }
     Ok(())
+}
+
+fn is_quality_tier(value: &str) -> bool {
+    matches!(value, "economy" | "standard" | "advanced" | "premium")
 }
 
 async fn load_registry_cascade(
@@ -2052,6 +2063,7 @@ mod tests {
                 Some("standard"),
                 &operations,
                 &serde_json::Map::new(),
+                Some("standard"),
             )
             .is_ok()
         );
@@ -2063,6 +2075,19 @@ mod tests {
                 None,
                 &operations,
                 &serde_json::Map::new(),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_model_fields(
+                "company-model",
+                "provider-model",
+                None,
+                None,
+                &operations,
+                &serde_json::Map::new(),
+                Some("best"),
             )
             .is_err()
         );
@@ -2078,6 +2103,7 @@ mod tests {
                 None,
                 &operations,
                 &oversized,
+                None,
             )
             .is_err()
         );
