@@ -26,6 +26,10 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/admin/v1/session", delete(logout))
         .route("/admin/v1/overview", get(overview))
+        .route(
+            "/admin/v1/task-classification-shadow",
+            get(task_classification_shadow),
+        )
         .route("/admin/v1/identity-map", get(identity_map))
         .route("/admin/v1/requests", get(request_page))
         .route("/admin/v1/requests/{id}", get(request_report))
@@ -165,6 +169,19 @@ async fn overview(
     Query(query): Query<ReportWindowQuery>,
 ) -> Result<Json<serde_json::Value>, AdminError> {
     Ok(Json(state.admin.overview_report(&context, query).await?))
+}
+
+async fn task_classification_shadow(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportWindowQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .task_classification_shadow_report(&context, query)
+            .await?,
+    ))
 }
 
 async fn identity_map(
