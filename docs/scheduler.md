@@ -47,7 +47,12 @@ constraint's id, mode and limit, and records a hard scheduler rejection.
 
 Defaults are 12 interactive-reserved, 4 shared and 4 background-reserved active
 slots. Queue defaults are 64/128/64, with 64 per tenant and 32 per credential.
-`SCHEDULER_*` variables in `.env.example` configure every bound. The process hard
+`SCHEDULER_PASSTHROUGH=true` turns off Gateway concurrency admission and sends
+requests directly to the selected provider. Provider limits and model
+capabilities then decide whether a request is accepted. Authentication, policy,
+spend and token quotas still run before this point.
+
+Other `SCHEDULER_*` variables in `.env.example` configure every bound. The process hard
 queue timeout defaults to 30 seconds and cannot be relaxed by a request hint.
 `SCHEDULER_AGING_ENABLED` and `SCHEDULER_RESERVATIONS_ENABLED` exist for W18
 negative controls; production keeps both enabled.
