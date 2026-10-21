@@ -224,6 +224,10 @@ struct RequestRecord {
     quality: Option<String>,
     budget_class: Option<String>,
     requested_model: Option<String>,
+    #[serde(default)]
+    requested_parameters: Option<Value>,
+    #[serde(default)]
+    provider_parameters: Option<Value>,
     selected_model: Option<String>,
     selected_provider: Option<String>,
     estimated_tokens: Option<i64>,
@@ -552,6 +556,11 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub fn annotate_parameters(&mut self, requested: Value, provider: Value) {
+        self.envelope.request.requested_parameters = Some(requested);
+        self.envelope.request.provider_parameters = Some(provider);
+    }
+
     pub fn cancel_on_force(&mut self, token: CancellationToken) {
         self.force_token = Some(token);
     }
@@ -972,6 +981,8 @@ impl RequestEnvelope {
                 quality: bounded(start.quality),
                 budget_class: bounded(start.budget_class),
                 requested_model: bounded(start.requested_model),
+                requested_parameters: None,
+                provider_parameters: None,
                 selected_model: None,
                 selected_provider: None,
                 estimated_tokens: start.estimated_tokens,
@@ -2114,6 +2125,30 @@ mod tests {
         let mut envelope = RequestEnvelope::started(request_start("recovery-request"));
         let request_id = envelope.request.id;
         spool.reserve(request_id, &envelope).unwrap();
+        envelope.request.requested_parameters = Some(serde_json::json!({
+            "schema_version": 1,
+            "operation": "anthropic_messages",
+            "model": "company-default",
+            "message_count": 1,
+            "content_part_count": 1,
+            "text_chars": 15,
+            "image_count": 0,
+            "tool_count": 0,
+            "has_system": false,
+            "has_structured_output": false
+        }));
+        envelope.request.provider_parameters = Some(serde_json::json!({
+            "schema_version": 1,
+            "operation": "anthropic_messages",
+            "model": "provider-model",
+            "message_count": 1,
+            "content_part_count": 1,
+            "text_chars": 15,
+            "image_count": 0,
+            "tool_count": 0,
+            "has_system": false,
+            "has_structured_output": false
+        }));
         let now = Utc::now();
         envelope.complete(RequestCompletion {
             status: "completed".to_owned(),
@@ -2183,6 +2218,7 @@ mod tests {
                 (SELECT count(*) FROM gateway_requests) AS requests,
                 (SELECT count(*) FROM provider_attempts) AS attempts,
                 (SELECT count(*) FROM usage_records) AS usage,
+                (SELECT count(*) FROM request_parameter_snapshots) AS parameter_snapshots,
                 (SELECT cached_input_tokens FROM usage_records) AS cached,
                 (SELECT cache_write_input_tokens FROM usage_records) AS cache_write,
                 (SELECT reasoning_tokens FROM usage_records) AS reasoning
@@ -2194,6 +2230,7 @@ mod tests {
         assert_eq!(row.get::<i64, _>("requests"), 2);
         assert_eq!(row.get::<i64, _>("attempts"), 1);
         assert_eq!(row.get::<i64, _>("usage"), 1);
+        assert_eq!(row.get::<i64, _>("parameter_snapshots"), 2);
         assert_eq!(row.get::<i64, _>("cached"), 4);
         assert_eq!(row.get::<i64, _>("cache_write"), 2);
         assert_eq!(row.get::<i64, _>("reasoning"), 1);

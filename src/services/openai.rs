@@ -158,6 +158,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             return Err(GatewayError::from(error));
         }
     };
+    let requested_parameters = crate::request_parameters::snapshot(operation, decoded.document());
     let prepared = request_policy::prepare(state, &request.headers, selector, rejection).await?;
     let policy = &prepared.policy;
     let required = CapabilityRequirements::from_request(operation, decoded.document());
@@ -218,6 +219,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             idempotency_key,
         },
     )?;
+    let provider_parameters = upstream_request.parameter_snapshot()?;
     let is_stream = canonical.stream;
     let mut reservation = state
         .ledger
@@ -241,6 +243,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             quota_snapshot,
         )
         .await?;
+    reservation.annotate_parameters(requested_parameters, provider_parameters);
     reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(request.operation.name(), None, None);
     if policy.is_expired(Utc::now()) {
