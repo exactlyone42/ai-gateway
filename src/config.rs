@@ -877,6 +877,7 @@ fn ledger_capacity(name: &'static str, default: u64) -> Result<u64, ConfigError>
 fn scheduler_config() -> Result<SchedulerConfig, ConfigError> {
     let defaults = SchedulerConfig::default();
     let config = SchedulerConfig {
+        passthrough: scheduler_bool("SCHEDULER_PASSTHROUGH", defaults.passthrough)?,
         active_interactive_reserved: scheduler_usize(
             "SCHEDULER_ACTIVE_INTERACTIVE_RESERVED",
             defaults.active_interactive_reserved,

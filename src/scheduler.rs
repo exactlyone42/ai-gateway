@@ -18,6 +18,7 @@ const WEIGHTS: [u32; 6] = [20, 10, 6, 3, 2, 1];
 
 #[derive(Clone, Debug)]
 pub struct SchedulerConfig {
+    pub passthrough: bool,
     pub active_interactive_reserved: usize,
     pub active_shared: usize,
     pub active_background_reserved: usize,
@@ -43,6 +44,7 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
+            passthrough: false,
             active_interactive_reserved: 12,
             active_shared: 4,
             active_background_reserved: 4,
@@ -269,6 +271,17 @@ impl Scheduler {
         let mut state = self.lock()?;
         if state.closed {
             return Err(SchedulerError::Closed);
+        }
+        if self.inner.config.passthrough {
+            state
+                .tenant_stats
+                .entry(request.tenant_id)
+                .or_default()
+                .accepted += 1;
+            return Ok(Some(SchedulerLease {
+                inner: Arc::clone(&self.inner),
+                allocation: None,
+            }));
         }
         if hard_quota_blocked(&state, request) {
             return Err(SchedulerError::HardQuota);
@@ -1018,6 +1031,34 @@ mod tests {
             cache_affinity: None,
             quota: Vec::new(),
         }
+    }
+
+    #[test]
+    fn passthrough_never_queues_or_rejects_for_gateway_concurrency() {
+        let scheduler = Scheduler::new(SchedulerConfig {
+            passthrough: true,
+            active_interactive_reserved: 1,
+            active_shared: 1,
+            active_background_reserved: 1,
+            per_provider: 1,
+            per_model: 1,
+            per_user: 1,
+            per_device: 1,
+            per_client: 1,
+            per_agent: 1,
+            per_credential: 1,
+            per_workload: 1,
+            ..SchedulerConfig::default()
+        })
+        .unwrap();
+        let request = request(WorkloadClass::Interactive, Uuid::new_v4(), Uuid::new_v4());
+
+        let leases = (0..100)
+            .map(|_| scheduler.try_acquire(&request).unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(leases.len(), 100);
+        assert!(leases.iter().all(|lease| lease.allocation.is_none()));
     }
 
     #[tokio::test]

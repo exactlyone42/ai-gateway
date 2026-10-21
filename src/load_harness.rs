@@ -219,6 +219,7 @@ mod tests {
     async fn scheduler_batch() -> Value {
         let provider = Uuid::new_v4();
         let config = SchedulerConfig {
+            passthrough: false,
             active_interactive_reserved: 2,
             active_shared: 2,
             active_background_reserved: 2,
