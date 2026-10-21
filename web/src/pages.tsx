@@ -42,7 +42,7 @@ export function OverviewPage() {
   const metrics = [
     ['Requests', 'requests'], ['Success rate', 'success_rate'], ['Unsuccessful', 'unsuccessful_requests'],
     ['Input tokens', 'input_tokens'], ['Output tokens', 'output_tokens'], ['Total tokens', 'total_tokens'],
-    ['Cache read', 'cached_input_tokens'], ['Cache write', 'cache_write_input_tokens'], ['P95 latency', 'p95_latency_ms'], ['P95 TTFT', 'p95_ttft_ms'],
+    ['Cache read', 'cached_input_tokens'], ['Cache write', 'cache_write_input_tokens'], ['P95 Gateway processing', 'p95_gateway_overhead_ms'],
     ['Cost', 'cost_microusd'],
   ]
   return <Page title="Overview" actions={<RangePicker value={range} onChange={setRange} />}>
