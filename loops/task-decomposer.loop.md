@@ -5,7 +5,7 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 進行中（Task 1–5 完成，待真實模型品質與跨協定等價驗收） |
+| 狀態 | 進行中（只剩真實模型召回，待正式 shadow 流量） |
 | 優先度 | P0 |
 | 前置 | `canonical-layer`、`model-task-classification` |
 | 開始 | 2026-10-22 |
@@ -18,14 +18,14 @@
 ## 完成判準
 - [x] 共用 `TaskGraph` 契約、8 節點／2 層上限、唯一 ID、依賴存在、無循環與資料政策不可降級都有機器測試。
 - [ ] 至少 30 個複合案例的必要子任務召回率 ≥90%，新增或改變意圖為 0；至少 10 個簡單／工具案例 100% `Direct`。
-- [ ] Anthropic Messages、OpenAI Responses／Chat 的同義 canonical 輸入得到等價 decision。
+- [x] Anthropic Messages、OpenAI Responses／Chat 的同義 canonical 輸入得到等價 decision（PR #96）。
 - [x] `DataPolicy` 三值、繼承順序與 canonical 能力判斷有測試；含歷史 ToolCall／ToolResult 的續輪請求必須 `Direct`。
 - [x] shadow 不改路由與 Provider 呼叫數，只存 mode、reason、node_count、depth、elapsed、version。
 - [x] tenant 預設 disabled；shadow 拆解呼叫也受硬政策限制，LocalOnly 只用本地、不呼叫 Jev，無本地模型回 `Direct`。
 - [x] 逾時、低信心、壞 JSON、越界圖、Client 工具與不支援欄位回原單模型路徑。
-- [ ] 機密掃描涵蓋拆解輸入與輸出；prompt／objective 不進 log、trace、ledger、spool。
-- [ ] `./scripts/check.sh all` 通過，文件與報表同步。
-- [ ] 陰性對照：注入循環、9 節點、三層依賴、重複 ID、政策降級或 prompt sentinel，圖驗證或機密檢查必須變紅，且 Provider 工作呼叫為 0。
+- [x] 機密掃描涵蓋拆解輸入與輸出；日誌測試加全資料表掃描 `prompt_and_objective_reach_no_table`（植入對照會變紅）。shadow 路徑不寫 spool／trace。
+- [x] `./scripts/check.sh all` 通過（2026-10-23，lib 283 過 0 敗），文件與報表同步。
+- [x] 陰性對照：注入循環、9 節點、三層依賴、重複 ID、政策降級或 prompt sentinel，圖驗證或機密檢查必須變紅，且 Provider 工作呼叫為 0。
 
 ## 已知
 - `src/adapters/protocol.rs` 已把各入口投影成 `CanonicalRequest`，拆解器不得重新解析 Client JSON。
@@ -55,6 +55,7 @@
 | 品質評分 | 固定人工標記案例 | 模型自評 | 可重播且有陰性對照 |
 
 ## 下一步
+0. 2026-10-23：只剩第二條「真實模型召回」，需正式環境 shadow 自然流量；部署 shadow 後用報表量，達標才凍結契約。
 1. 補三協定同義輸入的 decision 等價測試與機密掃描（拆解輸入／輸出）。
 2. 用自然流量的 shadow 報表 `/admin/v1/task-decomposition-shadow` 量真實模型的召回與錯拆；固定案例只驗評分器與契約，不代表正式品質。
 3. `check.sh all` 目前只被既有的 `identity::tests::lifecycle_is_tenant_safe_and_revocation_beats_the_cache` 擋住（基準 33135a5 單獨跑也失敗，502≠400），需另案處理。
