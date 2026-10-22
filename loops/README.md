@@ -47,6 +47,9 @@
 | [claude-first-byte-stall](./claude-first-byte-stall.loop.md) | W21 | 進行中 | P0 | 修正 Claude Code 經 Gateway 長請求首筆回應卡住與 499 |
 | [model-task-classification](./model-task-classification.loop.md) | S11 | 進行中（S01–S03 完成；S04 驗證中） | P0 | 先判斷工作種類，再挑真正適合且可用的模型。卡 #77 |
 | [incident-admin-history](./incident-admin-history.loop.md) | S12 | 程式與隔離驗收完成，待正式讀回 | P1 | 後台看懂事故、根因、修正、預防與驗證證據。卡 #78 |
+| [task-decomposer](./task-decomposer.loop.md) | S13 | 未開始（PLAN 完成） | P0 | 在統一請求格式上拆出完整且有限的任務圖，簡單請求維持單模型 |
+| [model-dispatcher](./model-dispatcher.loop.md) | S14 | 未開始（等 S13） | P0 | 依硬政策與能力把子任務分派給合格模型，Jev 只排序候選 |
+| [result-integrator](./result-integrator.loop.md) | S15 | 未開始（等 S13／S14） | P0 | 用另行分派的整合模型與程式檢查產生唯一 Client 回應 |
 
 ## 現在該做哪一個
 

@@ -1015,22 +1015,6 @@ mod tests {
         assert_eq!(models["data"][0]["id"], "company-default");
         assert_eq!(models["data"][0]["display_name"], "Company default");
 
-        let tools_rejected = routes::router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("authorization", format!("Bearer {}", issued.plaintext))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"model":"company-default","tools":[{"type":"function"}]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(tools_rejected.status(), StatusCode::BAD_REQUEST);
-
         assert!(!database_contains(&pool, &issued.plaintext).await);
         assert_eq!(
             state

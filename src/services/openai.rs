@@ -29,6 +29,7 @@ use crate::{
         request_policy::{self, RejectionContext},
         request_quota,
         streaming::{ProtocolError, StreamObserver, event_data, relay, relay_transcoded},
+        task_decomposition,
     },
     state::AppState,
 };
@@ -161,7 +162,6 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let requested_parameters = crate::request_parameters::snapshot(operation, decoded.document());
     let prepared = request_policy::prepare(state, &request.headers, selector, rejection).await?;
     let policy = &prepared.policy;
-    let required = CapabilityRequirements::from_request(operation, decoded.document());
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
     let gateway_request_id = uuid::Uuid::new_v4();
     let trace_id = match logging::current_trace_ids().0 {
@@ -180,6 +180,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         budget_class: value_text(&policy.budget_class),
         deadline: policy.deadline_at,
     });
+    let required = CapabilityRequirements::from_canonical(&canonical);
     let prepared_quota = request_quota::admit(
         state,
         &prepared,
@@ -189,6 +190,11 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         required,
     )
     .await?;
+    task_decomposition::spawn_shadow(
+        state.shadow_context(),
+        task_decomposition::DecompositionInput::from_request(&canonical),
+        gateway_request_id,
+    );
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;

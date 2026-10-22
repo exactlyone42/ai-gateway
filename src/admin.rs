@@ -111,6 +111,12 @@ pub const RBAC_RULES: &[RbacRule] = &[
     },
     RbacRule {
         method: "GET",
+        route: "/admin/v1/task-decomposition-shadow",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "GET",
         route: "/admin/v1/identity-map",
         action: AdminAction::ReadResource,
         roles: ALL_ROLES,

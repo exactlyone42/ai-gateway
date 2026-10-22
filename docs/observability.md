@@ -185,6 +185,17 @@ info,opentelemetry_sdk=warn,opentelemetry_otlp=warn
 設定載入是 `serde_yaml::from_str(...)` ＋ `deny_unknown_fields`（`src/target.rs:231`），
 舊版程式讀到 `format: otel` 會直接載入失敗 → 整個觀測層停擺。
 
+## 任務拆解（shadow）
+
+拆解器只在租戶於 `orchestration_configs` 設成 `shadow` 後才執行（預設 `disabled`），
+背景執行，不改主請求的模型、候選或呼叫數。每次結果寫兩筆 metadata：
+`task_decompositions`（decision、reason 代碼、node_count、max_depth、elapsed_us、
+contract_version；僅可新增）與 `orchestration_executions`（role=`decomposer`、
+task_id=`__decomposer__`）。兩表都沒有 prompt、objective 或模型輸出欄位，`reason` 由
+資料庫限制為 `[a-z0-9_]` 代碼。日誌只有事件 `orchestration.decompose.direct` 與 reason。
+報表：`GET /admin/v1/task-decomposition-shadow?from=&to=`（次數、direct 原因分佈、p95 耗時）。
+`local_only` 租戶只用 Vllm／Ollama 且不呼叫 Jev；沒有本地模型就記 `no_eligible_model`。
+
 ## 還沒有的
 
 `principal` 已由 W03 在成功認證的 access log 寫入 opaque credential UUID；完整 display name
