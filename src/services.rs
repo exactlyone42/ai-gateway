@@ -6,3 +6,4 @@ pub mod request_policy;
 pub mod request_quota;
 pub mod sse;
 pub mod streaming;
+pub mod task_decomposition;

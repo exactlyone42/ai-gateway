@@ -33,6 +33,30 @@ pub fn transcode_buffered(
     .map(|response| response.body)
 }
 
+/// Concatenated assistant text of a buffered provider response; any
+/// non-text content (tool calls, opaque parts) is ignored.
+pub fn buffered_text(
+    target_operation: GatewayOperation,
+    body: &[u8],
+) -> Result<String, GatewayError> {
+    let response = match target_operation {
+        GatewayOperation::AnthropicMessages => decode_anthropic(body)?,
+        GatewayOperation::OpenAiResponses => decode_openai(body)?,
+        GatewayOperation::GeminiGenerateContent => decode_gemini(body)?,
+        _ => return Err(GatewayError::UnsupportedRequest),
+    };
+    Ok(response
+        .messages
+        .iter()
+        .filter(|message| message.role == CanonicalRole::Assistant)
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect())
+}
+
 pub struct TranscodedBufferedResponse {
     pub body: Bytes,
     pub incomplete: bool,

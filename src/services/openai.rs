@@ -29,6 +29,7 @@ use crate::{
         request_policy::{self, RejectionContext},
         request_quota,
         streaming::{ProtocolError, StreamObserver, event_data, relay, relay_transcoded},
+        task_decomposition,
     },
     state::AppState,
 };
@@ -189,6 +190,11 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         required,
     )
     .await?;
+    task_decomposition::spawn_shadow(
+        state.shadow_context(),
+        task_decomposition::DecompositionInput::from_request(&canonical),
+        gateway_request_id,
+    );
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;

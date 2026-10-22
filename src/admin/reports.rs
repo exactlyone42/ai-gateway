@@ -114,6 +114,43 @@ impl AdminService {
         Ok(report)
     }
 
+    pub async fn task_decomposition_shadow_report(
+        &self,
+        context: &AdminContext,
+        query: ReportWindowQuery,
+    ) -> Result<Value, AdminError> {
+        validate_window(query.from, query.to)?;
+        let report = sqlx::query_scalar(
+            r#"
+            WITH rows AS (
+                SELECT * FROM task_decompositions
+                WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3
+            ), reasons AS (
+                SELECT reason, count(*)::bigint AS requests FROM rows
+                WHERE decision = 'direct' GROUP BY reason
+            )
+            SELECT jsonb_build_object(
+                'from', $2, 'to', $3,
+                'observed', (SELECT count(*) FROM rows),
+                'decomposed', (SELECT count(*) FROM rows WHERE decision = 'decomposed'),
+                'direct', (SELECT count(*) FROM rows WHERE decision = 'direct'),
+                'average_nodes', (SELECT avg(node_count)::double precision
+                                  FROM rows WHERE decision = 'decomposed'),
+                'p95_elapsed_ms', (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_us)
+                                   / 1000.0 FROM rows),
+                'direct_reasons', COALESCE(
+                    (SELECT jsonb_object_agg(reason, requests) FROM reasons), '{}'::jsonb)
+            )
+            "#,
+        )
+        .bind(context.tenant_id)
+        .bind(query.from)
+        .bind(query.to)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(report)
+    }
+
     pub async fn overview_report(
         &self,
         context: &AdminContext,
@@ -1238,5 +1275,44 @@ mod tests {
         );
         service.governance_report(&context).await.unwrap();
         assert!(service.system_health_report(&context, false).await.is_ok());
+    }
+
+    #[sqlx::test]
+    async fn task_decomposition_report_counts_only_the_callers_tenant(pool: PgPool) {
+        let (tenant, other) = (Uuid::from_u128(970), Uuid::from_u128(971));
+        for (tenant_id, id, decision, reason, nodes) in [
+            (tenant, 1, "decomposed", "decomposed", 3),
+            (tenant, 2, "direct", "bad_json", 0),
+            (tenant, 3, "direct", "bad_json", 0),
+            (other, 4, "decomposed", "decomposed", 2),
+        ] {
+            sqlx::query(
+                "INSERT INTO task_decompositions
+                    (tenant_id, orchestration_id, gateway_request_id, decision, reason,
+                     node_count, max_depth, elapsed_us, contract_version)
+                 VALUES ($1, $2, $3, $4, $5, $6, LEAST($6, 1), 2000, 'task-graph-v1')",
+            )
+            .bind(tenant_id)
+            .bind(Uuid::from_u128(id))
+            .bind(Uuid::new_v4())
+            .bind(decision)
+            .bind(reason)
+            .bind(nodes)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let from = Utc::now() - Duration::hours(1);
+        let to = Utc::now() + Duration::minutes(1);
+        let report = service(pool)
+            .task_decomposition_shadow_report(&context(tenant), ReportWindowQuery { from, to })
+            .await
+            .unwrap();
+        assert_eq!(report["observed"], 3);
+        assert_eq!(report["decomposed"], 1);
+        assert_eq!(report["direct"], 2);
+        assert_eq!(report["average_nodes"], 3.0);
+        assert_eq!(report["p95_elapsed_ms"], 2.0);
+        assert_eq!(report["direct_reasons"]["bad_json"], 2);
     }
 }

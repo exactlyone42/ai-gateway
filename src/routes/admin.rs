@@ -30,6 +30,10 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/v1/task-classification-shadow",
             get(task_classification_shadow),
         )
+        .route(
+            "/admin/v1/task-decomposition-shadow",
+            get(task_decomposition_shadow),
+        )
         .route("/admin/v1/identity-map", get(identity_map))
         .route("/admin/v1/requests", get(request_page))
         .route("/admin/v1/requests/{id}", get(request_report))
@@ -180,6 +184,19 @@ async fn task_classification_shadow(
         state
             .admin
             .task_classification_shadow_report(&context, query)
+            .await?,
+    ))
+}
+
+async fn task_decomposition_shadow(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ReportWindowQuery>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .task_decomposition_shadow_report(&context, query)
             .await?,
     ))
 }

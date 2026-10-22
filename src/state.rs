@@ -43,9 +43,20 @@ pub struct AppState {
     pub(crate) admin: AdminService,
     pub(crate) ledger: Ledger,
     pub(crate) lifecycle: ProcessLifecycle,
+    /// Bounds concurrent shadow decompositions; a busy gateway skips rather than queues.
+    pub(crate) shadow_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
+    pub(crate) fn shadow_context(&self) -> crate::services::task_decomposition::ShadowContext {
+        crate::services::task_decomposition::ShadowContext {
+            pool: self.pool.clone(),
+            models: self.models.clone(),
+            client: self.client.clone(),
+            slots: self.shadow_slots.clone(),
+        }
+    }
+
     pub fn new(config: Config, pool: Pool<Postgres>) -> Result<Self, StateError> {
         let bootstrap_key_hash = (config.credential_environment == "dev")
             .then(|| {
@@ -220,6 +231,7 @@ impl AppState {
             admin,
             ledger,
             lifecycle: ProcessLifecycle::default(),
+            shadow_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
         })
     }
 }

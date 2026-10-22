@@ -27,7 +27,7 @@ use crate::{
     routes::{BodyBytes, body_bytes},
     services::{
         request_policy, request_policy::RejectionContext, request_quota, sse::MetadataParser,
-        streaming,
+        streaming, task_decomposition,
     },
     state::AppState,
 };
@@ -178,6 +178,11 @@ pub(super) async fn proxy(
         required,
     )
     .await?;
+    task_decomposition::spawn_shadow(
+        state.shadow_context(),
+        task_decomposition::DecompositionInput::from_request(&canonical),
+        gateway_request_id,
+    );
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;
