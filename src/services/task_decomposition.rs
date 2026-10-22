@@ -805,6 +805,79 @@ mod tests {
         );
     }
 
+    async fn tables_containing(pool: &PgPool, needle: &str) -> Vec<String> {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let mut hits = Vec::new();
+        for table in tables {
+            let found: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM \"{table}\" t WHERE to_jsonb(t)::text LIKE $1)"
+            ))
+            .bind(format!("%{needle}%"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if found {
+                hits.push(table);
+            }
+        }
+        hits
+    }
+
+    #[sqlx::test]
+    async fn prompt_and_objective_reach_no_table(pool: PgPool) {
+        let tenant = Uuid::from_u128(905);
+        sqlx::query("INSERT INTO orchestration_configs (tenant_id, mode) VALUES ($1, 'shadow')")
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let objective = "sentinel-objective-51d2e8";
+        let fake = Fake::text(&format!(
+            r#"{{"decision":"decompose","confidence":0.9,"nodes":[
+            {{"id":"a","objective":"{objective}","task_kind":"code_review","output":"text"}}]}}"#
+        ));
+        let input = DecompositionInput::from_request(&for_tenant(
+            plain(&format!("{SENTINEL} review then test")),
+            tenant,
+        ));
+        observe(
+            &pool,
+            &fake,
+            &input,
+            Uuid::new_v4(),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(shadow_rows(&pool, tenant).await.len(), 1);
+        for needle in [SENTINEL, objective] {
+            assert!(
+                tables_containing(&pool, needle).await.is_empty(),
+                "{needle}"
+            );
+        }
+
+        sqlx::query("CREATE TABLE leak_probe (note text)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO leak_probe VALUES ($1)")
+            .bind(SENTINEL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            tables_containing(&pool, SENTINEL).await,
+            ["leak_probe"],
+            "scanner must detect a planted leak"
+        );
+    }
+
     #[sqlx::test]
     async fn failures_are_recorded_as_direct_with_a_reason_code(pool: PgPool) {
         let tenant = Uuid::from_u128(904);
