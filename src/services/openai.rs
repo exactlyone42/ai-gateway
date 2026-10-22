@@ -161,7 +161,6 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let requested_parameters = crate::request_parameters::snapshot(operation, decoded.document());
     let prepared = request_policy::prepare(state, &request.headers, selector, rejection).await?;
     let policy = &prepared.policy;
-    let required = CapabilityRequirements::from_request(operation, decoded.document());
     let idempotency_key = provider_idempotency_key(state, &request.principal, &request.headers)?;
     let gateway_request_id = uuid::Uuid::new_v4();
     let trace_id = match logging::current_trace_ids().0 {
@@ -180,6 +179,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         budget_class: value_text(&policy.budget_class),
         deadline: policy.deadline_at,
     });
+    let required = CapabilityRequirements::from_canonical(&canonical);
     let prepared_quota = request_quota::admit(
         state,
         &prepared,

@@ -12,9 +12,25 @@ use sqlx::{FromRow, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::ledger::ModelSelectionSnapshot;
+use crate::{
+    canonical::{CanonicalContent, CanonicalMessage, CanonicalRequest, CanonicalRole},
+    ledger::ModelSelectionSnapshot,
+};
 
 const QUALITY_PREFIX: &str = "quality:";
+const TOOL_PHRASES: &[&str] = &[
+    "add a ",
+    "review this",
+    "review the",
+    "find the cause and fix",
+    "find current",
+    "latest provider",
+    "browse for",
+];
+const REASONING_PHRASES: &[&str] = &["derive the", "prove whether", "calculate"];
+const IMAGE_PHRASES: &[&str] = &["attached dashboard screenshot"];
+const STRUCTURED_OUTPUT_PHRASES: &[&str] = &["return only", " as json"];
+const STREAMING_PHRASES: &[&str] = &["stream progress"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayOperation {
@@ -205,6 +221,38 @@ pub struct CapabilityRequirements {
 }
 
 impl CapabilityRequirements {
+    pub fn from_canonical(request: &CanonicalRequest) -> Self {
+        let text = canonical_semantic_text(&request.messages).to_lowercase();
+        let has_content = |matches: fn(&CanonicalContent) -> bool| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.content.iter().any(matches))
+        };
+        Self {
+            streaming: request.stream || contains_phrase(&text, STREAMING_PHRASES),
+            tools: !request.tools.is_empty()
+                || has_content(|content| {
+                    matches!(
+                        content,
+                        CanonicalContent::ToolCall(_) | CanonicalContent::ToolResult { .. }
+                    )
+                })
+                || contains_phrase(&text, TOOL_PHRASES),
+            reasoning: request.reasoning.as_ref().is_some_and(|reasoning| {
+                reasoning.enabled == Some(true)
+                    || reasoning.effort.is_some()
+                    || reasoning.budget_tokens.is_some()
+                    || reasoning.summary.is_some()
+            }) || contains_phrase(&text, REASONING_PHRASES),
+            images: has_content(|content| matches!(content, CanonicalContent::Image { .. }))
+                || contains_phrase(&text, IMAGE_PHRASES),
+            structured_output: request.structured_output.is_some()
+                || contains_phrase(&text, STRUCTURED_OUTPUT_PHRASES),
+        }
+    }
+
+    #[cfg(test)]
     pub fn from_request(operation: GatewayOperation, request: &Value) -> Self {
         let content = match operation {
             GatewayOperation::AnthropicMessages | GatewayOperation::AnthropicCountTokens => {
@@ -230,37 +278,23 @@ impl CapabilityRequirements {
                     ],
                 )
             })
-            || contains_phrase(
-                &semantic_text,
-                &[
-                    "add a ",
-                    "review this",
-                    "review the",
-                    "find the cause and fix",
-                    "find current",
-                    "latest provider",
-                    "browse for",
-                ],
-            );
+            || contains_phrase(&semantic_text, TOOL_PHRASES);
         let reasoning = request.get("thinking").is_some_and(nonempty_value)
             || request.get("reasoning").is_some_and(nonempty_value)
             || request.get("reasoning_effort").is_some_and(nonempty_value)
-            || contains_phrase(
-                &semantic_text,
-                &["derive the", "prove whether", "calculate"],
-            );
+            || contains_phrase(&semantic_text, REASONING_PHRASES);
         let images = content
             .is_some_and(|value| contains_type(value, &["image", "image_url", "input_image"]))
-            || contains_phrase(&semantic_text, &["attached dashboard screenshot"]);
+            || contains_phrase(&semantic_text, IMAGE_PHRASES);
         let structured_output = request.get("response_format").is_some_and(nonempty_value)
             || request.pointer("/text/format").is_some_and(nonempty_value)
             || request
                 .pointer("/output_config/format")
                 .is_some_and(nonempty_value)
-            || contains_phrase(&semantic_text, &["return only", " as json"]);
+            || contains_phrase(&semantic_text, STRUCTURED_OUTPUT_PHRASES);
         Self {
             streaming: request.get("stream").and_then(Value::as_bool) == Some(true)
-                || contains_phrase(&semantic_text, &["stream progress"]),
+                || contains_phrase(&semantic_text, STREAMING_PHRASES),
             tools,
             reasoning,
             images,
@@ -269,6 +303,31 @@ impl CapabilityRequirements {
     }
 }
 
+fn canonical_semantic_text(messages: &[CanonicalMessage]) -> String {
+    let mut output = String::new();
+    let turns = messages
+        .iter()
+        .filter(|message| {
+            !matches!(
+                message.role,
+                CanonicalRole::System | CanonicalRole::Developer
+            )
+        })
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>();
+    for message in turns.into_iter().rev() {
+        for content in &message.content {
+            if let CanonicalContent::Text { text, .. } = content {
+                output.push(' ');
+                output.extend(text.chars().take(1024));
+            }
+        }
+    }
+    output.chars().take(4096).collect()
+}
+
+#[cfg(test)]
 fn request_semantic_text(value: Option<&Value>) -> String {
     fn collect(value: &Value, output: &mut String) {
         match value {
@@ -362,6 +421,7 @@ impl<'de> Visitor<'de> for StrictObjectVisitor {
     }
 }
 
+#[cfg(test)]
 fn contains_type(value: &Value, types: &[&str]) -> bool {
     match value {
         Value::Array(values) => values.iter().any(|value| contains_type(value, types)),
@@ -376,6 +436,7 @@ fn contains_type(value: &Value, types: &[&str]) -> bool {
     }
 }
 
+#[cfg(test)]
 fn nonempty_value(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1722,6 +1783,110 @@ mod tests {
                 .filter_map(|candidate| candidate.selector.quality())
                 .collect::<Vec<_>>(),
             vec!["premium", "advanced", "standard", "economy"]
+        );
+    }
+
+    fn canonical_from(operation: GatewayOperation, body: &'static str) -> CanonicalRequest {
+        crate::adapters::protocol::decode(
+            operation,
+            axum::body::Bytes::from_static(body.as_bytes()),
+        )
+        .unwrap()
+        .enrich(crate::canonical::RequestEnrichment {
+            gateway_request_id: Uuid::nil(),
+            trace_id: None,
+            session_id: None,
+            principal: crate::canonical::PrincipalRef {
+                tenant_id: Uuid::nil(),
+                credential_id: Uuid::nil(),
+                user_id: None,
+                device_id: None,
+                client_id: None,
+                agent_id: None,
+            },
+            requested_model: "public".to_owned(),
+            requested_quality: None,
+            workload_class: "interactive".to_owned(),
+            urgency: "normal".to_owned(),
+            budget_class: "standard".to_owned(),
+            deadline: None,
+        })
+    }
+
+    const ALL_CAPABILITIES: CapabilityRequirements = CapabilityRequirements {
+        streaming: true,
+        tools: true,
+        reasoning: true,
+        images: true,
+        structured_output: true,
+    };
+
+    #[test]
+    fn equivalent_entries_get_the_same_canonical_capabilities() {
+        let anthropic = canonical_from(
+            GatewayOperation::AnthropicMessages,
+            r#"{"model":"public","max_tokens":9,"stream":true,"thinking":{"type":"enabled","budget_tokens":2048},"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}},"messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image","source":{"type":"url","url":"https://example.invalid/a.png"}}]}]}"#,
+        );
+        let responses = canonical_from(
+            GatewayOperation::OpenAiResponses,
+            r#"{"model":"public","stream":true,"reasoning":{"effort":"high"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":[{"role":"user","content":[{"type":"input_text","text":"hello"},{"type":"input_image","image_url":"https://example.invalid/a.png"}]}]}"#,
+        );
+        let chat = canonical_from(
+            GatewayOperation::OpenAiChatCompletions,
+            r#"{"model":"public","stream":true,"reasoning_effort":"high","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"https://example.invalid/a.png"}}]}]}"#,
+        );
+        for request in [&anthropic, &responses, &chat] {
+            assert_eq!(
+                CapabilityRequirements::from_canonical(request),
+                ALL_CAPABILITIES
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_capabilities_match_the_raw_json_comparison() {
+        let cases: [(GatewayOperation, &'static str); 3] = [
+            (
+                GatewayOperation::OpenAiResponses,
+                r#"{"model":"public","input":"Please add a retry and review this change"}"#,
+            ),
+            (
+                GatewayOperation::OpenAiResponses,
+                r#"{"model":"public","input":"Calculate the total and return only the number"}"#,
+            ),
+            (
+                GatewayOperation::AnthropicMessages,
+                r#"{"model":"public","max_tokens":9,"messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+        ];
+        for (operation, body) in cases {
+            let raw = parse_request(body.as_bytes()).unwrap();
+            assert_eq!(
+                CapabilityRequirements::from_canonical(&canonical_from(operation, body)),
+                CapabilityRequirements::from_request(operation, &raw),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_history_counts_as_a_tool_requirement() {
+        let request = canonical_from(
+            GatewayOperation::OpenAiResponses,
+            r#"{"model":"public","input":[{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}"#,
+        );
+        assert!(CapabilityRequirements::from_canonical(&request).tools);
+    }
+
+    #[test]
+    fn plain_request_needs_no_capabilities() {
+        let request = canonical_from(
+            GatewayOperation::OpenAiChatCompletions,
+            r#"{"model":"public","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        assert_eq!(
+            CapabilityRequirements::from_canonical(&request),
+            CapabilityRequirements::default()
         );
     }
 }
