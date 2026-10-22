@@ -844,4 +844,111 @@ mod tests {
             assert!(may_serve(DataPolicy::LocalOnly, kind));
         }
     }
+
+    const OPERATIONS: [GatewayOperation; 3] = [
+        GatewayOperation::AnthropicMessages,
+        GatewayOperation::OpenAiResponses,
+        GatewayOperation::OpenAiChatCompletions,
+    ];
+
+    /// The same conversation written in each protocol's native shape.
+    fn native_conversation(operation: GatewayOperation) -> String {
+        match operation {
+            GatewayOperation::AnthropicMessages => json!({
+                "model": "public", "max_tokens": 100, "system": "be brief",
+                "messages": [
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": [{"type": "text", "text": "write code and docs"}]},
+                ],
+            }),
+            GatewayOperation::OpenAiResponses => json!({
+                "model": "public", "instructions": "be brief",
+                "input": [
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "write code and docs"},
+                ],
+            }),
+            _ => json!({
+                "model": "public",
+                "messages": [
+                    {"role": "system", "content": "be brief"},
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "write code and docs"},
+                ],
+            }),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn the_same_conversation_in_any_protocol_builds_the_same_prompt() {
+        let prompts: Vec<_> = OPERATIONS
+            .into_iter()
+            .map(|operation| {
+                let request = request(operation, &native_conversation(operation));
+                assert_eq!(eligibility(&request), Ok(()), "{operation:?}");
+                let prompt = build_prompt(&request);
+                (prompt.system, prompt.user)
+            })
+            .collect();
+        assert!(prompts[0].1.contains("write code and docs"));
+        assert!(prompts[0].1.contains("first answer"));
+        assert_eq!(prompts[0], prompts[1], "anthropic vs responses");
+        assert_eq!(prompts[1], prompts[2], "responses vs chat");
+    }
+
+    #[test]
+    fn tools_and_tool_history_are_ineligible_in_every_protocol() {
+        let defined = |operation| match operation {
+            GatewayOperation::AnthropicMessages => json!({
+                "model": "public", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"name": "lookup", "description": "d", "input_schema": {"type": "object"}}],
+            }),
+            GatewayOperation::OpenAiResponses => json!({
+                "model": "public", "input": "hi",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+            }),
+            _ => json!({
+                "model": "public",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+            }),
+        };
+        let history = |operation| match operation {
+            GatewayOperation::AnthropicMessages => json!({
+                "model": "public", "max_tokens": 100,
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "lookup", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}]},
+                ],
+            }),
+            GatewayOperation::OpenAiResponses => json!({
+                "model": "public",
+                "input": [
+                    {"role": "user", "content": "hi"},
+                    {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+                ],
+            }),
+            _ => json!({
+                "model": "public",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+                ],
+            }),
+        };
+        for operation in OPERATIONS {
+            let tools = request(operation, &defined(operation).to_string());
+            assert_eq!(eligibility(&tools), Err("tools_defined"), "{operation:?}");
+            let past = request(operation, &history(operation).to_string());
+            assert_eq!(eligibility(&past), Err("tool_history"), "{operation:?}");
+        }
+    }
 }
