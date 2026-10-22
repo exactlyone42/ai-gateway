@@ -1,5 +1,6 @@
 """Exercise actual Git hooks against disposable repositories and a local bare remote."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -7,6 +8,10 @@ import tempfile
 import unittest
 
 SOURCE = Path(__file__).resolve().parent
+
+# Hooks export GIT_* variables that would point disposable repos at the real one.
+for _name in [name for name in os.environ if name.startswith("GIT_")]:
+    del os.environ[_name]
 
 
 class HooksTest(unittest.TestCase):

@@ -1,0 +1,24 @@
+{
+  "client_credential_absent": true,
+  "has_function_tool": true,
+  "has_reasoning": true,
+  "has_thinking": false,
+  "header_names": [],
+  "includes_encrypted_reasoning": true,
+  "model": "company-default",
+  "path": "/v1/responses",
+  "provider_credential_matches_fixture": true,
+  "query_names": [],
+  "reasoning_effort_is_low": true,
+  "request_sequence": [
+    "/v1/responses"
+  ],
+  "store_is_false": true,
+  "stream": true,
+  "tool_types": [
+    "function",
+    "namespace",
+    "web_search"
+  ],
+  "tools_count": 9
+}

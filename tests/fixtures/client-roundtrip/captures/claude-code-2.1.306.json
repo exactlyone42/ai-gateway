@@ -1,0 +1,27 @@
+{
+  "client_credential_absent": true,
+  "has_function_tool": false,
+  "has_reasoning": false,
+  "has_thinking": true,
+  "header_names": [
+    "anthropic-beta",
+    "anthropic-version",
+    "x-claude-code-session-id",
+    "x-stainless-retry-count"
+  ],
+  "includes_encrypted_reasoning": false,
+  "model": "claude-test",
+  "path": "/v1/messages",
+  "provider_credential_matches_fixture": true,
+  "query_names": [
+    "beta"
+  ],
+  "reasoning_effort_is_low": false,
+  "request_sequence": [
+    "/v1/messages"
+  ],
+  "store_is_false": false,
+  "stream": true,
+  "tool_types": [],
+  "tools_count": 12
+}

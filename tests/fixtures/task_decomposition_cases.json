@@ -1,0 +1,466 @@
+{
+  "schema_version": 1,
+  "taxonomy_version": "task-taxonomy-v1",
+  "thresholds": {
+    "required_recall": 0.9,
+    "invented": 0,
+    "simple_direct": 1.0
+  },
+  "cases": [
+    {
+      "id": "compound-01",
+      "kind": "compound",
+      "prompt": "Review the retry module for race conditions, then add a bounded backoff helper with tests.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_review",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-02",
+      "kind": "compound",
+      "prompt": "Find why the nightly export job times out, fix it, and summarize the change for the release notes.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "code_generation",
+        "transformation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-03",
+      "kind": "compound",
+      "prompt": "Pull every invoice number and due date out of the attached email thread and compute the total outstanding amount.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "extraction",
+        "quantitative_reasoning"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-04",
+      "kind": "compound",
+      "prompt": "Research the current rate-limit headers used by the three largest model providers and write a Rust parser for them.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "research",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-05",
+      "kind": "compound",
+      "prompt": "Translate this README into Japanese, then list every command it mentions as a JSON array.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "transformation",
+        "extraction"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-06",
+      "kind": "compound",
+      "prompt": "Read the stack trace below, explain the root cause, and write a regression test that reproduces it.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-07",
+      "kind": "compound",
+      "prompt": "Calculate the monthly cost of running four replicas at the quoted price and draft a short budget request paragraph.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "quantitative_reasoning",
+        "general_assistance"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-08",
+      "kind": "compound",
+      "prompt": "Review this pull request diff and rewrite the commit message in conventional commit style.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_review",
+        "transformation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-09",
+      "kind": "compound",
+      "prompt": "Compare two caching libraries from their official docs, then generate a small adapter for the winner.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "research",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-10",
+      "kind": "compound",
+      "prompt": "Extract all TODO comments from the pasted file, group them by owner, and count how many each owner has.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "extraction",
+        "quantitative_reasoning"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-11",
+      "kind": "compound",
+      "prompt": "Debug the failing login test, then convert the fix into a patch description for the changelog.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "transformation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-12",
+      "kind": "compound",
+      "prompt": "Look up the latest TLS version support in our target browsers and write a config snippet that enforces it.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "research",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-13",
+      "kind": "compound",
+      "prompt": "Summarize the incident timeline below and extract the three action items with their owners.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "general_assistance",
+        "extraction"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-14",
+      "kind": "compound",
+      "prompt": "Review the SQL migration for lock risks, and compute how long it would take at 2 million rows per minute.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_review",
+        "quantitative_reasoning"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-15",
+      "kind": "compound",
+      "prompt": "Write a Python script that parses the CSV below, and separately explain how to schedule it nightly.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_generation",
+        "general_assistance"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-16",
+      "kind": "compound",
+      "prompt": "Find the memory leak in the worker loop described below and review whether the proposed fix is safe.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "code_review"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-17",
+      "kind": "compound",
+      "prompt": "Convert this YAML config to TOML, then verify the values against the documented defaults.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "transformation",
+        "research"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-18",
+      "kind": "compound",
+      "prompt": "Pull the version numbers from this lock file, research which ones have known advisories, and list the upgrades needed.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "extraction",
+        "research"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-19",
+      "kind": "compound",
+      "prompt": "Estimate the token cost of the prompt below at three price points and recommend a cheaper phrasing.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "quantitative_reasoning",
+        "transformation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-20",
+      "kind": "compound",
+      "prompt": "Write a Rust function that validates IBANs and review it against the official checksum rules.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_generation",
+        "code_review"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-21",
+      "kind": "compound",
+      "prompt": "Diagnose the flaky integration test, fix the ordering assumption, and write a note for the team channel.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "code_generation",
+        "general_assistance"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-22",
+      "kind": "compound",
+      "prompt": "Extract the pricing table from the text below, compute the yearly cost per tier, and draft a comparison paragraph.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "extraction",
+        "quantitative_reasoning",
+        "general_assistance"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-23",
+      "kind": "compound",
+      "prompt": "Research how two competing gateways handle streaming cancellation, then review our cancellation code against that.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "research",
+        "code_review"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-24",
+      "kind": "compound",
+      "prompt": "Rewrite the error messages below to be friendlier, and list which ones leak internal details.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "transformation",
+        "code_review"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-25",
+      "kind": "compound",
+      "prompt": "Generate unit tests for the parser below, then debug any failure you predict they would expose.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_generation",
+        "debugging"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-26",
+      "kind": "compound",
+      "prompt": "Find authoritative guidance on idempotency keys, then write a short design note and a sample handler.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "research",
+        "general_assistance",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-27",
+      "kind": "compound",
+      "prompt": "Compute the p95 from the latency samples below and draft a two-line status update about it.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "quantitative_reasoning",
+        "general_assistance"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-28",
+      "kind": "compound",
+      "prompt": "Take the meeting notes below, extract decisions, and translate the decisions into formal English.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "extraction",
+        "transformation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-29",
+      "kind": "compound",
+      "prompt": "Review the Dockerfile for security problems, then produce a hardened version.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "code_review",
+        "code_generation"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "compound-30",
+      "kind": "compound",
+      "prompt": "Investigate why the build cache misses on every run, apply a fix, and quantify the expected time saved from the numbers given.",
+      "tools": false,
+      "tool_history": false,
+      "required": [
+        "debugging",
+        "code_generation",
+        "quantitative_reasoning"
+      ],
+      "allowed": []
+    },
+    {
+      "id": "simple-01",
+      "kind": "simple",
+      "prompt": "What does the HTTP 429 status code mean?",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-02",
+      "kind": "simple",
+      "prompt": "Summarize this paragraph in one sentence: The gateway keeps provider credentials on the server and never returns them to clients.",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-03",
+      "kind": "simple",
+      "prompt": "Translate 'good morning' into French.",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-04",
+      "kind": "simple",
+      "prompt": "Write a function that reverses a string in Rust.",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-05",
+      "kind": "simple",
+      "prompt": "Why does my loop skip the last element? for i in 0..n-1 { println!(\"{}\", v[i]); }",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-06",
+      "kind": "simple",
+      "prompt": "Calculate 18 percent of 2450.",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-07",
+      "kind": "simple",
+      "prompt": "Give me a one-line commit message for fixing a typo in the README.",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "simple-08",
+      "kind": "simple",
+      "prompt": "Review this single line: let x = y.unwrap();",
+      "tools": false,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "tool-01",
+      "kind": "tool",
+      "prompt": "Run the test suite and tell me which tests fail.",
+      "tools": true,
+      "tool_history": false,
+      "required": [],
+      "allowed": []
+    },
+    {
+      "id": "tool-02",
+      "kind": "tool",
+      "prompt": "Continue from the previous tool output and fix the failing case.",
+      "tools": true,
+      "tool_history": true,
+      "required": [],
+      "allowed": []
+    }
+  ]
+}

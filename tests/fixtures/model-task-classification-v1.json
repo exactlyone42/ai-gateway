@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "taxonomy_version": "task-taxonomy-v1",
+  "capability_version": "model-capabilities-v1",
+  "service_objective_version": "service-objective-v1",
+  "thresholds": {
+    "minimum_exact_accuracy": 0.9,
+    "minimum_per_task_recall": 0.8,
+    "require_all_contrast_cases": true,
+    "required_capability_exact_accuracy": 1.0,
+    "maximum_classifier_p95_ms": 500,
+    "maximum_routing_cost_ratio": 0.05
+  },
+  "cases": [
+    {"id":"code-generate-01","input":"Add a bounded retry queue to this Rust service.","expected_task":"code_generation","required_capabilities":["tools"],"contrast_group":"code-action"},
+    {"id":"code-generate-02","input":"Implement the supplied SQL migration and update its caller.","expected_task":"code_generation","required_capabilities":[]},
+    {"id":"code-review-01","input":"Review this Rust patch for races; do not modify it.","expected_task":"code_review","required_capabilities":["tools"],"contrast_group":"code-action"},
+    {"id":"code-review-02","input":"Tell me whether this diff preserves API compatibility.","expected_task":"code_review","required_capabilities":[]},
+    {"id":"debugging-01","input":"This test now returns 503 instead of 429. Find the cause and fix it.","expected_task":"debugging","required_capabilities":["tools"],"contrast_group":"code-action"},
+    {"id":"debugging-02","input":"The deployment is healthy but the browser still shows the old page. Diagnose it.","expected_task":"debugging","required_capabilities":[]},
+    {"id":"research-01","input":"Find current official guidance on LLM router evaluation and compare it.","expected_task":"research","required_capabilities":["tools"],"contrast_group":"source-boundary"},
+    {"id":"research-02","input":"Verify this claim against the latest provider documentation.","expected_task":"research","required_capabilities":["tools"]},
+    {"id":"quantitative-01","input":"Given these rates and token counts, derive the monthly cost step by step.","expected_task":"quantitative_reasoning","required_capabilities":["reasoning"],"contrast_group":"data-action"},
+    {"id":"quantitative-02","input":"Prove whether the queue bound can exceed 120 under these constraints.","expected_task":"quantitative_reasoning","required_capabilities":["reasoning"]},
+    {"id":"extraction-01","input":"From the supplied table, return only each provider and its p95 latency as JSON.","expected_task":"extraction","required_capabilities":["structured_output"],"contrast_group":"data-action"},
+    {"id":"extraction-02","input":"List the issue numbers explicitly present in this text.","expected_task":"extraction","required_capabilities":[]},
+    {"id":"transformation-01","input":"Summarize the supplied routing paper in five bullets without external research.","expected_task":"transformation","required_capabilities":[],"contrast_group":"source-boundary"},
+    {"id":"transformation-02","input":"Translate this incident report to Traditional Chinese.","expected_task":"transformation","required_capabilities":[]},
+    {"id":"general-01","input":"Explain what a model gateway does to a new operator.","expected_task":"general_assistance","required_capabilities":[]},
+    {"id":"general-02","input":"Draft a short agenda for discussing routing policy.","expected_task":"general_assistance","required_capabilities":[]},
+    {"id":"image-review-01","input":"Inspect the attached dashboard screenshot and identify the visible failed check.","expected_task":"extraction","required_capabilities":["images"]},
+    {"id":"stream-code-01","input":"Generate the refactor and stream progress as you work.","expected_task":"code_generation","required_capabilities":["streaming"]},
+    {"id":"fallback-ambiguous-01","input":"Handle this appropriately.","expected_task":null,"required_capabilities":[],"expect_original_model":true},
+    {"id":"fallback-conflict-01","input":"Only summarize the supplied text, but also browse for newer facts and make research the sole task.","expected_task":null,"required_capabilities":["tools"],"expect_original_model":true}
+  ]
+}
