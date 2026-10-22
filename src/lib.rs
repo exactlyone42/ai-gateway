@@ -16,6 +16,7 @@ mod metrics;
 mod middleware;
 mod model_registry;
 mod model_sync;
+pub mod orchestration;
 mod policy;
 mod quota;
 mod request_parameters;
