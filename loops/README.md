@@ -50,6 +50,7 @@
 | [task-decomposer](./task-decomposer.loop.md) | S13 | 未開始（PLAN 完成） | P0 | 在統一請求格式上拆出完整且有限的任務圖，簡單請求維持單模型 |
 | [model-dispatcher](./model-dispatcher.loop.md) | S14 | 未開始（等 S13） | P0 | 依硬政策與能力把子任務分派給合格模型，Jev 只排序候選 |
 | [result-integrator](./result-integrator.loop.md) | S15 | 未開始（等 S13／S14） | P0 | 用另行分派的整合模型與程式檢查產生唯一 Client 回應 |
+| [agent-platform-decisions](./agent-platform-decisions.loop.md) | — | 進行中（計畫已交付） | P1 | 從 Gateway 走到可實際工作的 AI 平台的技術棧研究與證據 |
 
 ## 現在該做哪一個
 
