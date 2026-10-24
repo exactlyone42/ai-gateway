@@ -1,0 +1,74 @@
+[
+  [
+    "Name:\tstrace",
+    "State:\tS (sleeping)",
+    "Pid:\t2038957",
+    "PPid:\t2038808",
+    "NSpid:\t2038957",
+    "NSpgid:\t2038808",
+    "NSsid:\t2038808"
+  ],
+  [
+    "Name:\tcodex",
+    "State:\tS (sleeping)",
+    "Pid:\t2038960",
+    "PPid:\t2038957",
+    "NSpid:\t2038960",
+    "NSpgid:\t2038808",
+    "NSsid:\t2038808"
+  ],
+  [
+    "Name:\tgit",
+    "State:\tS (sleeping)",
+    "Pid:\t2039050",
+    "PPid:\t2038960",
+    "NSpid:\t2039050",
+    "NSpgid:\t2038808",
+    "NSsid:\t2038808"
+  ],
+  [
+    "Name:\tssh",
+    "State:\tS (sleeping)",
+    "Pid:\t2039053",
+    "PPid:\t2039050",
+    "NSpid:\t2039053",
+    "NSpgid:\t2038808",
+    "NSsid:\t2038808"
+  ],
+  [
+    "Name:\tcodex-linux-san",
+    "State:\tR (running)",
+    "Pid:\t2039138",
+    "PPid:\t2038960",
+    "NSpid:\t2039138",
+    "NSpgid:\t2039138",
+    "NSsid:\t2039138"
+  ],
+  [
+    "Name:\tbwrap",
+    "State:\tS (sleeping)",
+    "Pid:\t2039143",
+    "PPid:\t2039138",
+    "NSpid:\t2039143",
+    "NSpgid:\t2039143",
+    "NSsid:\t2039138"
+  ],
+  [
+    "Name:\tcodex",
+    "State:\tS (sleeping)",
+    "Pid:\t2039144",
+    "PPid:\t2039143",
+    "NSpid:\t2039144\t1",
+    "NSpgid:\t2039144\t1",
+    "NSsid:\t2039144\t1"
+  ],
+  [
+    "Name:\tpython3",
+    "State:\tS (sleeping)",
+    "Pid:\t2039158",
+    "PPid:\t2039144",
+    "NSpid:\t2039158\t2",
+    "NSpgid:\t2039144\t1",
+    "NSsid:\t2039144\t1"
+  ]
+]

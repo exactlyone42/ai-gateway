@@ -1,0 +1,11 @@
+{
+  "measurement_review": {
+    "find_document": true,
+    "summary": true,
+    "model_tool": true,
+    "cancellation_failure_reproduced": true,
+    "negative_controls": true
+  },
+  "product_cancellation_passed": false,
+  "overall_product_passed": false
+}
