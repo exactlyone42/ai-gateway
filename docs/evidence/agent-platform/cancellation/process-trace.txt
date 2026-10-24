@@ -1,0 +1,665 @@
+2038960 clone(child_stack=0x77d800bfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038961], tls=0x77d800bffb38, child_tidptr=0x77d812b71704) = 2038961
+2038961 clone(child_stack=0x77d7ff5fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038962], tls=0x77d7ff5ffb38, child_tidptr=0x77d812b71704) = 2038962
+2038961 clone(child_stack=0x77d7fe5fa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038963], tls=0x77d7fe5fbb38, child_tidptr=0x77d812b71704) = 2038963
+2038961 clone(child_stack=0x77d7fcffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038964], tls=0x77d7fcfffb38, child_tidptr=0x77d812b71704) = 2038964
+2038961 clone(child_stack=0x77d7fbbfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038965], tls=0x77d7fbbffb38, child_tidptr=0x77d812b71704) = 2038965
+2038961 clone(child_stack=0x77d7fa1fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038966], tls=0x77d7fa1ffb38, child_tidptr=0x77d812b71704) = 2038966
+2038961 clone(child_stack=0x77d7f8dfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038967], tls=0x77d7f8dffb38, child_tidptr=0x77d812b71704) = 2038967
+2038961 clone(child_stack=0x77d7f77fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038968], tls=0x77d7f77ffb38, child_tidptr=0x77d812b71704) = 2038968
+2038961 clone(child_stack=0x77d7f5dfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038969], tls=0x77d7f5dffb38, child_tidptr=0x77d812b71704) = 2038969
+2038961 clone(child_stack=0x77d7f4dfa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038970], tls=0x77d7f4dfbb38, child_tidptr=0x77d812b71704) = 2038970
+2038961 clone(child_stack=0x77d7f37fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038971], tls=0x77d7f37ffb38, child_tidptr=0x77d812b71704) = 2038971
+2038961 clone(child_stack=0x77d7f21fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038972], tls=0x77d7f21ffb38, child_tidptr=0x77d812b71704) = 2038972
+2038961 clone(child_stack=0x77d7f0bfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038973], tls=0x77d7f0bffb38, child_tidptr=0x77d812b71704) = 2038973
+2038961 clone(child_stack=0x77d7eedfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038974], tls=0x77d7eedffb38, child_tidptr=0x77d812b71704) = 2038974
+2038961 clone(child_stack=0x77d7eddfa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038975], tls=0x77d7eddfbb38, child_tidptr=0x77d812b71704) = 2038975
+2038961 clone(child_stack=0x77d7ec7fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038976], tls=0x77d7ec7ffb38, child_tidptr=0x77d812b71704) = 2038976
+2038961 clone(child_stack=0x77d7eaffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038977], tls=0x77d7eafffb38, child_tidptr=0x77d812b71704) = 2038977
+2038961 clone(child_stack=0x77d7e9bfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038978], tls=0x77d7e9bffb38, child_tidptr=0x77d812b71704) = 2038978
+2038961 clone(child_stack=0x77d7e85fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038979], tls=0x77d7e85ffb38, child_tidptr=0x77d812b71704) = 2038979
+2038961 clone(child_stack=0x77d7e6dfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038980], tls=0x77d7e6dffb38, child_tidptr=0x77d812b71704) = 2038980
+2038961 clone(child_stack=0x77d7e59fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038981], tls=0x77d7e59ffb38, child_tidptr=0x77d812b71704) = 2038981
+2038961 clone(child_stack=0x77d7e43fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038982], tls=0x77d7e43ffb38, child_tidptr=0x77d812b71704) = 2038982
+2038961 clone(child_stack=0x77d7e29fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038983], tls=0x77d7e29ffb38, child_tidptr=0x77d812b71704) = 2038983
+2038961 clone(child_stack=0x77d7e15fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038984], tls=0x77d7e15ffb38, child_tidptr=0x77d812b71704) = 2038984
+2038961 clone(child_stack=0x77d7e01fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038985], tls=0x77d7e01ffb38, child_tidptr=0x77d812b71704) = 2038985
+2038961 clone(child_stack=0x77d7dedfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038986], tls=0x77d7dedffb38, child_tidptr=0x77d812b71704) = 2038986
+2038961 clone(child_stack=0x77d7dd5fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038987], tls=0x77d7dd5ffb38, child_tidptr=0x77d812b71704) = 2038987
+2038961 clone(child_stack=0x77d7dbffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038988], tls=0x77d7dbfffb38, child_tidptr=0x77d812b71704) = 2038988
+2038961 clone(child_stack=0x77d7da9fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038989], tls=0x77d7da9ffb38, child_tidptr=0x77d812b71704) = 2038989
+2038961 clone(child_stack=0x77d7d8ffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038990], tls=0x77d7d8fffb38, child_tidptr=0x77d812b71704) = 2038990
+2038961 clone(child_stack=0x77d7d79fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038991], tls=0x77d7d79ffb38, child_tidptr=0x77d812b71704) = 2038991
+2038961 clone(child_stack=0x77d7d69fa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038992], tls=0x77d7d69fbb38, child_tidptr=0x77d812b71704) = 2038992
+2038961 clone(child_stack=0x77d7d53fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038993], tls=0x77d7d53ffb38, child_tidptr=0x77d812b71704) = 2038993
+2038961 clone(child_stack=0x77d7d3dfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2038994], tls=0x77d7d3dffb38, child_tidptr=0x77d812b71704) = 2038994
+2038961 clone(child_stack=0x77d800b91c98, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2038995
+2038995 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2038996
+2038996 exit_group(0)                   = ?
+2038996 +++ exited with 0 +++
+2038995 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2038996, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038995 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2038996
+2038995 wait4(-1, 0x7fff2255bd5c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038995 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2038997
+2038997 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2038998
+2038998 exit_group(0)                   = ?
+2038998 +++ exited with 0 +++
+2038997 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2038998, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038997 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2038999
+2038997 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039000
+2038997 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2038998
+2038997 wait4(-1 <unfinished ...>
+2038999 exit_group(0)                   = ?
+2038999 +++ exited with 0 +++
+2038997 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2038999
+2038997 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2038999, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038997 wait4(-1 <unfinished ...>
+2039000 exit_group(0)                   = ?
+2039000 +++ exited with 0 +++
+2038997 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039000
+2038997 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039000, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038997 wait4(-1, 0x7fff2255bcdc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038997 exit_group(0)                   = ?
+2038997 +++ exited with 0 +++
+2038995 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2038997, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038995 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2038997
+2038995 wait4(-1, 0x7fff2255bdbc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038995 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039001
+2039001 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039002
+2039002 exit_group(0)                   = ?
+2039002 +++ exited with 0 +++
+2039001 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039002, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039001 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039003
+2039001 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039002
+2039001 wait4(-1 <unfinished ...>
+2039003 exit_group(0)                   = ?
+2039003 +++ exited with 0 +++
+2039001 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039003
+2039001 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039003, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039001 wait4(-1, 0x7fff2255bcdc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039001 exit_group(0)                   = ?
+2039001 +++ exited with 0 +++
+2038995 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039001, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038995 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039001
+2038995 wait4(-1, 0x7fff2255bdbc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038995 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039004
+2039004 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039005
+2039005 exit_group(0)                   = ?
+2039005 +++ exited with 0 +++
+2039004 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039005, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039004 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039006
+2039004 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039005
+2039004 wait4(-1 <unfinished ...>
+2039006 exit_group(0)                   = ?
+2039006 +++ exited with 0 +++
+2039004 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039006
+2039004 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039006, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039004 wait4(-1, 0x7fff2255bbbc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039004 exit_group(0)                   = ?
+2039004 +++ exited with 0 +++
+2038995 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039004, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038995 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039004
+2038995 wait4(-1, 0x7fff2255bc9c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038995 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039007
+2039007 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039008
+2039008 exit_group(0)                   = ?
+2039008 +++ exited with 0 +++
+2039007 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039008, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039007 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7829810bda10) = 2039009
+2039007 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039008
+2039007 wait4(-1 <unfinished ...>
+2039009 exit_group(0)                   = ?
+2039009 +++ exited with 0 +++
+2039007 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039009
+2039007 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039009, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039007 wait4(-1, 0x7fff2255bbbc, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039007 exit_group(0)                   = ?
+2039007 +++ exited with 0 +++
+2038995 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039007, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038995 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039007
+2038995 wait4(-1, 0x7fff2255bc9c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2038995 exit_group(0)                   = ?
+2038995 +++ exited with 0 +++
+2038960 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2038995, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038961 wait4(2038995, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2038995
+2038961 clone(child_stack=0x77d800b91df8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039010
+2039010 exit_group(0)                   = ?
+2039010 +++ exited with 0 +++
+2038961 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039010, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038961 wait4(2039010, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039010
+2038961 clone(child_stack=0x77d7d217e998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039011], tls=0x77d7d217fb38, child_tidptr=0x77d812b71704) = 2039011
+2038961 clone(child_stack=0x77d7d19fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039017], tls=0x77d7d19ffb38, child_tidptr=0x77d812b71704) = 2039017
+2038961 clone(child_stack=0x77d7d11fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039018], tls=0x77d7d11ffb38, child_tidptr=0x77d812b71704) = 2039018
+2038961 clone(child_stack=0x77d7d09fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039033], tls=0x77d7d09ffb38, child_tidptr=0x77d812b71704) = 2039033
+2038961 clone(child_stack=0x77d7d01fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039034], tls=0x77d7d01ffb38, child_tidptr=0x77d812b71704) = 2039034
+2038961 clone(child_stack=0x77d7cf9fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039036], tls=0x77d7cf9ffb38, child_tidptr=0x77d812b71704) = 2039036
+2038961 clone(child_stack=0x77d7cecfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039040], tls=0x77d7cecffb38, child_tidptr=0x77d812b71704) = 2039040
+2038961 clone(child_stack=0x77d7ceafa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039042], tls=0x77d7ceafbb38, child_tidptr=0x77d812b71704) = 2039042
+2038961 clone(child_stack=0x77d7ce3fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039043], tls=0x77d7ce3ffb38, child_tidptr=0x77d812b71704) = 2039043
+2038989 clone(child_stack=0x77d7cd7fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039044], tls=0x77d7cd7ffb38, child_tidptr=0x77d812b71704) = 2039044
+2038961 clone(child_stack=0x77d7ccffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039046], tls=0x77d7ccfffb38, child_tidptr=0x77d812b71704) = 2039046
+2038961 clone(child_stack=0x77d7cc7fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039047], tls=0x77d7cc7ffb38, child_tidptr=0x77d812b71704) = 2039047
+2038961 clone(child_stack=0x77d7cbffe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039048], tls=0x77d7cbfffb38, child_tidptr=0x77d812b71704) = 2039048
+2038984 clone(child_stack=0x77d7e15eb588, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039049
+2039047 clone(child_stack=0x77d7cc7f9688, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039050
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039049 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039051
+2039050 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD <unfinished ...>
+2039051 exit_group(0)                   = ?
+2039051 +++ exited with 0 +++
+2039049 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039051, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039050 <... clone resumed>, child_tidptr=0x7260451a1e50) = 2039053
+2039049 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039051
+2039049 wait4(-1, 0x7fffb7159c2c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039049 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039055
+2039055 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039056
+2039056 exit_group(0)                   = ?
+2039056 +++ exited with 0 +++
+2039055 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039056, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039055 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039059
+2039055 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039060
+2039055 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039056
+2039055 wait4(-1 <unfinished ...>
+2039059 exit_group(0)                   = ?
+2039059 +++ exited with 0 +++
+2039055 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039059
+2039055 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039059, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039055 wait4(-1 <unfinished ...>
+2039060 exit_group(0)                   = ?
+2039060 +++ exited with 0 +++
+2039055 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039060
+2039055 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039060, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039055 wait4(-1, 0x7fffb7159bac, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039055 exit_group(0)                   = ?
+2039055 +++ exited with 0 +++
+2039049 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039055, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039049 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039055
+2039049 wait4(-1, 0x7fffb7159c8c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039049 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039069
+2039069 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039070
+2039070 exit_group(0)                   = ?
+2039070 +++ exited with 0 +++
+2039069 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039070, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039069 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039071
+2039069 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039070
+2039069 wait4(-1 <unfinished ...>
+2039071 exit_group(0)                   = ?
+2039071 +++ exited with 0 +++
+2039069 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039071
+2039069 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039071, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039069 wait4(-1, 0x7fffb7159bac, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039069 exit_group(0)                   = ?
+2039069 +++ exited with 0 +++
+2039049 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039069, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039049 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039069
+2039049 wait4(-1, 0x7fffb7159c8c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039049 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039072
+2039072 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039073
+2039073 exit_group(0)                   = ?
+2039073 +++ exited with 0 +++
+2039072 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039073, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039072 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039074
+2039072 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039073
+2039072 wait4(-1 <unfinished ...>
+2039074 exit_group(0)                   = ?
+2039074 +++ exited with 0 +++
+2039072 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039074
+2039072 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039074, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039072 wait4(-1, 0x7fffb7159a8c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039072 exit_group(0)                   = ?
+2039072 +++ exited with 0 +++
+2039049 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039072, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039049 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039072
+2039049 wait4(-1, 0x7fffb7159b6c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039049 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039075
+2039075 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039076
+2039076 exit_group(0)                   = ?
+2039076 +++ exited with 0 +++
+2039075 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039076, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039075 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7004d808da10) = 2039077
+2039075 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039076
+2039075 wait4(-1 <unfinished ...>
+2039077 exit_group(0)                   = ?
+2039077 +++ exited with 0 +++
+2039075 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039077
+2039075 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039077, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039075 wait4(-1, 0x7fffb7159a8c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039075 exit_group(0)                   = ?
+2039075 +++ exited with 0 +++
+2039049 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039075, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039049 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039075
+2039049 wait4(-1, 0x7fffb7159b6c, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039049 exit_group(0)                   = ?
+2039049 +++ exited with 0 +++
+2038984 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039049, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038984 wait4(2039049, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039049
+2038984 clone(child_stack=0x77d7e15eb6e8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039078
+2039078 exit_group(0)                   = ?
+2039078 +++ exited with 0 +++
+2038993 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039078, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038984 wait4(2039078, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039078
+2038989 clone(child_stack=0x77d7c84fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039079], tls=0x77d7c84ffb38, child_tidptr=0x77d812b71704) = 2039079
+2038989 clone(child_stack=0x77d7c74fa998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039080], tls=0x77d7c74fbb38, child_tidptr=0x77d812b71704) = 2039080
+2038989 clone(child_stack=0x77d7c5dfe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039081], tls=0x77d7c5dffb38, child_tidptr=0x77d812b71704) = 2039081
+2038989 clone(child_stack=0x77d7c41fe998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2039082], tls=0x77d7c41ffb38, child_tidptr=0x77d812b71704) = 2039082
+2038989 clone(child_stack=0x77d7da9888f8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039083
+2039083 setsid()                        = 2039083
+2038986 wait4(2039083, 0x77d7dedfdf10, WNOHANG, NULL) = 0
+2039083 clone(child_stack=0x7ffc385a0b08, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039085
+2039085 exit_group(0)                   = ?
+2039085 +++ exited with 0 +++
+2039083 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039085, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039083 wait4(2039085, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039085
+2039083 fork()                          = 2039086
+2039086 wait4(-1, 0x7ffd07aa1300, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039086 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039087
+2039087 setsid()                        = 1
+2039087 exit_group(0)                   = ?
+2039087 +++ exited with 0 +++
+2039086 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039087
+2039086 exit_group(0)                   = ?
+2039086 +++ exited with 0 +++
+2039083 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039086, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039083 wait4(2039086, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039086
+2039083 wait4(-1, 0x7ffd52edf830, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039083 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039088
+2039088 setsid()                        = 1
+2039088 fork()                          = 2
+2039088 wait4(-1 <unfinished ...>
+2039095 exit_group(0)                   = ?
+2039095 +++ exited with 0 +++
+2039088 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2
+2039088 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039088 exit_group(0)                   = ?
+2039088 +++ exited with 0 +++
+2039083 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039088
+2039083 exit_group(0)                   = ?
+2039083 +++ exited with 0 +++
+2038984 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039083, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2038984 wait4(2039083, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039083
+2038985 kill(-2039083, SIGKILL)         = -1 ESRCH (No such process)
+2038962 clone(child_stack=0x77d7ff5888f8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039108
+2039108 setsid()                        = 2039108
+2038962 wait4(2039108, 0x77d7ff5fdf10, WNOHANG, NULL) = 0
+2039108 clone(child_stack=0x7ffd60bf7998, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039110
+2039110 exit_group(0)                   = ?
+2039110 +++ exited with 0 +++
+2039108 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039110, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039108 wait4(2039110, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039110
+2039108 fork()                          = 2039111
+2039111 wait4(-1, 0x7fff6396f7c0, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039111 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039112
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039112 setsid()                        = 1
+2039112 exit_group(0)                   = ?
+2039112 +++ exited with 0 +++
+2039111 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039112
+2039111 exit_group(0)                   = ?
+2039111 +++ exited with 0 +++
+2039108 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039111, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039108 wait4(2039111, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039111
+2039108 wait4(-1, 0x7ffe678173e0, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039108 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039114
+2039114 setsid()                        = 1
+2039114 fork()                          = 2
+2039114 wait4(-1 <unfinished ...>
+2039116 exit_group(1)                   = ?
+2039116 +++ exited with 1 +++
+2039114 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 1}], 0, NULL) = 2
+2039114 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+2039114 exit_group(1)                   = ?
+2039114 +++ exited with 1 +++
+2039108 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 1}], WNOHANG, NULL) = 2039114
+2039108 exit_group(1)                   = ?
+2039108 +++ exited with 1 +++
+2038983 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039108, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+2038962 wait4(2039108, [{WIFEXITED(s) && WEXITSTATUS(s) == 1}], WNOHANG, NULL) = 2039108
+2038962 kill(-2039108, SIGKILL)         = -1 ESRCH (No such process)
+2038983 clone(child_stack=0x77d7e29888f8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039117
+2039117 setsid()                        = 2039117
+2038983 wait4(2039117, 0x77d7e29fdf10, WNOHANG, NULL) = 0
+2039117 clone(child_stack=0x7ffe15f7c618, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039118
+2039118 exit_group(0)                   = ?
+2039118 +++ exited with 0 +++
+2039117 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039118, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039117 wait4(2039118, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039118
+2039117 fork()                          = 2039119
+2039119 wait4(-1, 0x7ffeb45dd780, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039119 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039120
+2039120 setsid()                        = 1
+2039120 exit_group(0)                   = ?
+2039120 +++ exited with 0 +++
+2039119 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039120
+2039119 exit_group(0)                   = ?
+2039119 +++ exited with 0 +++
+2039117 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039119, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039117 wait4(2039119, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039119
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 kill(2013630, 0)                = -1 ESRCH (No such process)
+2039117 fork()                          = 2039134
+2039117 wait4(2039134 <unfinished ...>
+2039134 setpgid(0, 0)                   = 0
+2039134 wait4(-1, 0x7ffce77c29f0, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039134 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039135
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039135 setsid()                        = 1
+2039135 fork()                          = 2
+2039135 wait4(-1 <unfinished ...>
+2039137 exit_group(0)                   = ?
+2039137 +++ exited with 0 +++
+2039135 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2
+2039135 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2, si_uid=1000, si_status=0, si_utime=1 /* 0.01 s */, si_stime=0} ---
+2039135 exit_group(0)                   = ?
+2039135 +++ exited with 0 +++
+2039134 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039135
+2039134 exit_group(0)                   = ?
+2039134 +++ exited with 0 +++
+2039117 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039134
+2039117 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039134, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039117 exit_group(0)                   = ?
+2039117 +++ exited with 0 +++
+2038985 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039117, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+2038962 wait4(2039117, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039117
+2038962 kill(-2039117, SIGKILL)         = -1 ESRCH (No such process)
+2038985 clone(child_stack=0x77d7e01884b8, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039138
+2039138 setsid()                        = 2039138
+2038985 wait4(2039138, 0x77d7e01fdf10, WNOHANG, NULL) = 0
+2039138 clone(child_stack=0x7fff0b25ed08, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039139
+2039139 exit_group(0)                   = ?
+2039139 +++ exited with 0 +++
+2039138 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039139, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039138 wait4(2039139, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039139
+2039138 fork()                          = 2039140
+2039140 wait4(-1, 0x7ffc8019a900, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039140 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039141
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039141 setsid()                        = 1
+2039141 exit_group(0)                   = ?
+2039141 +++ exited with 0 +++
+2039140 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039141
+2039140 exit_group(0)                   = ?
+2039140 +++ exited with 0 +++
+2039138 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039140, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039138 wait4(2039140, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039140
+2039138 fork()                          = 2039143
+2039138 wait4(2039143 <unfinished ...>
+2039143 setpgid(0, 0)                   = 0
+2039143 wait4(-1, 0x7ffda71a8020, WNOHANG, NULL) = -1 ECHILD (No child processes)
+2039143 clone(child_stack=NULL, flags=CLONE_NEWNS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD) = 2039144
+2039144 setsid()                        = 1
+2039144 fork()                          = 2
+2039144 wait4(-1 <unfinished ...>
+2038962 kill(-2039138, SIGKILL)         = 0
+2039138 <... wait4 resumed> <unfinished ...>) = ?
+2039138 +++ killed by SIGKILL +++
+2038985 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=2039138, si_uid=1000, si_status=SIGKILL, si_utime=0, si_stime=1 /* 0.01 s */} ---
+2038962 wait4(2039138 <unfinished ...>
+2039143 +++ killed by SIGKILL +++
+2038962 <... wait4 resumed>, [{WIFSIGNALED(s) && WTERMSIG(s) == SIGKILL}], WNOHANG, NULL) = 2039138
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039050 wait4(2039053 <unfinished ...>
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039050, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039053 exit_group(0)                   = ?
+2039053 +++ exited with 0 +++
+2039050 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039053
+2039050 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039053, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039050 exit_group(0)                   = ?
+2039050 +++ exited with 0 +++
+2039047 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039050, si_uid=1000, si_status=0, si_utime=0, si_stime=2 /* 0.02 s */} ---
+2039047 wait4(2039050, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], WNOHANG, NULL) = 2039050
+2039047 clone(child_stack=0x77d7cc7f9688, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2039462
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039462 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x71e5a1f12e50) = 2039463
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039158 exit_group(0)                   = ?
+2039158 +++ exited with 0 +++
+2039144 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2
+2039144 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2, si_uid=1000, si_status=0, si_utime=1 /* 0.01 s */, si_stime=0} ---
+2039144 exit_group(0)                   = ?
+2039144 +++ exited with 0 +++
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039462 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x71e5a15ffce8, parent_tid=0x71e5a15ff990, exit_signal=0, stack=0x71e5a0dff000, stack_size=0x7fff80, tls=0x71e5a15ff6c0} => {parent_tid=[2039750]}, 88) = 2039750
+2039462 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x71e5a1f12e50) = 2039751
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2039047 wait4(2039462, 0x77d7cc7f9b40, WNOHANG, NULL) = 0
+2038962 clone(child_stack=0x77d7bfb7e998, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[2040145], tls=0x77d7bfb7fb38, child_tidptr=0x77d812b71704) = 2040145
+2039042 exit(0)                         = ?
+2039042 +++ exited with 0 +++
+2039043 exit(0)                         = ?
+2039043 +++ exited with 0 +++
+2039048 exit(0)                         = ?
+2039048 +++ exited with 0 +++
+2039046 exit(0)                         = ?
+2039046 +++ exited with 0 +++
+2038991 exit(0)                         = ?
+2038994 exit(0)                         = ?
+2038994 +++ exited with 0 +++
+2039081 exit(0)                         = ?
+2039081 +++ exited with 0 +++
+2039080 exit(0)                         = ?
+2039080 +++ exited with 0 +++
+2039079 exit(0)                         = ?
+2039079 +++ exited with 0 +++
+2038968 exit(0)                         = ?
+2038968 +++ exited with 0 +++
+2038990 exit(0)                         = ?
+2038990 +++ exited with 0 +++
+2038971 exit(0)                         = ?
+2038971 +++ exited with 0 +++
+2038974 exit(0)                         = ?
+2038974 +++ exited with 0 +++
+2038993 exit(0)                         = ?
+2038993 +++ exited with 0 +++
+2038972 exit(0)                         = ?
+2038972 +++ exited with 0 +++
+2038980 exit(0)                         = ?
+2038980 +++ exited with 0 +++
+2038965 exit(0)                         = ?
+2038965 +++ exited with 0 +++
+2038991 +++ exited with 0 +++
+2038969 exit(0)                         = ?
+2038969 +++ exited with 0 +++
+2038992 exit(0)                         = ?
+2038992 +++ exited with 0 +++
+2038978 exit(0)                         = ?
+2038978 +++ exited with 0 +++
+2038973 exit(0)                         = ?
+2038973 +++ exited with 0 +++
+2038987 exit(0)                         = ?
+2038987 +++ exited with 0 +++
+2038979 exit(0)                         = ?
+2038979 +++ exited with 0 +++
+2038977 exit(0)                         = ?
+2038977 +++ exited with 0 +++
+2038976 exit(0)                         = ?
+2038976 +++ exited with 0 +++
+2038970 exit(0)                         = ?
+2038970 +++ exited with 0 +++
+2038981 exit(0)                         = ?
+2038981 +++ exited with 0 +++
+2038975 exit(0)                         = ?
+2038975 +++ exited with 0 +++
+2038982 exit(0)                         = ?
+2038982 +++ exited with 0 +++
+2038966 exit(0)                         = ?
+2038966 +++ exited with 0 +++
+2038964 exit(0)                         = ?
+2038964 +++ exited with 0 +++
+2038988 exit(0)                         = ?
+2038988 +++ exited with 0 +++
+2038989 exit(0)                         = ?
+2038989 +++ exited with 0 +++
+2038984 exit(0)                         = ?
+2038984 +++ exited with 0 +++
+2038986 exit(0)                         = ?
+2038986 +++ exited with 0 +++
+2038983 exit(0)                         = ?
+2038983 +++ exited with 0 +++
+2038967 exit(0)                         = ?
+2038967 +++ exited with 0 +++
+2038985 exit(0)                         = ?
+2038985 +++ exited with 0 +++
+2038962 exit(0)                         = ?
+2038962 +++ exited with 0 +++
+2038963 exit(0)                         = ?
+2038963 +++ exited with 0 +++
+2038961 exit(0)                         = ?
+2038961 +++ exited with 0 +++
+2038960 exit_group(0)                   = ?
+2040145 +++ exited with 0 +++
+2039082 +++ exited with 0 +++
+2039047 +++ exited with 0 +++
+2039044 +++ exited with 0 +++
+2039040 +++ exited with 0 +++
+2039036 +++ exited with 0 +++
+2039034 +++ exited with 0 +++
+2039033 +++ exited with 0 +++
+2039018 +++ exited with 0 +++
+2039017 +++ exited with 0 +++
+2039011 +++ exited with 0 +++
+2038960 +++ exited with 0 +++
+2039750 exit(0)                         = ?
+2039750 +++ exited with 0 +++
+2039463 exit_group(0)                   = ?
+2039463 +++ exited with 0 +++
+2039462 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039463, si_uid=1000, si_status=0, si_utime=2 /* 0.02 s */, si_stime=3 /* 0.03 s */} ---
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871e1537ce8, parent_tid=0x7871e1537990, exit_signal=0, stack=0x7871e0d37000, stack_size=0x7fff80, tls=0x7871e15376c0} => {parent_tid=[2040187]}, 88) = 2040187
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871e0d36ce8, parent_tid=0x7871e0d36990, exit_signal=0, stack=0x7871e0536000, stack_size=0x7fff80, tls=0x7871e0d366c0} => {parent_tid=[2040188]}, 88) = 2040188
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871e0535ce8, parent_tid=0x7871e0535990, exit_signal=0, stack=0x7871dfd35000, stack_size=0x7fff80, tls=0x7871e05356c0} => {parent_tid=[2040189]}, 88) = 2040189
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871dfd34ce8, parent_tid=0x7871dfd34990, exit_signal=0, stack=0x7871df534000, stack_size=0x7fff80, tls=0x7871dfd346c0} => {parent_tid=[2040190]}, 88) = 2040190
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871df533ce8, parent_tid=0x7871df533990, exit_signal=0, stack=0x7871ded33000, stack_size=0x7fff80, tls=0x7871df5336c0} => {parent_tid=[2040191]}, 88) = 2040191
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871ded32ce8, parent_tid=0x7871ded32990, exit_signal=0, stack=0x7871de532000, stack_size=0x7fff80, tls=0x7871ded326c0} => {parent_tid=[2040192]}, 88) = 2040192
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871de531ce8, parent_tid=0x7871de531990, exit_signal=0, stack=0x7871ddd31000, stack_size=0x7fff80, tls=0x7871de5316c0} => {parent_tid=[2040193]}, 88) = 2040193
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871ddd30ce8, parent_tid=0x7871ddd30990, exit_signal=0, stack=0x7871dd530000, stack_size=0x7fff80, tls=0x7871ddd306c0} => {parent_tid=[2040194]}, 88) = 2040194
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871dd52fce8, parent_tid=0x7871dd52f990, exit_signal=0, stack=0x7871dcd2f000, stack_size=0x7fff80, tls=0x7871dd52f6c0} => {parent_tid=[2040195]}, 88) = 2040195
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871dcd2ece8, parent_tid=0x7871dcd2e990, exit_signal=0, stack=0x7871dc52e000, stack_size=0x7fff80, tls=0x7871dcd2e6c0} => {parent_tid=[2040196]}, 88) = 2040196
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b7fffce8, parent_tid=0x7871b7fff990, exit_signal=0, stack=0x7871b77ff000, stack_size=0x7fff80, tls=0x7871b7fff6c0} => {parent_tid=[2040197]}, 88) = 2040197
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b77fece8, parent_tid=0x7871b77fe990, exit_signal=0, stack=0x7871b6ffe000, stack_size=0x7fff80, tls=0x7871b77fe6c0} => {parent_tid=[2040198]}, 88) = 2040198
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b6ffdce8, parent_tid=0x7871b6ffd990, exit_signal=0, stack=0x7871b67fd000, stack_size=0x7fff80, tls=0x7871b6ffd6c0} => {parent_tid=[2040199]}, 88) = 2040199
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b67fcce8, parent_tid=0x7871b67fc990, exit_signal=0, stack=0x7871b5ffc000, stack_size=0x7fff80, tls=0x7871b67fc6c0} => {parent_tid=[2040200]}, 88) = 2040200
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b5ffbce8, parent_tid=0x7871b5ffb990, exit_signal=0, stack=0x7871b57fb000, stack_size=0x7fff80, tls=0x7871b5ffb6c0} => {parent_tid=[2040201]}, 88) = 2040201
+2039751 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7871b57face8, parent_tid=0x7871b57fa990, exit_signal=0, stack=0x7871b4ffa000, stack_size=0x7fff80, tls=0x7871b57fa6c0} => {parent_tid=[2040202]}, 88) = 2040202
+2040201 exit(0)                         = ?
+2040201 +++ exited with 0 +++
+2040197 exit(0)                         = ?
+2040197 +++ exited with 0 +++
+2040187 exit(0)                         = ?
+2040187 +++ exited with 0 +++
+2040195 exit(0 <unfinished ...>
+2040196 exit(0 <unfinished ...>
+2040195 <... exit resumed>)             = ?
+2040196 <... exit resumed>)             = ?
+2040198 exit(0 <unfinished ...>
+2040196 +++ exited with 0 +++
+2040198 <... exit resumed>)             = ?
+2040195 +++ exited with 0 +++
+2040198 +++ exited with 0 +++
+2040202 exit(0)                         = ?
+2040202 +++ exited with 0 +++
+2040189 exit(0 <unfinished ...>
+2040188 exit(0 <unfinished ...>
+2040189 <... exit resumed>)             = ?
+2040188 <... exit resumed>)             = ?
+2040189 +++ exited with 0 +++
+2040188 +++ exited with 0 +++
+2040191 exit(0)                         = ?
+2040191 +++ exited with 0 +++
+2040194 exit(0)                         = ?
+2040194 +++ exited with 0 +++
+2040200 exit(0)                         = ?
+2040200 +++ exited with 0 +++
+2040193 exit(0)                         = ?
+2040193 +++ exited with 0 +++
+2040190 exit(0)                         = ?
+2040199 exit(0 <unfinished ...>
+2040190 +++ exited with 0 +++
+2040199 <... exit resumed>)             = ?
+2040199 +++ exited with 0 +++
+2040192 exit(0)                         = ?
+2040192 +++ exited with 0 +++
+2039751 exit_group(0)                   = ?
+2039751 +++ exited with 0 +++
+2039462 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2039751, si_uid=1000, si_status=0, si_utime=166 /* 1.66 s */, si_stime=28 /* 0.28 s */} ---
+2039462 wait4(2039751, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039751
+2039462 wait4(2039463, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2039463
+2039462 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x71e5a1f12e50) = 2040248
+2039462 wait4(2040248 <unfinished ...>
+2040248 exit_group(0)                   = ?
+2040248 +++ exited with 0 +++
+2039462 <... wait4 resumed>, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 2040248
+2039462 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=2040248, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+2039462 exit_group(0)                   = ?
+2039462 +++ exited with 0 +++

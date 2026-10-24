@@ -1,0 +1,97 @@
+{
+  "checks": {
+    "initialize": true,
+    "find_document": true,
+    "missing_document_rejected": true,
+    "uncancelled_control_writes": true,
+    "cancel_acknowledged": true,
+    "cancel_exit_nonzero": true,
+    "cancel_before_completion": false,
+    "cancel_prevents_delayed_write": false,
+    "unknown_process_rejected": true
+  },
+  "seconds": 4.692,
+  "records": [
+    {
+      "id": 1,
+      "result": {
+        "userAgent": "platform_check/0.163.0 (Ubuntu 26.4.0; x86_64) dumb (platform_check; 0.1.0)",
+        "codexHome": "/home/cash/.codex",
+        "platformFamily": "unix",
+        "platformOs": "linux"
+      }
+    },
+    {
+      "method": "remoteControl/status/changed",
+      "params": {
+        "status": "disabled",
+        "serverName": "Essence",
+        "installationId": "7d5df357-e910-4ace-aa7b-0ead50a785fd",
+        "environmentId": null
+      },
+      "emittedAtMs": 1792781391545
+    },
+    {
+      "id": 2,
+      "result": {
+        "exitCode": 0,
+        "stdout": "docs/architecture.md\n",
+        "stderr": ""
+      }
+    },
+    {
+      "id": 3,
+      "result": {
+        "exitCode": 1,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "id": 7,
+      "result": {
+        "exitCode": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "method": "command/exec/outputDelta",
+      "params": {
+        "processId": "cancel-proof",
+        "stream": "stdout",
+        "deltaBase64": "UkVBRFkK",
+        "capReached": false
+      },
+      "emittedAtMs": 1792781391743
+    },
+    {
+      "id": 5,
+      "result": {}
+    },
+    {
+      "method": "account/updated",
+      "params": {
+        "authMode": "chatgpt",
+        "planType": "pro"
+      },
+      "emittedAtMs": 1792781391809
+    },
+    {
+      "id": 4,
+      "result": {
+        "exitCode": 137,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "error": {
+        "code": -32600,
+        "message": "no active command/exec for process id \"no-such-process\""
+      },
+      "id": 6
+    }
+  ],
+  "scope": "Local app-server command execution only; no model turn or Gateway request"
+}

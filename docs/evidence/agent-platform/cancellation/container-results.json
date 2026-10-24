@@ -1,0 +1,21 @@
+{
+  "control": {
+    "ready": "READY",
+    "exit": 0,
+    "marker_exists": true,
+    "kill_exit": null,
+    "stderr": ""
+  },
+  "cancel": {
+    "ready": "READY",
+    "exit": 137,
+    "marker_exists": false,
+    "kill_exit": 0,
+    "stderr": ""
+  },
+  "checks": {
+    "control_writes": true,
+    "cancel_stops_write": true,
+    "cancel_acknowledged": true
+  }
+}

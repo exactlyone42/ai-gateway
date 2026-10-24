@@ -1,0 +1,61 @@
+{
+  "id": "3b34cb38-08ba-475a-887e-2c44c59bad22",
+  "ok": true,
+  "result": {
+    "automation": {
+      "id": "ad8983b6-1875-4762-8031-1a12b989a6aa",
+      "name": "agent-platform-decisions",
+      "prompt": "使用 cash-rule 接手 /home/cash/.cache/agent-platform-decisions/loops/agent-platform-decisions.loop.md。使用者要求每五分鐘檢查並推進，直到整體完成或確實無法繼續。先確認沒有其他執行者正在修改，沿用原工作區與證據，不開新分支或第二份 LOOP。每輪推進原始全案目標，不只重報狀態，不再擴做單一取消問題。重大方向未定案不視為已選 A，先做獨立工作。整體完成、缺必要人類決定或確實無法繼續時，停用名為 agent-platform-decisions 的本排程並記錄證據。不得增加花費、正式部署或刪除授權。",
+      "precheck": null,
+      "agentId": "codex",
+      "runContext": {
+        "kind": "workspace-run",
+        "projectId": "github:dnaboss/agent-pool-gateway",
+        "hostId": "local",
+        "projectHostSetupId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410",
+        "repoId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410",
+        "path": "/home/cash/work_space/private/agent-pool-gateway"
+      },
+      "sourceContext": {
+        "kind": "task-source",
+        "provider": "github",
+        "projectId": "github:dnaboss/agent-pool-gateway",
+        "hostId": "local",
+        "projectHostSetupId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410",
+        "repoId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410",
+        "providerIdentity": {
+          "provider": "github",
+          "owner": "DnaBoss",
+          "repo": "agent-pool-gateway"
+        },
+        "accountLabel": null
+      },
+      "projectId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410",
+      "executionTargetType": "local",
+      "executionTargetId": "local",
+      "schedulerOwner": "local_host_service",
+      "workspaceMode": "existing",
+      "workspaceId": "cda62dcf-74f6-4c60-aaa9-bd9a80847410::/home/cash/work_space/private/agent-pool-gateway",
+      "baseBranch": null,
+      "reuseSession": true,
+      "timezone": "Asia/Taipei",
+      "rrule": "*/5 * * * *",
+      "dtstart": 1792782504506,
+      "enabled": false,
+      "nextRunAt": 1792782900000,
+      "missedRunPolicy": "run_once_within_grace",
+      "missedRunGraceMinutes": 720,
+      "createdAt": 1792782504528,
+      "updatedAt": 1792782695877,
+      "lastRunAt": 1792782638225
+    },
+    "owner": {
+      "selector": {
+        "kind": "self"
+      }
+    }
+  },
+  "_meta": {
+    "runtimeId": "82b0ac6c-6c37-408d-a684-193d136b55af"
+  }
+}

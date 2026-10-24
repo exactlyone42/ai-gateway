@@ -1,0 +1,52 @@
+{
+  "context_answer_matches": true,
+  "records": [
+    {
+      "role": "second",
+      "requested_model": "gpt-oss:20b",
+      "status": "error",
+      "seconds": 0.0,
+      "files": 0,
+      "chars_in": 67,
+      "num_ctx": 2048,
+      "input_tokens_est": 23,
+      "error": "prompt is about 23 tokens, over the 0 this call allows (num_ctx 2048); send fewer files, send a diff, or raise --num-ctx",
+      "ts": "2026-10-24T01:41:54+0800"
+    },
+    {
+      "role": "second",
+      "requested_model": "gpt-oss:20b",
+      "status": "ok",
+      "seconds": 11.06,
+      "files": 0,
+      "chars_in": 67,
+      "chars_out": 143,
+      "input_tokens_est": 16.75,
+      "output_tokens_est": 35.75,
+      "num_ctx": 4096,
+      "prompt_eval_count": 142,
+      "eval_count": 180,
+      "prompt_eval_duration": 374513000,
+      "eval_duration": 4100366000,
+      "ts": "2026-10-24T01:42:09+0800"
+    },
+    {
+      "role": "second",
+      "requested_model": "gpt-oss:20b",
+      "status": "ok",
+      "seconds": 1.63,
+      "files": 0,
+      "chars_in": 121,
+      "chars_out": 79,
+      "input_tokens_est": 30.25,
+      "output_tokens_est": 19.75,
+      "num_ctx": 4096,
+      "prompt_eval_count": 153,
+      "eval_count": 56,
+      "prompt_eval_duration": 325725000,
+      "eval_duration": 1254074000,
+      "ts": "2026-10-24T01:42:34+0800"
+    }
+  ],
+  "negative_control_wrong_port_matches": false
+}

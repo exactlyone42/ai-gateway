@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "task": "agent-platform-decisions",
+  "project": "/home/cash/.cache/agent-platform-decisions",
+  "steps": {
+    "S01": {
+      "kind": "internal",
+      "reason": "現況與初步測試，尚未交付產品功能"
+    },
+    "S02": {
+      "kind": "internal",
+      "reason": "確認兩種不同實作邊界"
+    },
+    "S03": {
+      "kind": "internal",
+      "reason": "定案前的比較實測"
+    },
+    "S04": {
+      "kind": "internal",
+      "reason": "定義實作工作與正式交付清單，尚不執行部署"
+    },
+    "S05": {
+      "kind": "internal",
+      "reason": "定位取消原因並比較獨立容器，沒有交付正式功能"
+    },
+    "S06": {
+      "kind": "internal",
+      "reason": "本地研究決策PDF與圖表交付，不是產品部署；使用者未授權部署"
+    }
+  }
+}

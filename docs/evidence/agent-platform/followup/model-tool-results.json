@@ -1,0 +1,58 @@
+{
+  "model": "huihui_ai/Qwen3.8-abliterated:latest",
+  "seconds": 4.206,
+  "checks": {
+    "one_tool_call": true,
+    "correct_name_and_path": true,
+    "answer_matches_file": true
+  },
+  "responses": [
+    {
+      "model": "huihui_ai/Qwen3.8-abliterated:latest",
+      "created_at": "2026-10-23T18:50:43.207900827Z",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_p3k0n6vp",
+            "function": {
+              "index": 0,
+              "name": "read_document",
+              "arguments": {
+                "path": "docs/architecture.md"
+              }
+            }
+          }
+        ]
+      },
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 3290480894,
+      "load_duration": 1260210,
+      "prompt_eval_count": 304,
+      "prompt_eval_cached_count": 0,
+      "prompt_eval_duration": 1760324000,
+      "eval_count": 28,
+      "eval_duration": 1445855000
+    },
+    {
+      "model": "huihui_ai/Qwen3.8-abliterated:latest",
+      "created_at": "2026-10-23T18:50:44.111661134Z",
+      "message": {
+        "role": "assistant",
+        "content": "{\"first_line\": \"# 架構\"}"
+      },
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 902243863,
+      "load_duration": 1315823,
+      "prompt_eval_count": 357,
+      "prompt_eval_cached_count": 334,
+      "prompt_eval_duration": 435107000,
+      "eval_count": 9,
+      "eval_duration": 460553000
+    }
+  ],
+  "scope": "Local Ollama tool call and one permitted read-only file; no Gateway request"
+}

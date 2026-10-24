@@ -1,0 +1,25 @@
+{
+  "checks": {
+    "summary_preserves_constraints": true,
+    "negative_missing_prohibition_rejected": true
+  },
+  "measurement": [
+    {
+      "role": "review",
+      "requested_model": "huihui_ai/Qwen3.8-abliterated:latest",
+      "status": "ok",
+      "seconds": 32.49,
+      "files": 0,
+      "chars_in": 183,
+      "chars_out": 128,
+      "input_tokens_est": 45.75,
+      "output_tokens_est": 32.0,
+      "num_ctx": 4096,
+      "prompt_eval_count": 167,
+      "eval_count": 69,
+      "prompt_eval_duration": 957206000,
+      "eval_duration": 2705950000,
+      "ts": "2026-10-24T02:50:15+0800"
+    }
+  ]
+}
