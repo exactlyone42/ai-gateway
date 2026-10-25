@@ -186,3 +186,9 @@ Authentication, model policy, budget reservation and audit durability fail
 closed. Optional analytics may fail open. Provider routing fails with a clear
 error when no approved deployment is healthy; it never falls back to an
 unapproved model or credential source.
+
+## 供應商金鑰可省略
+
+Gateway 的登入驗證仍然保留。未設定 OpenAI API key 時不建立該供應商路徑；Anthropic 依既有 Client 登入轉送、伺服器 Auth Token、API key 的順序選擇，三者都沒有時不建立該路徑。缺少供應商設定不應讓整台 Gateway 無法啟動。
+
+正式環境若明確填入範例金鑰，仍會拒絕啟動；部署不得自動補入 replace-me。檢查部署結果時，除了 ready 與版本，也要用原 Client 真正完成請求，並核對原資料庫、Client 數與登入設定沒有被替換。

@@ -202,7 +202,7 @@ impl Config {
             .unwrap_or_else(|_| "https://api.openai.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
-        let openai_api_key = required("OPENAI_API_KEY")?;
+        let openai_api_key = setting("OPENAI_API_KEY").unwrap_or_default();
         let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
         let openai_request_max_bytes = setting("OPENAI_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
@@ -232,11 +232,7 @@ impl Config {
             return Err(ConfigError::IncompleteAnthropicClientOauth);
         }
         let anthropic_auth_token = setting("ANTHROPIC_AUTH_TOKEN").ok();
-        let anthropic_api_key = if anthropic_auth_token.is_some() || anthropic_client_oauth {
-            setting("ANTHROPIC_API_KEY").unwrap_or_default()
-        } else {
-            required("ANTHROPIC_API_KEY")?
-        };
+        let anthropic_api_key = setting("ANTHROPIC_API_KEY").unwrap_or_default();
         let anthropic_provider = provider_name("ANTHROPIC_PROVIDER", "anthropic")?;
         let anthropic_request_max_bytes = setting("ANTHROPIC_REQUEST_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
@@ -1001,6 +997,131 @@ fn load_jev() -> Result<Option<crate::jev::JevConfig>, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_provider_keys_in_production() {
+        if let Ok(case) = env::var("GATEWAY_CONFIG_TEST_CASE") {
+            let parsed = Config::from_env();
+            if case == "placeholder" {
+                assert!(matches!(
+                    parsed,
+                    Err(ConfigError::DevelopmentSecretOutsideDevelopment(
+                        "OPENAI_API_KEY"
+                    ))
+                ));
+            } else {
+                let mut config = parsed.unwrap();
+                assert_eq!(config.openai_api_key.is_empty(), case != "keys");
+                assert_eq!(config.anthropic_api_key.is_empty(), case != "keys");
+                assert_eq!(config.anthropic_client_oauth, case == "oauth");
+                config.provider_allowed_tenant_ids.push(Uuid::nil());
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                runtime.block_on(async {
+                    use crate::model_registry::{
+                        CapabilityRequirements, GatewayOperation, ModelSelector, RegistryError,
+                    };
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .connect_lazy(&config.database_url)
+                        .unwrap();
+                    let state = crate::state::AppState::new(config, pool).unwrap();
+                    for operation in [
+                        GatewayOperation::OpenAiResponses,
+                        GatewayOperation::AnthropicMessages,
+                    ] {
+                        let result = state
+                            .models
+                            .candidates(
+                                Uuid::nil(),
+                                true,
+                                operation,
+                                ModelSelector::parse("company-default").unwrap(),
+                                CapabilityRequirements::default(),
+                            )
+                            .await;
+                        let expected = match (case.as_str(), operation) {
+                            ("keys", GatewayOperation::OpenAiResponses) => {
+                                Some("env://OPENAI_API_KEY")
+                            }
+                            ("keys", GatewayOperation::AnthropicMessages) => {
+                                Some("env://ANTHROPIC_API_KEY")
+                            }
+                            ("oauth", GatewayOperation::AnthropicMessages) => {
+                                Some("env://ANTHROPIC_CLIENT_OAUTH")
+                            }
+                            ("token", GatewayOperation::AnthropicMessages) => {
+                                Some("env://ANTHROPIC_AUTH_TOKEN")
+                            }
+                            _ => None,
+                        };
+                        if let Some(expected) = expected {
+                            assert_eq!(result.unwrap()[0].profile.credential_ref, expected);
+                        } else {
+                            assert!(matches!(result, Err(RegistryError::UntrustedProvider)));
+                        }
+                    }
+                });
+            }
+            return;
+        }
+        for case in ["absent", "blank", "oauth", "token", "keys", "placeholder"] {
+            let spool =
+                std::env::temp_dir().join(format!("gateway-config-{}-{case}", Uuid::new_v4()));
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .env_clear()
+                .args([
+                    "--exact",
+                    "config::tests::optional_provider_keys_in_production",
+                    "--nocapture",
+                ])
+                .env("GATEWAY_CONFIG_TEST_CASE", case)
+                .env(
+                    "DATABASE_URL",
+                    "postgres://fixture:fixture@127.0.0.1:1/fixture",
+                )
+                .env("CREDENTIAL_ENVIRONMENT", "prod")
+                .env(
+                    "CREDENTIAL_HASH_KEY",
+                    "fixture-config-validation-32-bytes-long",
+                )
+                .env("PROVIDER_ALLOWED_TENANT_IDS", Uuid::new_v4().to_string())
+                .env("LEDGER_SPOOL_DIR", &spool);
+            match case {
+                "blank" => {
+                    command
+                        .env("OPENAI_API_KEY", " ")
+                        .env("ANTHROPIC_API_KEY", " ");
+                }
+                "oauth" => {
+                    command
+                        .env("ANTHROPIC_CLIENT_OAUTH", "true")
+                        .env("ANTHROPIC_OAUTH_CREDENTIAL_ID", Uuid::new_v4().to_string());
+                }
+                "token" => {
+                    command.env("ANTHROPIC_AUTH_TOKEN", "fixture-auth-token");
+                }
+                "keys" => {
+                    command
+                        .env("OPENAI_API_KEY", "fixture-openai-key")
+                        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+                }
+                "placeholder" => {
+                    command.env("OPENAI_API_KEY", "replace-me");
+                }
+                _ => {}
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if spool.exists() {
+                std::fs::remove_dir_all(spool).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn bootstrap_is_explicitly_development_only() {
