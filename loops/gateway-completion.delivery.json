@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "task": "gateway-completion",
+  "project": "/home/cash/work_space/private/agent-pool-gateway-completion",
+  "steps": {
+    "S01": {"kind": "internal", "reason": "修本機 git 設定，不是可用功能"},
+    "S02": {
+      "kind": "milestone",
+      "environment": "production",
+      "artifact": {"path": "delivery/gateway-completion/release.tar", "sha256": "pending"},
+      "validation": {"path": "delivery/gateway-completion/validation.json", "sha256": "pending"},
+      "authorization": {"path": "delivery/gateway-completion/authorization.json", "sha256": "pending"},
+      "deploy": {"path": "delivery/gateway-completion/deploy.sh", "sha256": "pending"},
+      "readback": {"path": "delivery/gateway-completion/readback.sh", "sha256": "pending"},
+      "timeout_seconds": 900
+    },
+    "S03": {"kind": "internal", "reason": "用 S02 已部署的版本做真實驗收，無新交付物"},
+    "S04": {"kind": "internal", "reason": "測試修復，併入下一次部署"},
+    "S05": {"kind": "internal", "reason": "讀回既有已部署功能，無新交付物"},
+    "S06": {
+      "kind": "milestone",
+      "environment": "production",
+      "artifact": {"path": "delivery/gateway-completion/shadow-release.tar", "sha256": "pending"},
+      "validation": {"path": "delivery/gateway-completion/shadow-validation.json", "sha256": "pending"},
+      "authorization": {"path": "delivery/gateway-completion/shadow-authorization.json", "sha256": "pending"},
+      "deploy": {"path": "delivery/gateway-completion/shadow-deploy.sh", "sha256": "pending"},
+      "readback": {"path": "delivery/gateway-completion/shadow-readback.sh", "sha256": "pending"},
+      "timeout_seconds": 900
+    },
+    "S07": {"kind": "internal", "reason": "由 model-dispatcher 自己的 loop 交付"},
+    "S08": {"kind": "internal", "reason": "由 result-integrator 自己的 loop 交付"},
+    "S09": {"kind": "internal", "reason": "由 identity-groups 自己的 loop 交付"},
+    "S10": {"kind": "internal", "reason": "文件收尾"}
+  }
+}

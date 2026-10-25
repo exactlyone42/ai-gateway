@@ -19,6 +19,7 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
+| [gateway-completion](./gateway-completion.loop.md) | — | 進行中 | P0 | 上層總 LOOP：線上版本入庫、各項驗收與剩餘工作依序收尾 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
