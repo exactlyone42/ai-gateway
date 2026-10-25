@@ -79,8 +79,9 @@ impl AppState {
             .max_connections(config.admin_database_max_connections)
             .acquire_timeout(Duration::from_secs(2))
             .connect_lazy_with(pool.connect_options().as_ref().clone());
-        let mut provider_profiles = vec![
-            ProviderProfile::bearer(
+        let mut provider_profiles = Vec::new();
+        if !config.openai_api_key.is_empty() {
+            provider_profiles.push(ProviderProfile::bearer(
                 "env://OPENAI_API_KEY",
                 config.openai_provider.clone(),
                 config.openai_base_url.clone(),
@@ -91,8 +92,13 @@ impl AppState {
                 ],
                 config.provider_allowed_tenant_ids.clone(),
                 Arc::<str>::from(config.openai_api_key.clone()),
-            ),
-            if config.anthropic_client_oauth {
+            ));
+        }
+        if config.anthropic_client_oauth
+            || config.anthropic_auth_token.is_some()
+            || !config.anthropic_api_key.is_empty()
+        {
+            provider_profiles.push(if config.anthropic_client_oauth {
                 ProviderProfile::client_bearer(
                     "env://ANTHROPIC_CLIENT_OAUTH",
                     config.anthropic_provider.clone(),
@@ -129,8 +135,8 @@ impl AppState {
                     config.provider_allowed_tenant_ids.clone(),
                     Arc::<str>::from(config.anthropic_api_key.clone()),
                 )
-            },
-        ];
+            });
+        }
         let extra_profiles = config
             .extra_provider_profiles
             .iter()
