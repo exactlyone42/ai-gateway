@@ -36,7 +36,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(event.name = "model_catalog.refresh_failed", exception.message = %error, "startup model catalog refresh failed");
     }
     let model_sync = model_sync::spawn(state.pool.clone(), state.client.clone());
-    state.quotas.acquire_single_instance_guard().await?;
+    initialize_concurrency_guard(&state.quotas, &state.config.scheduler).await?;
     let recovered = state.ledger.flush_startup().await?;
     if recovered > 0 {
         info!(
@@ -196,6 +196,16 @@ async fn bounded_ledger_shutdown(state: &AppState) {
     }
 }
 
+async fn initialize_concurrency_guard(
+    quotas: &crate::quota::QuotaEngine,
+    scheduler: &crate::scheduler::SchedulerConfig,
+) -> Result<(), crate::quota::QuotaError> {
+    if !scheduler.passthrough {
+        quotas.acquire_single_instance_guard().await?;
+    }
+    Ok(())
+}
+
 async fn report_flush_bounded<E, F>(signal: &'static str, limit: Duration, flush: F)
 where
     E: std::fmt::Display + Send + 'static,
@@ -249,5 +259,51 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initialize_concurrency_guard;
+    use crate::{
+        quota::{QuotaEngine, QuotaError},
+        scheduler::SchedulerConfig,
+    };
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    async fn startup_keeps_single_owner_when_scheduling_is_enabled(pool: PgPool) {
+        let first = QuotaEngine::new(pool.clone());
+        let second = QuotaEngine::new(pool);
+        let scheduler = SchedulerConfig::default();
+        initialize_concurrency_guard(&first, &scheduler)
+            .await
+            .unwrap();
+        assert!(matches!(
+            initialize_concurrency_guard(&second, &scheduler).await,
+            Err(QuotaError::MultipleInstances)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn passthrough_startup_can_overlap_a_legacy_guard_holder(pool: PgPool) {
+        let legacy = QuotaEngine::new(pool.clone());
+        legacy.acquire_single_instance_guard().await.unwrap();
+        let first = QuotaEngine::new(pool.clone());
+        let second = QuotaEngine::new(pool);
+        let scheduler = SchedulerConfig {
+            passthrough: true,
+            ..SchedulerConfig::default()
+        };
+        initialize_concurrency_guard(&first, &scheduler)
+            .await
+            .unwrap();
+        initialize_concurrency_guard(&second, &scheduler)
+            .await
+            .unwrap();
+        assert!(matches!(
+            initialize_concurrency_guard(&second, &SchedulerConfig::default()).await,
+            Err(QuotaError::MultipleInstances)
+        ));
     }
 }

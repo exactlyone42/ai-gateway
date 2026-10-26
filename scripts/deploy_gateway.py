@@ -170,6 +170,8 @@ def deploy(args):
     replacement = replace_route(previous, old_port, args.port)
     (evidence / 'Caddyfile.before').write_text(previous)
     env = dict(item.split('=', 1) for item in source['Config']['Env'])
+    if env.get('SCHEDULER_PASSTHROUGH') != 'true':
+        raise RuntimeError('目前安全切換只支援原本已啟用直接轉送的服務；排隊模式不可並行，也不會自動修改模式')
     from urllib.parse import urlsplit
     database = urlsplit(env['DATABASE_URL'])
     if not re.fullmatch(r'[a-zA-Z0-9_]+', database.path[1:]):

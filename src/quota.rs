@@ -1108,6 +1108,78 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn independent_engines_share_atomic_request_and_token_quotas(pool: PgPool) {
+        for (limit, capacity, column) in [
+            ("requests_per_minute", 1, "reserved_requests"),
+            ("tokens_per_hour", 20, "reserved_tokens"),
+        ] {
+            let tenant_id = Uuid::new_v4();
+            insert_global_quota(
+                &pool,
+                tenant_id,
+                json!({"mode": "hard", "limits": {(limit): capacity}}),
+            )
+            .await;
+            let model = Uuid::new_v4();
+            let provider = Uuid::new_v4();
+            let at = Utc::now();
+            let admit = |pool: PgPool| async move {
+                QuotaEngine::new(pool)
+                    .admit(
+                        Uuid::new_v4(),
+                        &principal(tenant_id),
+                        vec![selection(tenant_id, "direct-model", model, provider)],
+                        QuotaEstimate {
+                            input_upper_bound: 10,
+                            requested_output_tokens: Some(10),
+                            output_multiplier: 1,
+                            billable: true,
+                            unbounded_input: false,
+                            requires_extended_pricing: false,
+                            unsupported_cost_features: false,
+                        },
+                        at,
+                    )
+                    .await
+                    .unwrap()
+            };
+            let (first, second) = tokio::join!(admit(pool.clone()), admit(pool.clone()));
+            let outcomes = [first, second];
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|result| matches!(result, QuotaOutcome::Allowed(_)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|result| matches!(
+                        result,
+                        QuotaOutcome::Rejected(_, QuotaRejection::HardLimit)
+                    ))
+                    .count(),
+                1
+            );
+            let (requests, tokens, reservations): (i64, i64, i64) = sqlx::query_as(
+            "SELECT reserved_requests, reserved_tokens, (SELECT count(*) FROM quota_reservations WHERE tenant_id = $1) FROM quota_windows WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+            assert_eq!(reservations, 1);
+            let reserved = if column == "reserved_requests" {
+                requests
+            } else {
+                tokens
+            };
+            assert_eq!(reserved, capacity);
+        }
+    }
+
+    #[sqlx::test]
     async fn a_persistent_window_survives_a_new_engine_instance(pool: PgPool) {
         let tenant_id = Uuid::new_v4();
         insert_global_quota(
