@@ -97,10 +97,10 @@ def start_stream_probe(base, evidence):
             '{"mcpServers":{}}', '--setting-sources', 'user', '--settings',
             json.dumps({'env': {'ANTHROPIC_BASE_URL': base}}),
             '--system-prompt', 'You respond to connectivity checks with the requested text.',
-            '--no-session-persistence', '--max-turns', '1', '--output-format', 'stream-json',
+            '--no-session-persistence', '--max-turns', '3', '--output-format', 'stream-json',
             '--verbose', '--include-partial-messages',
-            'Write exactly 200 numbered lines explaining how to keep a service running during deployment. '
-            'Do not use tools. End the entire answer with GATEWAY_STREAM_END.',
+            '這是長回應連線驗收，請詳細說明部署時維持服務的方法，恰好 200 行並逐行編號。'
+            '不使用工具，回答最後加上 GATEWAY_STREAM_END。',
         ], stdout=stdout, stderr=stderr, cwd=evidence)
     try:
         deadline = time.monotonic() + 120
