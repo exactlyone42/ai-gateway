@@ -69,9 +69,10 @@ def client_probe(base, evidence, label):
     result = subprocess.run([
         'claude', '-p', '--tools', '', '--strict-mcp-config', '--mcp-config',
         '{"mcpServers":{}}', '--setting-sources', 'user', '--settings', settings,
+        '--system-prompt', 'You respond to connectivity checks with the requested text.',
         '--no-session-persistence', '--max-turns', '1',
         'Reply exactly GATEWAY_DEPLOY_OK',
-    ], capture_output=True, timeout=180)
+    ], capture_output=True, timeout=180, cwd=evidence)
     (evidence / f'{label}.out').write_bytes(result.stdout)
     (evidence / f'{label}.err').write_bytes(result.stderr)
     if result.returncode or result.stdout.strip() != b'GATEWAY_DEPLOY_OK':
@@ -95,11 +96,12 @@ def start_stream_probe(base, evidence):
             'claude', '-p', '--tools', '', '--strict-mcp-config', '--mcp-config',
             '{"mcpServers":{}}', '--setting-sources', 'user', '--settings',
             json.dumps({'env': {'ANTHROPIC_BASE_URL': base}}),
-            '--no-session-persistence', '--max-turns', '1', '--output-format', 'stream-json',
+            '--system-prompt', 'You respond to connectivity checks with the requested text.',
+            '--no-session-persistence', '--max-turns', '3', '--output-format', 'stream-json',
             '--verbose', '--include-partial-messages',
-            'Write exactly 200 numbered lines explaining how to keep a service running during deployment. '
-            'Do not use tools. End the entire answer with GATEWAY_STREAM_END.',
-        ], stdout=stdout, stderr=stderr)
+            '這是長回應連線驗收，請詳細說明部署時維持服務的方法，恰好 200 行並逐行編號。'
+            '不使用工具，回答最後加上 GATEWAY_STREAM_END。',
+        ], stdout=stdout, stderr=stderr, cwd=evidence)
     try:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -170,6 +172,8 @@ def deploy(args):
     replacement = replace_route(previous, old_port, args.port)
     (evidence / 'Caddyfile.before').write_text(previous)
     env = dict(item.split('=', 1) for item in source['Config']['Env'])
+    if env.get('SCHEDULER_PASSTHROUGH') != 'true':
+        raise RuntimeError('目前安全切換只支援原本已啟用直接轉送的服務；排隊模式不可並行，也不會自動修改模式')
     from urllib.parse import urlsplit
     database = urlsplit(env['DATABASE_URL'])
     if not re.fullmatch(r'[a-zA-Z0-9_]+', database.path[1:]):

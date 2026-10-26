@@ -160,7 +160,8 @@ class DeploymentTests(unittest.TestCase):
         if name == 'old':
             return {'NetworkSettings': {'Ports': {'8080/tcp': [{'HostPort': '18080'}]},
                     'Networks': {'gateway': {}}},
-                    'Config': {'Env': ['DATABASE_URL=postgres://gateway@db-alias/gateway']}}
+                    'Config': {'Env': ['DATABASE_URL=postgres://gateway@db-alias/gateway',
+                                      'SCHEDULER_PASSTHROUGH=' + ('false' if self.failure == 'queued-mode' else 'true')]}}
         if name == 'database':
             networks = {'gateway': {'IPAddress': '172.18.0.2', 'Aliases': ['db-alias']}}
             if self.failure == 'database-host':
@@ -218,6 +219,13 @@ class DeploymentTests(unittest.TestCase):
     def test_wrong_database_is_rejected_before_container_creation(self):
         self.failure = 'database-host'
         with self.assertRaisesRegex(RuntimeError, '預檢資料庫'):
+            deploy_gateway.deploy(self.args)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.config.read_text(), self.previous)
+
+    def test_queued_mode_is_rejected_without_changing_service_or_settings(self):
+        self.failure = 'queued-mode'
+        with self.assertRaisesRegex(RuntimeError, '排隊模式不可並行'):
             deploy_gateway.deploy(self.args)
         self.assertEqual(self.events, [])
         self.assertEqual(self.config.read_text(), self.previous)
