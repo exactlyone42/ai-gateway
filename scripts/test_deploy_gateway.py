@@ -79,19 +79,71 @@ class ReloadTests(unittest.TestCase):
 
 
 class StreamCompletionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.evidence = Path(self.temp.name)
+        self.process = Mock()
+        self.process.wait.return_value = 0
+        self.start = {'type': 'stream_event', 'event': {'type': 'message_start'}}
+        self.delta = {'type': 'stream_event', 'event': {'type': 'content_block_delta',
+                      'delta': {'type': 'text_delta', 'text': 'GATEWAY_STREAM_END'}}}
+        self.terminal = {'type': 'stream_event', 'event': {'type': 'message_delta',
+                         'delta': {'stop_reason': 'end_turn'}}}
+        self.stop = {'type': 'stream_event', 'event': {'type': 'message_stop'}}
+        self.result = {'type': 'result', 'is_error': False, 'num_turns': 1,
+                       'result': 'GATEWAY_STREAM_END'}
+
+    def write(self, records):
+        output = b''.join(json.dumps(item).encode() + b'\n' for item in records)
+        (self.evidence / 'cutover-stream.jsonl').write_bytes(output)
+        return output
+
     def test_content_must_continue_after_switch_offset(self):
-        with tempfile.TemporaryDirectory() as folder:
-            evidence = Path(folder)
-            output = evidence / 'cutover-stream.jsonl'
-            delta = json.dumps({'type': 'stream_event', 'event': {'type': 'content_block_delta'}}).encode() + b'\n'
-            result = json.dumps({'type': 'result', 'is_error': False, 'result': 'GATEWAY_STREAM_END'}).encode() + b'\n'
-            process = Mock()
-            process.wait.return_value = 0
-            output.write_bytes(delta + result)
-            with self.assertRaisesRegex(RuntimeError, '切換後沒有新的串流內容'):
-                deploy_gateway.finish_stream_probe(process, evidence, len(delta))
-            output.write_bytes(delta + delta + result)
-            deploy_gateway.finish_stream_probe(process, evidence, len(delta))
+        output = self.write([self.start, self.delta, self.terminal, self.stop, self.result])
+        offset = len(json.dumps(self.start).encode()) + 1
+        deploy_gateway.finish_stream_probe(self.process, self.evidence, offset)
+        with self.assertRaisesRegex(RuntimeError, '切換後沒有新的文字串流內容'):
+            deploy_gateway.finish_stream_probe(self.process, self.evidence, len(output))
+
+    def test_cutoff_then_successful_retry_is_rejected(self):
+        resumed = dict(self.result, num_turns=2)
+        self.write([self.start, self.delta, self.stop,
+                    {'type': 'user', 'message': {'content': 'cut off mid-stream'}},
+                    self.start, self.delta, self.terminal, self.stop, resumed])
+        with self.assertRaisesRegex(RuntimeError, '續傳或重寫'):
+            deploy_gateway.finish_stream_probe(self.process, self.evidence, 0)
+
+    def test_hook_rewrite_is_also_rejected(self):
+        self.write([self.start, self.delta, self.terminal, self.stop,
+                    {'type': 'user', 'message': {'content': 'Stop hook feedback'}}, self.result])
+        with self.assertRaisesRegex(RuntimeError, '續傳或重寫'):
+            deploy_gateway.finish_stream_probe(self.process, self.evidence, 0)
+
+    def test_missing_or_abnormal_terminal_is_rejected(self):
+        for terminal in [None, {'type': 'stream_event', 'event': {
+                'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}}}]:
+            with self.subTest(terminal=terminal):
+                events = [self.start, self.delta]
+                if terminal:
+                    events.append(terminal)
+                self.write(events + [self.stop, self.result])
+                with self.assertRaisesRegex(RuntimeError, '正常結束事件'):
+                    deploy_gateway.finish_stream_probe(self.process, self.evidence, 0)
+
+    def test_thinking_after_cutover_is_not_text_progress(self):
+        prefix = self.write([self.start, self.delta])
+        thinking = {'type': 'stream_event', 'event': {'type': 'content_block_delta',
+                    'delta': {'type': 'thinking_delta', 'thinking': 'GATEWAY_STREAM_END'}}}
+        self.write([self.start, self.delta, thinking, self.terminal, self.stop, self.result])
+        with self.assertRaisesRegex(RuntimeError, '切換後沒有新的文字串流內容'):
+            deploy_gateway.finish_stream_probe(self.process, self.evidence, len(prefix))
+
+    def test_multiple_messages_without_synthetic_user_are_rejected(self):
+        self.write([self.start, self.delta, self.terminal, self.stop,
+                    self.start, self.delta, self.terminal, self.stop, self.result])
+        with self.assertRaisesRegex(RuntimeError, '正常結束事件'):
+            deploy_gateway.finish_stream_probe(self.process, self.evidence, 0)
 
 
 class RetirementTests(unittest.TestCase):

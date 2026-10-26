@@ -97,10 +97,12 @@ def start_stream_probe(base, evidence):
             '{"mcpServers":{}}', '--setting-sources', 'user', '--settings',
             json.dumps({'env': {'ANTHROPIC_BASE_URL': base}}),
             '--system-prompt', 'You respond to connectivity checks with the requested text.',
-            '--no-session-persistence', '--max-turns', '3', '--output-format', 'stream-json',
+            '--no-session-persistence', '--max-turns', '1', '--output-format', 'stream-json',
             '--verbose', '--include-partial-messages',
-            '這是長回應連線驗收，請詳細說明部署時維持服務的方法，恰好 200 行並逐行編號。'
-            '不使用工具，回答最後加上 GATEWAY_STREAM_END。',
+            '請產生可直接執行的 Python 程式碼：cases 是包含 120 個明確 tuple 的 list，'
+            '每個 tuple 為整數 n、n 的平方、n 的立方，n 從 1 到 120，每個 tuple 一行。'
+            '最後用 for 迴圈 assert 驗證所有平方及立方。不使用推導式建立 cases，不用工具，'
+            '不加註解或說明。程式碼區塊結束後獨立一行寫 GATEWAY_STREAM_END。',
         ], stdout=stdout, stderr=stderr, cwd=evidence)
     try:
         deadline = time.monotonic() + 120
@@ -120,11 +122,42 @@ def finish_stream_probe(process, evidence, offset):
     if process.wait(timeout=180):
         raise RuntimeError('原 Client 跨切換串流失敗')
     output = (evidence / 'cutover-stream.jsonl').read_bytes()
-    if b'content_block_delta' not in output[offset:]:
-        raise RuntimeError('切換後沒有新的串流內容，跨切換驗收未通過')
-    records = [json.loads(line) for line in output.splitlines()]
+    records = []
+    events = []
+    cursor = 0
+    continued_text = False
+    for line in output.splitlines(keepends=True):
+        item = json.loads(line)
+        records.append(item)
+        if item.get('type') == 'stream_event':
+            event = item.get('event', {})
+            events.append(event)
+            delta = event.get('delta', {})
+            if (cursor >= offset and event.get('type') == 'content_block_delta'
+                    and delta.get('type') == 'text_delta' and delta.get('text')):
+                continued_text = True
+        cursor += len(line)
+    if not continued_text:
+        raise RuntimeError('切換後沒有新的文字串流內容，跨切換驗收未通過')
+    if any(item.get('type') == 'user' for item in records):
+        raise RuntimeError('原 Client 曾續傳或重寫，不能視為單次串流完整完成')
+    kinds = [event.get('type') for event in events]
+    terminals = [index for index, event in enumerate(events)
+                 if event.get('type') == 'message_delta'
+                 and event.get('delta', {}).get('stop_reason') is not None]
+    if (kinds.count('message_start') != 1 or kinds.count('message_stop') != 1
+            or len(terminals) != 1 or kinds[0] != 'message_start'
+            or kinds[-1] != 'message_stop' or terminals[0] != len(events) - 2
+            or events[terminals[0]]['delta']['stop_reason'] not in ('end_turn', 'stop_sequence')):
+        raise RuntimeError('串流缺少單次正常結束事件，可能曾中斷或重試')
+    text = ''.join(event.get('delta', {}).get('text', '') for event in events
+                   if event.get('type') == 'content_block_delta'
+                   and event.get('delta', {}).get('type') == 'text_delta')
     results = [item for item in records if item.get('type') == 'result']
-    if len(results) != 1 or results[0].get('is_error') or 'GATEWAY_STREAM_END' not in results[0].get('result', ''):
+    if (len(results) != 1 or results[0].get('is_error')
+            or results[0].get('num_turns') != 1
+            or not text.rstrip().endswith('GATEWAY_STREAM_END')
+            or not results[0].get('result', '').rstrip().endswith('GATEWAY_STREAM_END')):
         raise RuntimeError('原 Client 跨切換串流未完整結束')
 
 
