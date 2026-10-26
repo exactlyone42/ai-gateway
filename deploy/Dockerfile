@@ -9,7 +9,7 @@ RUN npm run build
 
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 # The migration runner reads this directory at compile time, so it has to be
 # present in the build context even while it is empty.
@@ -19,7 +19,7 @@ COPY migrations ./migrations
 # honest but useless for confirming a deployment.
 ARG BUILD_REVISION
 ENV BUILD_REVISION=$BUILD_REVISION
-RUN cargo build --release --locked
+RUN cargo build --release --locked && sha384sum migrations/*.sql > migrations.sha384
 
 FROM debian:bookworm-slim
 WORKDIR /app
@@ -38,5 +38,6 @@ RUN mkdir -p /var/lib/agent-pool-gateway/ledger-spool \
 USER gateway
 COPY --from=build /src/target/release/agent-pool-gateway /usr/local/bin/
 COPY --from=web-build /web/dist ./web/dist
+COPY --from=build /src/migrations.sha384 /app/migrations.sha384
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/agent-pool-gateway"]

@@ -11,3 +11,5 @@
 /web/vite.config.js
 /web/vite.config.d.ts
 /.artifacts/
+
+/scripts/__pycache__/

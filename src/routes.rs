@@ -360,6 +360,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_counts_active_requests_until_the_last_handle_is_released() {
+        let state = test_state();
+        let app = router(Arc::clone(&state));
+        let active = state.lifecycle.admit().unwrap();
+        let mut retained = Some(active.clone());
+        drop(active);
+
+        for expected in [1, 0] {
+            for path in ["/health", "/healthz"] {
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                        .unwrap();
+                assert_eq!(body["active_requests"], expected);
+                assert_eq!(state.lifecycle.active(), expected as usize);
+            }
+            drop(retained.take());
+        }
+    }
+
+    #[tokio::test]
     async fn endpoint_body_limits_are_independent_and_return_stable_413() {
         let upstream = Router::new().route(
             "/v1/messages",

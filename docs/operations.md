@@ -64,23 +64,19 @@ disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
 gateway once; startup applies migrations and performs one batched recovery
 before accepting traffic.
 
-## Deployment
+## 部署：新版驗收成功才切換
 
-`BUILD_REVISION=<id> ./scripts/deploy.sh` keeps the image that is serving,
-builds and starts the new one, then confirms the running gateway reports that
-revision on `/health`. Any failure restores the kept image. Migrations run
-inside the process at startup, so a failing migration stops the container and
-never serves.
+使用 `scripts/deploy.sh --image <映像> --revision <12位commit> --source-container <目前容器> --port <未使用的本機PORT> --evidence <新的證據目錄>`。正式入口保持原網域，候選版只綁本機。建置映像須包含同次建置的 `/app/migrations.sha384`；標準 Dockerfile 已一併產生。本機建置可使用 `deploy/Dockerfile.runtime`，但執行檔、前端與遷移清單必須取自同一 commit；不可沿用未重建的舊執行檔。
 
-A rollback restores the previous build, not the previous settings: a broken
-value in `.env` breaks the previous image as well. The script then says the
-previous image did not come back and stops, because a rollback that did not
-restore the service must not be reported as one.
+部署先逐一比對映像與正式資料庫的遷移內容及版本集合；不符就拒絕，絕不修改資料庫紀錄來通過。此入口刻意拒絕新增遷移；新資料結構須另行完成新舊版相容驗收後才能部署，不能以空資料庫測試取代。CI 同時核對已發布遷移的固定內容。
 
-Verified on 2026-09-12: a build whose `/health` was deliberately broken passed
-the container health check, which polls `/ready`, and was caught by the check
-after the deployment instead. The previous revision was serving again when the
-script returned.
+候選容器沿用目前容器的登入與資料庫設定，獨立保存待寫入記帳資料；不更換舊容器、不共用可被候選版覆寫的設定檔。先驗就緒與版本，再以原 Claude Code 實送。通過後才載入 Caddy 設定，並再次核對公開版本與原 Client 實送；切換前先啟動原 Client 長回答，看到串流後才切換，最後確認回答完整結束。公開驗收失敗即切回；候選版保留供查驗，不強殺可能尚未結束的請求。
+
+成功紀錄寫入 `accepted.json`，保留舊容器。舊版沒有請求計數時不自動停止；有計數時須連續確認請求數為零且沒有尚未關閉的 HTTP 連線，才停止舊容器；無法確認就保留。`/health` 的 `active_requests` 計算到回應本文釋放，查詢健康狀態本身不增加計數。固定等待時間不是下線證據。
+
+Caddy 載入設定不代表所有長連線都安全：Claude 的 SSE 串流以 `python3 scripts/test_caddy_cutover.py` 在同版隔離 Caddy 驗證跨切換完整收到；此項不宣稱 WebSocket 支援。資料庫主機故障、外部供應商故障不屬部署成功保證。
+
+舊的直接 `compose up --build` 會先取代服務，不可用於正式 Gateway 更新。主機既有 compose 包裝入口須拒絕啟停 gateway；資料庫維護不受影響。
 
 ## Backup and restore
 
