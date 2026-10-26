@@ -78,6 +78,22 @@ class ReloadTests(unittest.TestCase):
         self.assertEqual(self.config.read_text(), 'other')
 
 
+class StreamCompletionTests(unittest.TestCase):
+    def test_content_must_continue_after_switch_offset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            evidence = Path(folder)
+            output = evidence / 'cutover-stream.jsonl'
+            delta = json.dumps({'type': 'stream_event', 'event': {'type': 'content_block_delta'}}).encode() + b'\n'
+            result = json.dumps({'type': 'result', 'is_error': False, 'result': 'GATEWAY_STREAM_END'}).encode() + b'\n'
+            process = Mock()
+            process.wait.return_value = 0
+            output.write_bytes(delta + result)
+            with self.assertRaisesRegex(RuntimeError, '切換後沒有新的串流內容'):
+                deploy_gateway.finish_stream_probe(process, evidence, len(delta))
+            output.write_bytes(delta + delta + result)
+            deploy_gateway.finish_stream_probe(process, evidence, len(delta))
+
+
 class RetirementTests(unittest.TestCase):
     def test_active_or_unknown_count_keeps_old_service(self):
         for health in [{'active_requests': 1}, {}]:
@@ -125,7 +141,7 @@ class DeploymentTests(unittest.TestCase):
         self.events = []
         self.failure = None
         self.stream_process = Mock()
-        self.stream_process.poll.return_value = 0
+        self.stream_process.poll.return_value = None
         for name in ['run', 'inspect', 'smoke', 'client_probe', 'reload_caddy',
                      'start_stream_probe', 'finish_stream_probe', 'retire_idle_source']:
             patcher = patch.object(deploy_gateway, name, side_effect=getattr(self, 'mock_' + name))
@@ -172,11 +188,15 @@ class DeploymentTests(unittest.TestCase):
         return False
 
     def mock_start_stream_probe(self, base, evidence):
+        self.stream_process.poll.return_value = None
+        (evidence / 'cutover-stream.jsonl').write_text('before-switch\n')
         self.events.append(('stream', 'start'))
         return self.stream_process
 
-    def mock_finish_stream_probe(self, process, evidence):
+    def mock_finish_stream_probe(self, process, evidence, offset):
         self.assertIs(process, self.stream_process)
+        self.assertEqual(offset, len(b'before-switch\n'))
+        self.stream_process.poll.return_value = 0
         self.events.append(('stream', 'finish'))
         if self.failure == 'stream':
             raise RuntimeError('stream interrupted')

@@ -78,6 +78,16 @@ def client_probe(base, evidence, label):
         raise RuntimeError('原 Claude Client 實送驗收失敗')
 
 
+def stop_probe(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def start_stream_probe(base, evidence):
     output = evidence / 'cutover-stream.jsonl'
     with output.open('wb') as stdout, (evidence / 'cutover-stream.err').open('wb') as stderr:
@@ -90,22 +100,27 @@ def start_stream_probe(base, evidence):
             'Write exactly 200 numbered lines explaining how to keep a service running during deployment. '
             'Do not use tools. End the entire answer with GATEWAY_STREAM_END.',
         ], stdout=stdout, stderr=stderr)
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError('串流在切換前已結束，無法驗證跨切換；未切換入口')
-        if 'content_block_delta' in output.read_text(errors='replace'):
-            return process
-        time.sleep(0.25)
-    process.terminate()
-    process.wait(timeout=15)
-    raise RuntimeError('未收到原 Client 串流，未切換入口')
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError('串流在切換前已結束，無法驗證跨切換；未切換入口')
+            if 'content_block_delta' in output.read_text(errors='replace'):
+                return process
+            time.sleep(0.25)
+        raise RuntimeError('未收到原 Client 串流，未切換入口')
+    except BaseException:
+        stop_probe(process)
+        raise
 
 
-def finish_stream_probe(process, evidence):
+def finish_stream_probe(process, evidence, offset):
     if process.wait(timeout=180):
         raise RuntimeError('原 Client 跨切換串流失敗')
-    records = [json.loads(line) for line in (evidence / 'cutover-stream.jsonl').read_text().splitlines()]
+    output = (evidence / 'cutover-stream.jsonl').read_bytes()
+    if b'content_block_delta' not in output[offset:]:
+        raise RuntimeError('切換後沒有新的串流內容，跨切換驗收未通過')
+    records = [json.loads(line) for line in output.splitlines()]
     results = [item for item in records if item.get('type') == 'result']
     if len(results) != 1 or results[0].get('is_error') or 'GATEWAY_STREAM_END' not in results[0].get('result', ''):
         raise RuntimeError('原 Client 跨切換串流未完整結束')
@@ -200,16 +215,17 @@ def deploy(args):
     try:
         reload_caddy(args.caddy_container, config_file, previous, replacement)
         try:
+            offset = (evidence / 'cutover-stream.jsonl').stat().st_size
+            if stream.poll() is not None:
+                raise RuntimeError('切換時原串流已結束，跨切換驗收未通過')
             smoke(args.public_url, args.revision)
             client_probe(args.public_url, evidence, 'public-client')
-            finish_stream_probe(stream, evidence)
+            finish_stream_probe(stream, evidence, offset)
         except BaseException:
             reload_caddy(args.caddy_container, config_file, replacement, previous)
             raise
     finally:
-        if stream.poll() is None:
-            stream.terminate()
-            stream.wait(timeout=15)
+        stop_probe(stream)
     receipt = {'revision': args.revision, 'image': image['Id'], 'container': candidate,
                'port': args.port, 'previous_container': args.source_container,
                'public_url': args.public_url, 'accepted': True, 'old_stopped': False}
