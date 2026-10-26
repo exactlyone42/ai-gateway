@@ -1,7 +1,7 @@
 WITH actors AS (
     SELECT DISTINCT ON (tenant_id) tenant_id, id AS actor_id
     FROM admin_accounts
-    WHERE status = 'active'
+    WHERE status = 'active' AND role IN ('admin', 'operator')
     ORDER BY tenant_id, created_at, id
 ), imported AS (
     INSERT INTO incidents (
@@ -49,7 +49,7 @@ FROM imported;
 WITH actors AS (
     SELECT DISTINCT ON (tenant_id) tenant_id, id AS actor_id, role
     FROM admin_accounts
-    WHERE status = 'active'
+    WHERE status = 'active' AND role IN ('admin', 'operator')
     ORDER BY tenant_id, created_at, id
 )
 INSERT INTO audit_logs (

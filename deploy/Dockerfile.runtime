@@ -1,0 +1,10 @@
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --create-home --uid 10001 gateway && mkdir -p /var/lib/agent-pool-gateway/ledger-spool && chown -R gateway:gateway /var/lib/agent-pool-gateway
+WORKDIR /app
+COPY agent-pool-gateway /usr/local/bin/agent-pool-gateway
+COPY web /app/web
+COPY migrations.sha384 /app/migrations.sha384
+USER gateway
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/agent-pool-gateway"]
