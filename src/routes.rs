@@ -2728,13 +2728,61 @@ mod tests {
         body: Vec<u8>,
     }
 
+    fn gated_anthropic_stream(
+        first: Vec<u8>,
+        second: Vec<u8>,
+        release: tokio::sync::oneshot::Receiver<()>,
+        tail_sent: Arc<AtomicUsize>,
+    ) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> + Send {
+        async_stream::stream! {
+            yield Ok(first);
+            release.await.unwrap();
+            tail_sent.store(1, Ordering::SeqCst);
+            yield Ok(second);
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_fixture_rejects_collecting_before_headers() {
+        let (release, receiver) = tokio::sync::oneshot::channel();
+        let tail_sent = Arc::new(AtomicUsize::new(0));
+        let body = Body::from_stream(gated_anthropic_stream(
+            b"data: first\n\n".to_vec(),
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec(),
+            receiver,
+            Arc::clone(&tail_sent),
+        ));
+        let buffered_response = async {
+            let collected = to_bytes(body, 4096).await.unwrap();
+            Response::new(Body::from(collected))
+        };
+        tokio::pin!(buffered_response);
+        assert!(futures_util::poll!(&mut buffered_response).is_pending());
+        assert_eq!(tail_sent.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        assert!(futures_util::poll!(&mut buffered_response).is_pending());
+        assert_eq!(tail_sent.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn anthropic_stream_is_incremental_and_preserves_the_wire_contract() {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            exercise_incremental_anthropic_stream(),
+        )
+        .await
+        .expect("the stream contract test did not finish; inspect the blocked phase");
+    }
+
+    async fn exercise_incremental_anthropic_stream() {
         let log_buffer = logging::capture::Buffer::default();
         let (subscriber, _traces) = logging::test_subscriber(log_buffer.clone());
         let log_guard = tracing::subscriber::set_default(subscriber);
-        let release = Arc::new(Notify::new());
-        let release_for_server = Arc::clone(&release);
+        let (release, release_receiver) = tokio::sync::oneshot::channel::<()>();
+        let release_for_server = Arc::new(Mutex::new(Some(release_receiver)));
+        let tail_sent = Arc::new(AtomicUsize::new(0));
+        let tail_sent_by_server = Arc::clone(&tail_sent);
         let seen = Arc::new(Mutex::new(None));
         let seen_by_server = Arc::clone(&seen);
         let first = b": keepalive\n\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":7}}}\n\n".to_vec();
@@ -2747,7 +2795,8 @@ mod tests {
                 move |OriginalUri(uri): OriginalUri,
                       headers: axum::http::HeaderMap,
                       body: axum::body::Bytes| {
-                    let release = Arc::clone(&release_for_server);
+                    let release = release_for_server.lock().unwrap().take().unwrap();
+                    let tail_sent = Arc::clone(&tail_sent_by_server);
                     let seen = Arc::clone(&seen_by_server);
                     let first = first_by_server.clone();
                     let second = second_by_server.clone();
@@ -2772,12 +2821,7 @@ mod tests {
                                 .map(ToOwned::to_owned),
                             body: body.to_vec(),
                         });
-                        let stream = async_stream::stream! {
-                            yield Ok::<_, std::io::Error>(first);
-                            release.notified().await;
-                            yield Ok::<_, std::io::Error>(second);
-                            std::future::pending::<()>().await;
-                        };
+                        let stream = gated_anthropic_stream(first, second, release, tail_sent);
                         Response::builder()
                             .header("content-type", "text/event-stream")
                             .header("request-id", "provider-request-1")
@@ -2799,9 +2843,8 @@ mod tests {
         let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
         let state = Arc::new(AppState::new(config, pool).unwrap());
         let request_body = br#"{"model":"claude-test","stream":true,"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]}"#;
-        let response = tokio::time::timeout(
-            Duration::from_secs(1),
-            router(state.clone()).oneshot(
+        let response = router(state.clone())
+            .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages?beta=true&x=a%2Fb&x=2")
@@ -2811,26 +2854,16 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(request_body.as_slice()))
                     .unwrap(),
-            ),
-        )
-        .await
-        .expect("the gateway buffered before returning headers")
-        .unwrap();
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         assert_eq!(response.headers()["request-id"], "provider-request-1");
 
         let mut response_body = response.into_body().into_data_stream();
-        let keepalive_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
-            .await
-            .expect("the first event was buffered behind the provider barrier")
-            .unwrap()
-            .unwrap();
-        let start_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
-            .await
-            .expect("the start event was buffered behind the provider barrier")
-            .unwrap()
-            .unwrap();
+        let keepalive_received = response_body.next().await.unwrap().unwrap();
+        let start_received = response_body.next().await.unwrap().unwrap();
         assert_eq!(
             [keepalive_received.as_ref(), start_received.as_ref()].concat(),
             first
@@ -2842,20 +2875,12 @@ mod tests {
                 .any(|line| line["event"]["name"] == "http.access"),
             "the request was logged complete while its body was still active"
         );
-        release.notify_one();
-        let delta_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
-            .await
-            .expect("the delta event was not relayed")
-            .unwrap()
-            .unwrap();
-        let terminal_received = tokio::time::timeout(Duration::from_secs(1), response_body.next())
-            .await
-            .expect("the terminal event was not relayed")
-            .unwrap()
-            .unwrap();
-        let ended = tokio::time::timeout(Duration::from_secs(1), response_body.next())
-            .await
-            .expect("the gateway waited for transport EOF after message_stop");
+        assert_eq!(tail_sent.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        let delta_received = response_body.next().await.unwrap().unwrap();
+        let terminal_received = response_body.next().await.unwrap().unwrap();
+        let ended = response_body.next().await;
+        assert_eq!(tail_sent.load(Ordering::SeqCst), 1);
         assert!(ended.is_none());
         let relayed = [
             keepalive_received.as_ref(),
@@ -2891,15 +2916,27 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_stream_sends_heartbeat_before_delayed_provider_headers() {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            exercise_heartbeat_before_provider_headers(),
+        )
+        .await
+        .expect("the heartbeat contract test did not finish; inspect the blocked phase");
+    }
+
+    async fn exercise_heartbeat_before_provider_headers() {
+        let release = Arc::new(Notify::new());
+        let release_for_server = Arc::clone(&release);
         let started = Arc::new(Notify::new());
         let started_by_server = Arc::clone(&started);
         let upstream = Router::new().route(
             "/v1/messages",
             post(move || {
                 let started = Arc::clone(&started_by_server);
+                let release = Arc::clone(&release_for_server);
                 async move {
                     started.notify_one();
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    release.notified().await;
                     (
                         [("content-type", "text/event-stream")],
                         concat!(
@@ -2940,31 +2977,17 @@ mod tests {
                     .await
             }
         });
-        tokio::time::timeout(Duration::from_secs(5), started.notified())
-            .await
-            .expect("gateway did not call the provider");
-        let response = tokio::time::timeout(Duration::from_millis(150), request)
-            .await
-            .expect("gateway did not open the stream before provider headers")
-            .unwrap()
-            .unwrap();
+        started.notified().await;
+        let response = request.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body().into_data_stream();
-        let heartbeat = tokio::time::timeout(Duration::from_millis(100), body.next())
-            .await
-            .expect("gateway did not send a heartbeat")
-            .unwrap()
-            .unwrap();
+        let heartbeat = body.next().await.unwrap().unwrap();
         assert_eq!(heartbeat, ": keepalive\n\n");
-        let remainder = tokio::time::timeout(Duration::from_millis(600), async {
-            let mut bytes = Vec::new();
-            while let Some(chunk) = body.next().await {
-                bytes.extend_from_slice(&chunk.unwrap());
-            }
-            bytes
-        })
-        .await
-        .expect("provider response did not finish");
+        release.notify_one();
+        let mut remainder = Vec::new();
+        while let Some(chunk) = body.next().await {
+            remainder.extend_from_slice(&chunk.unwrap());
+        }
         assert!(
             String::from_utf8(remainder)
                 .unwrap()
@@ -3896,6 +3919,15 @@ mod tests {
 
     #[tokio::test]
     async fn forced_shutdown_before_provider_headers_keeps_the_attempt_checkpoint() {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            exercise_shutdown_before_provider_headers(),
+        )
+        .await
+        .expect("the shutdown checkpoint test did not finish; inspect the blocked phase");
+    }
+
+    async fn exercise_shutdown_before_provider_headers() {
         let provider_called = Arc::new(Notify::new());
         let provider_called_in_handler = Arc::clone(&provider_called);
         let upstream = Router::new().route(
@@ -3937,21 +3969,12 @@ mod tests {
             body
         );
         client.write_all(request.as_bytes()).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), provider_called.notified())
-            .await
-            .expect("the provider was not called");
+        provider_called.notified().await;
         signal_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(3), gateway_task)
-            .await
-            .expect("the pre-header provider call prevented bounded shutdown")
-            .unwrap()
-            .unwrap();
+        gateway_task.await.unwrap().unwrap();
 
         let mut received = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut received))
-            .await
-            .expect("the pre-header client connection stayed open")
-            .unwrap();
+        client.read_to_end(&mut received).await.unwrap();
         let spooled = read_spool(&spool_dir);
         assert!(spooled.contains(r#""request_id":"w19-before-headers""#));
         assert!(spooled.contains(r#""provider":"anthropic-test""#));
