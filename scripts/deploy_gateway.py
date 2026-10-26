@@ -69,9 +69,10 @@ def client_probe(base, evidence, label):
     result = subprocess.run([
         'claude', '-p', '--tools', '', '--strict-mcp-config', '--mcp-config',
         '{"mcpServers":{}}', '--setting-sources', 'user', '--settings', settings,
+        '--system-prompt', 'You respond to connectivity checks with the requested text.',
         '--no-session-persistence', '--max-turns', '1',
         'Reply exactly GATEWAY_DEPLOY_OK',
-    ], capture_output=True, timeout=180)
+    ], capture_output=True, timeout=180, cwd=evidence)
     (evidence / f'{label}.out').write_bytes(result.stdout)
     (evidence / f'{label}.err').write_bytes(result.stderr)
     if result.returncode or result.stdout.strip() != b'GATEWAY_DEPLOY_OK':
@@ -95,11 +96,12 @@ def start_stream_probe(base, evidence):
             'claude', '-p', '--tools', '', '--strict-mcp-config', '--mcp-config',
             '{"mcpServers":{}}', '--setting-sources', 'user', '--settings',
             json.dumps({'env': {'ANTHROPIC_BASE_URL': base}}),
+            '--system-prompt', 'You respond to connectivity checks with the requested text.',
             '--no-session-persistence', '--max-turns', '1', '--output-format', 'stream-json',
             '--verbose', '--include-partial-messages',
             'Write exactly 200 numbered lines explaining how to keep a service running during deployment. '
             'Do not use tools. End the entire answer with GATEWAY_STREAM_END.',
-        ], stdout=stdout, stderr=stderr)
+        ], stdout=stdout, stderr=stderr, cwd=evidence)
     try:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
