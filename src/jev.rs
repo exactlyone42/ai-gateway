@@ -5,13 +5,22 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::{error::GatewayError, model_registry::ModelSelection};
+use crate::model_registry::ModelSelection;
 
 #[derive(Clone)]
 pub struct JevConfig {
     pub api_key: String,
     pub model: String,
     pub descriptions: BTreeMap<String, String>,
+}
+
+const MIN_CONFIDENCE: f64 = 0.6;
+
+#[derive(Default)]
+pub struct JevOutcome {
+    pub reason: Option<&'static str>,
+    pub confidence: Option<f64>,
+    pub failure: Option<&'static str>,
 }
 
 pub struct JevRouter {
@@ -32,7 +41,7 @@ impl JevRouter {
         client: &Client,
         body: &Value,
         candidates: &mut Vec<ModelSelection>,
-    ) -> Option<&'static str> {
+    ) -> JevOutcome {
         let criteria = candidates
             .iter()
             .enumerate()
@@ -55,10 +64,7 @@ impl JevRouter {
                 &criteria,
             )
             .await;
-        if apply_choice(candidates, result) {
-            return Some("jev");
-        }
-        None
+        outcome_of(candidates, result)
     }
 
     async fn decide(
@@ -67,13 +73,10 @@ impl JevRouter {
         endpoint: &str,
         body: &Value,
         criteria: &BTreeMap<String, String>,
-    ) -> Result<usize, GatewayError> {
-        let _slot = self
-            .slots
-            .try_acquire()
-            .map_err(|_| GatewayError::ProviderUnavailable)?;
+    ) -> Result<(usize, f64), &'static str> {
+        let _slot = self.slots.try_acquire().map_err(|_| "busy")?;
         if criteria.is_empty() || criteria.len() > 32 {
-            return Err(GatewayError::UnsupportedRequest);
+            return Err("unsupported_candidates");
         }
         let payload = json!({
             "model": self.config.model,
@@ -84,9 +87,9 @@ impl JevRouter {
                 "criteria": criteria
             }}
         });
-        let encoded = serde_json::to_vec(&payload).map_err(GatewayError::InvalidRequest)?;
+        let encoded = serde_json::to_vec(&payload).map_err(|_| "encode_failed")?;
         if encoded.len() > 32768 {
-            return Err(GatewayError::PayloadTooLarge);
+            return Err("payload_too_large");
         }
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             let response = client
@@ -96,28 +99,28 @@ impl JevRouter {
                 .body(encoded)
                 .send()
                 .await
-                .map_err(|_| GatewayError::ProviderUnavailable)?;
+                .map_err(|_| "unavailable")?;
             if !response.status().is_success() {
-                return Err(GatewayError::ProviderUnavailable);
+                return Err("unavailable");
             }
             let mut stream = response.bytes_stream();
             let mut bytes = Vec::new();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| GatewayError::ProviderUnavailable)?;
+                let chunk = chunk.map_err(|_| "unavailable")?;
                 if bytes.len().saturating_add(chunk.len()) > 65536 {
-                    return Err(GatewayError::UpstreamProtocol);
+                    return Err("bad_reply");
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            let value: Value =
-                serde_json::from_slice(&bytes).map_err(|_| GatewayError::UpstreamProtocol)?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| "bad_reply")?;
             parse_choice(&value, criteria)
         })
         .await
-        .unwrap_or(Err(GatewayError::ProviderUnavailable));
-        if result.is_err() {
+        .unwrap_or(Err("timeout"));
+        if let Err(failure) = result {
             tracing::warn!(
                 event.name = "jev.routing_failed",
+                failure,
                 "Jev routing failed; the caller's requested model will be used"
             );
         }
@@ -164,16 +167,31 @@ fn routing_description(candidate: &ModelSelection, configured: Option<&str>) -> 
     )
 }
 
-fn apply_choice<T>(candidates: &mut Vec<T>, result: Result<usize, GatewayError>) -> bool {
-    let Ok(index) = result else {
-        return false;
-    };
-    if index >= candidates.len() {
-        return false;
+fn outcome_of<T>(
+    candidates: &mut Vec<T>,
+    result: Result<(usize, f64), &'static str>,
+) -> JevOutcome {
+    match result {
+        Ok((index, confidence)) if confidence >= MIN_CONFIDENCE => {
+            let selected = candidates.remove(index);
+            candidates.insert(0, selected);
+            JevOutcome {
+                reason: Some("jev"),
+                confidence: Some(confidence),
+                failure: None,
+            }
+        }
+        Ok((_, confidence)) => JevOutcome {
+            reason: None,
+            confidence: Some(confidence),
+            failure: Some("low_confidence"),
+        },
+        Err(failure) => JevOutcome {
+            reason: None,
+            confidence: None,
+            failure: Some(failure),
+        },
     }
-    let selected = candidates.remove(index);
-    candidates.insert(0, selected);
-    true
 }
 
 fn routing_state(body: &Value) -> Value {
@@ -237,24 +255,21 @@ fn bounded_value(value: &Value, array_limit: usize, string_limit: usize) -> Valu
     }
 }
 
-fn parse_choice(value: &Value, criteria: &BTreeMap<String, String>) -> Result<usize, GatewayError> {
+fn parse_choice(
+    value: &Value,
+    criteria: &BTreeMap<String, String>,
+) -> Result<(usize, f64), &'static str> {
     let answer = &value["answers"]["route"];
-    let choice = answer["choice"]
-        .as_str()
-        .ok_or(GatewayError::UpstreamProtocol)?;
+    let choice = answer["choice"].as_str().ok_or("bad_reply")?;
     if answer["type"] != "choice" || !criteria.contains_key(choice) {
-        return Err(GatewayError::UpstreamProtocol);
+        return Err("bad_reply");
     }
-    let confidence = answer["confidence"]
-        .as_f64()
-        .ok_or(GatewayError::UpstreamProtocol)?;
+    let confidence = answer["confidence"].as_f64().ok_or("bad_reply")?;
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
-        return Err(GatewayError::UpstreamProtocol);
+        return Err("bad_reply");
     }
-    if confidence < 0.6 {
-        return Err(GatewayError::ProviderUnavailable);
-    }
-    choice.parse().map_err(|_| GatewayError::UpstreamProtocol)
+    let index = choice.parse().map_err(|_| "bad_reply")?;
+    Ok((index, confidence))
 }
 
 #[cfg(test)]
@@ -288,8 +303,13 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        for path in ["limited", "invalid", "large", "slow"] {
-            assert!(
+        for (path, failure) in [
+            ("limited", "unavailable"),
+            ("invalid", "bad_reply"),
+            ("large", "bad_reply"),
+            ("slow", "timeout"),
+        ] {
+            assert_eq!(
                 router
                     .decide(
                         &client,
@@ -297,16 +317,16 @@ mod tests {
                         &json!({}),
                         &criteria()
                     )
-                    .await
-                    .is_err()
+                    .await,
+                Err(failure)
             );
         }
         let permits = router.slots.acquire_many(2).await.unwrap();
-        assert!(
+        assert_eq!(
             router
                 .decide(&client, "http://127.0.0.1:1", &json!({}), &criteria())
-                .await
-                .is_err()
+                .await,
+            Err("busy")
         );
         drop(permits);
         server.abort();
@@ -325,16 +345,15 @@ mod tests {
 
     #[test]
     fn rejects_unknown_low_confidence_and_malformed_choices() {
-        assert_eq!(parse_choice(&answer("1", 0.9), &criteria()).unwrap(), 1);
+        assert_eq!(parse_choice(&answer("1", 0.9), &criteria()), Ok((1, 0.9)));
         for value in [
             answer("external", 1.0),
             answer("2", 1.0),
-            answer("0", 0.2),
             answer("0", 1.1),
             json!({}),
             json!({"answers":{"route":{"type":"score","choice":"0","confidence":0.9}}}),
         ] {
-            assert!(parse_choice(&value, &criteria()).is_err());
+            assert_eq!(parse_choice(&value, &criteria()), Err("bad_reply"));
         }
     }
 
@@ -367,41 +386,38 @@ mod tests {
         assert_eq!(
             router
                 .decide(&Client::new(), &endpoint, &body, &criteria())
-                .await
-                .unwrap(),
-            1
+                .await,
+            Ok((1, 0.95))
         );
         server.abort();
     }
 
     #[test]
-    fn unavailable_jev_preserves_candidates_for_normal_routing() {
-        let mut candidates = vec!["primary", "secondary"];
-
-        assert!(!apply_choice(
-            &mut candidates,
-            Err(GatewayError::ProviderUnavailable)
-        ));
-        assert_eq!(candidates, ["primary", "secondary"]);
-    }
-
-    #[test]
-    fn no_jev_opinion_preserves_the_client_model() {
-        for invalid in [answer("0", 0.2), answer("unknown", 1.0), json!({})] {
+    fn failed_jev_keeps_candidates_and_records_why() {
+        for (result, confidence, failure) in [
+            (Err("timeout"), None, "timeout"),
+            (Err("bad_reply"), None, "bad_reply"),
+            (Ok((1, 0.2)), Some(0.2), "low_confidence"),
+        ] {
             let mut candidates = vec!["client-model", "shortlisted-alternative"];
-            let result = parse_choice(&invalid, &criteria());
+            let outcome = outcome_of(&mut candidates, result);
 
-            assert!(!apply_choice(&mut candidates, result));
-            assert_eq!(candidates[0], "client-model");
+            assert_eq!(candidates, ["client-model", "shortlisted-alternative"]);
+            assert_eq!(outcome.reason, None);
+            assert_eq!(outcome.confidence, confidence);
+            assert_eq!(outcome.failure, Some(failure));
         }
     }
 
     #[test]
-    fn available_jev_prioritizes_its_choice_without_hiding_fallbacks() {
+    fn confident_jev_prioritizes_its_choice_without_hiding_fallbacks() {
         let mut candidates = vec!["primary", "secondary"];
+        let outcome = outcome_of(&mut candidates, Ok((1, 0.9)));
 
-        assert!(apply_choice(&mut candidates, Ok(1)));
         assert_eq!(candidates, ["secondary", "primary"]);
+        assert_eq!(outcome.reason, Some("jev"));
+        assert_eq!(outcome.confidence, Some(0.9));
+        assert_eq!(outcome.failure, None);
     }
 
     #[test]

@@ -52,3 +52,14 @@ reason (`registry`, `health`, `load`, `cost`, `quota`, or `quality`), and
 There is exactly one Provider attempt for each request; no stream reconnect,
 usage lookup, timeout, tool continuation, or ambiguous result makes a second
 remote call.
+
+## Jev record
+
+When Jev is enabled, `routing.task_classification` keeps why Jev did or did not
+decide, so its accuracy can be measured later: `jev_attempted`, `jev_elapsed_ms`,
+`jev_opinion` (the model Jev chose, only when it was applied), `jev_confidence`
+(0 to 1; also kept when too low), and `jev_failure`. A choice below confidence
+0.6 is not applied and is recorded as `low_confidence`. Other failure codes:
+`busy`, `timeout`, `unavailable`, `bad_reply`, `payload_too_large`,
+`unsupported_candidates`, `no_candidates`. On any failure the caller's model is
+used. A low-confidence choice itself is not stored.
