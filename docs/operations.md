@@ -181,3 +181,9 @@ Authentication, model policy, budget reservation and audit durability fail
 closed. Optional analytics may fail open. Provider routing fails with a clear
 error when no approved deployment is healthy; it never falls back to an
 unapproved model or credential source.
+
+## 事故判定與搬家驗收
+
+- Gateway 事故以使用者體感判定：連不上、常出錯、變慢、容易中斷，或任何明顯降低使用品質的情況都要記錄；健康頁亮綠燈也不能排除事故。
+- 事故紀錄先用白話交代「原本怎麼運作、哪一步接錯、使用者看到什麼、怎麼處理、如何防止」，讓初階工程師能照著理解與處理；技術名稱與數字只放在後面作查證資料。
+- Gateway 搬家或發版後，必須用原本的 Client 真的送出一次請求；只看服務有啟動、健康頁正常或程式編譯成功，不得宣稱完成。

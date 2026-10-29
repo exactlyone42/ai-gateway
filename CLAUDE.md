@@ -29,7 +29,7 @@
 | `docs/terminology.md` | 要寫文件、訊息或畫面，用到「金鑰」「API 金鑰」「權杖」時 | — |
 | `docs/security-and-compliance.md` | 要動憑證存放、訂閱席次邊界、稽核 | — |
 | `docs/product-requirements.md` | 要確認角色與驗收條件 | — |
-| `docs/operations.md` | 要部署、上正式、處理事故 | — |
+| `docs/operations.md` | 要部署、上正式、處理或判定事故、搬家或發版後驗收（含事故紀錄寫法） | — |
 | `docs/task-ledger.md` | 要看每段落花多少時間／token、當初的 trade-off | — |
 | `docs/loadtest-journal.md` | 要引用效能數字，或要加一輪壓測 | W18 |
 | `docs/provider-protocols.md` | 要接新的 Provider，或處理協定轉換落差 | W05／W06 |
