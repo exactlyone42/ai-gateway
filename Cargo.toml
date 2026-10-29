@@ -12,11 +12,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 dotenvy = "0.15"
 getrandom = "0.3"
 hmac = "0.12"
+libc = "0.2"
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls", "internal-logs"] }
 opentelemetry_sdk = "0.32.1"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+ring = "0.17.14"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
@@ -29,8 +31,8 @@ tracing = "0.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1"
 
 [dev-dependencies]
-libc = "0.2"
 opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }
 tower = { version = "0.5.3", features = ["util"] }

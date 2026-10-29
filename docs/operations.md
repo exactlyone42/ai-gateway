@@ -82,6 +82,12 @@ Caddy 載入設定不代表所有長連線都安全：Claude 的 SSE 串流以 `
 
 ## Backup and restore
 
+加密全文保存的備份與還原尚未完成：現有工具沒有一併保存加密暫存及處理還原後的主金鑰計數。只要目前資料庫已有全文保存結構，工具會在備份或停止服務前拒絕操作；若備份檔本身包含全文保存結構，也會拒絕還原。這是暫時的資料保護，不能把它當成全文保存已有備份。手動使用其他工具還原也尚未安全驗證。
+
+`scripts/capture_backup.py`、`scripts/verify_capture_backup.py` 與 `scripts/restore_capture_backup.py` 是隔離測試用原型，尚未接入正式服務。備份在協調鎖下將資料庫、帳本暫存、加密內容暫存與金鑰目錄分別加密，再以指定的 GPG 金鑰簽署清單；驗證時必須從可信來源指定簽署者識別值。還原只接受空的隔離目標，並建立新金鑰。加密收件人的 GPG 私鑰必須另外安全保存，否則無法還原；簽署金鑰也需要妥善保管。備份副本的刪除政策及所有正式寫入路徑的協調尚未完成，不得當成正式備份方案。參考 [PostgreSQL 備份說明](https://www.postgresql.org/docs/current/app-pgdump.html) 與 [GnuPG 加密說明](https://gnupg.org/documentation/manuals/gnupg/Operational-GPG-Commands.html)。
+
+開發版提供 `agent-pool-gateway --initialize-content-capture`，只在三個保存目錄安全且空、資料庫無保存紀錄及其他用戶連線時建立首把隨機金鑰和獨立計數檔。已有金鑰或紀錄時會拒絕，不會覆蓋；若執行中斷，先檢查目錄，不要自行清空或重試。此指令及全文保存尚未部署，正式上線流程與備份仍須完成驗收。
+
 `./scripts/backup.sh create [directory]` takes the PostgreSQL dump and the
 ledger spool volume together, because a database restored without its spool
 loses the envelopes that had not reached it yet. `./scripts/backup.sh restore
@@ -139,6 +145,8 @@ per-protocol limits. Provider DNS/connect/TLS setup is bounded by
 `PROVIDER_CONNECT_TIMEOUT_MS`; provider headers and each later stream read are
 bounded by `PROVIDER_IDLE_TIMEOUT_MS`. None of these paths retries a provider
 request.
+
+送給 Ollama 與 vLLM 的模型請求使用 `LOCAL_PROVIDER_IDLE_TIMEOUT_MS`，預設 300000 毫秒，可設 1 至 600000 毫秒；其他來源的模型請求仍使用 `PROVIDER_IDLE_TIMEOUT_MS`。這個限制包含等待上游回應標頭與每次讀取，不限制整段持續有資料的串流；模型清單同步仍使用原設定。新設定尚未部署。
 Streaming clients receive a gateway SSE heartbeat every
 `STREAM_HEARTBEAT_INTERVAL_MS` (30 seconds by default), including while the
 gateway is still waiting for Anthropic response headers.

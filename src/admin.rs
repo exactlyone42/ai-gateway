@@ -27,7 +27,7 @@ mod reports;
 mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
 pub use incidents::{IncidentCreate, IncidentEventCreate, IncidentListQuery, IncidentPatch};
-pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, UsageQuery};
+pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, RequestListQuery, UsageQuery};
 pub use resources::{
     DeleteQuery, LifecycleInput, ListQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
     ResourceTarget, RotateCredentialInput,
@@ -230,6 +230,48 @@ pub const RBAC_RULES: &[RbacRule] = &[
         roles: WRITERS,
     },
     RbacRule {
+        method: "PUT",
+        route: "/admin/v1/provider-tokens/anthropic",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "PUT",
+        route: "/admin/v1/provider-tokens/anthropic/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "DELETE",
+        route: "/admin/v1/provider-tokens/anthropic/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/provider-tokens/anthropic/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/provider-api-keys/{provider}/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "PUT",
+        route: "/admin/v1/provider-api-keys/{provider}/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "DELETE",
+        route: "/admin/v1/provider-api-keys/{provider}/{user_id}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
         method: "GET",
         route: "/admin/v1/admin-accounts",
         action: AdminAction::ManageRbac,
@@ -318,6 +360,8 @@ pub enum AdminError {
     InvalidRequest,
     #[error("admin control plane is unavailable")]
     Unavailable,
+    #[error("憑證操作結果尚未確認，請先查詢目前狀態")]
+    OperationUncertain,
     #[error("could not generate admin credential")]
     Random,
     #[error("admin database operation failed")]
@@ -334,6 +378,7 @@ impl AdminError {
             Self::Conflict => "admin_conflict",
             Self::NotFound => "admin_not_found",
             Self::InvalidRequest => "admin_invalid_request",
+            Self::OperationUncertain => "admin_operation_uncertain",
             Self::Unavailable | Self::Random | Self::Database(_) | Self::Identity(_) => {
                 "admin_unavailable"
             }
@@ -361,9 +406,11 @@ impl IntoResponse for AdminError {
             Self::Conflict => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::InvalidRequest => StatusCode::BAD_REQUEST,
-            Self::Unavailable | Self::Random | Self::Database(_) | Self::Identity(_) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::Unavailable
+            | Self::OperationUncertain
+            | Self::Random
+            | Self::Database(_)
+            | Self::Identity(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         let mut response = (
             status,
@@ -718,6 +765,159 @@ impl AdminService {
         Ok(())
     }
 
+    pub async fn audit_provider_token_update(
+        &self,
+        context: &AdminContext,
+        fingerprint: &str,
+        source_ip: IpAddr,
+        peer_ip: IpAddr,
+        request_id: &str,
+    ) -> Result<(), AdminError> {
+        let mut transaction = self.pool.begin().await?;
+        append_audit(
+            &mut transaction,
+            AuditEntry {
+                tenant_id: context.tenant_id,
+                actor_id: context.account_id,
+                role: context.role,
+                action: "admin.provider_token.replace",
+                target_type: "provider_token",
+                target_id: None,
+                before: None,
+                after: Some(json!({"provider": "anthropic", "fingerprint": fingerprint})),
+                source_ip,
+                peer_ip,
+                request_id,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn lock_personal_subject(
+        &self,
+        context: &AdminContext,
+        user_id: Uuid,
+        provider: Option<&str>,
+    ) -> Result<Transaction<'_, Postgres>, AdminError> {
+        let mut transaction = self.pool.begin().await?;
+        let user = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM users WHERE tenant_id = $1 AND id = $2 AND status = 'active' FOR SHARE",
+        )
+        .bind(context.tenant_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if user.is_none() {
+            return Err(AdminError::NotFound);
+        }
+        if let Some(provider) = provider {
+            let found = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM providers WHERE tenant_id = $1 AND provider_key = $2 AND lifecycle_state = 'active' FOR SHARE",
+            ).bind(context.tenant_id).bind(provider).fetch_optional(&mut *transaction).await?;
+            if found.is_none() {
+                return Err(AdminError::NotFound);
+            }
+        }
+        Ok(transaction)
+    }
+
+    pub async fn audit_personal_token_attempt(
+        &self,
+        context: &AdminContext,
+        user_id: Uuid,
+        fingerprint: Option<&str>,
+        outcome: Option<bool>,
+        addresses: (IpAddr, IpAddr),
+        request_id: &str,
+    ) -> Result<(), AdminError> {
+        let mut transaction = self.pool.begin().await?;
+        if outcome.is_none() {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id = $1 AND id = $2 AND status = 'active')",
+            )
+            .bind(context.tenant_id)
+            .bind(user_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !exists {
+                return Err(AdminError::NotFound);
+            }
+        }
+        append_audit(
+            &mut transaction,
+            AuditEntry {
+                tenant_id: context.tenant_id,
+                actor_id: context.account_id,
+                role: context.role,
+                action: match (fingerprint.is_some(), outcome) {
+                    (true, None) => "admin.personal_provider_token.replace_attempt",
+                    (false, None) => "admin.personal_provider_token.revoke_attempt",
+                    (true, Some(true)) => "admin.personal_provider_token.replace_success",
+                    (false, Some(true)) => "admin.personal_provider_token.revoke_success",
+                    (true, Some(false)) => "admin.personal_provider_token.replace_failure",
+                    (false, Some(false)) => "admin.personal_provider_token.revoke_failure",
+                },
+                target_type: "user",
+                target_id: Some(user_id),
+                before: None,
+                after: Some(json!({"provider": "anthropic", "fingerprint": fingerprint})),
+                source_ip: addresses.0,
+                peer_ip: addresses.1,
+                request_id,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn audit_personal_api_key(
+        &self,
+        context: &AdminContext,
+        subject: (Uuid, &str),
+        fingerprint: Option<&str>,
+        outcome: Option<bool>,
+        addresses: (IpAddr, IpAddr),
+        request_id: &str,
+    ) -> Result<(), AdminError> {
+        let mut transaction = self.pool.begin().await?;
+        if outcome.is_none() {
+            let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id = $1 AND id = $2 AND status = 'active') AND EXISTS(SELECT 1 FROM providers WHERE tenant_id = $1 AND provider_key = $3 AND lifecycle_state = 'active')")
+                .bind(context.tenant_id).bind(subject.0).bind(subject.1).fetch_one(&mut *transaction).await?;
+            if !exists {
+                return Err(AdminError::NotFound);
+            }
+        }
+        append_audit(
+            &mut transaction,
+            AuditEntry {
+                tenant_id: context.tenant_id,
+                actor_id: context.account_id,
+                role: context.role,
+                action: match (fingerprint.is_some(), outcome) {
+                    (true, None) => "admin.personal_api_key.replace_attempt",
+                    (false, None) => "admin.personal_api_key.revoke_attempt",
+                    (true, Some(true)) => "admin.personal_api_key.replace_success",
+                    (false, Some(true)) => "admin.personal_api_key.revoke_success",
+                    (true, Some(false)) => "admin.personal_api_key.replace_failure",
+                    (false, Some(false)) => "admin.personal_api_key.revoke_failure",
+                },
+                target_type: "user",
+                target_id: Some(subject.0),
+                before: None,
+                after: Some(json!({"provider": subject.1, "fingerprint": fingerprint})),
+                source_ip: addresses.0,
+                peer_ip: addresses.1,
+                request_id,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     fn generate(
         &self,
         marker: &str,
@@ -890,6 +1090,20 @@ mod tests {
     use crate::identity::CredentialService;
 
     const BOOTSTRAP: &str = "test-admin-bootstrap-token-at-least-32-bytes";
+
+    #[test]
+    fn personal_tokens_are_admin_only() {
+        for route in [
+            "/admin/v1/provider-tokens/anthropic/{user_id}",
+            "/admin/v1/provider-api-keys/{provider}/{user_id}",
+        ] {
+            for method in ["GET", "PUT", "DELETE"] {
+                assert!(authorize(method, route, AdminRole::Admin).is_some());
+                assert!(authorize(method, route, AdminRole::Operator).is_none());
+                assert!(authorize(method, route, AdminRole::Viewer).is_none());
+            }
+        }
+    }
 
     #[test]
     fn registry_lifecycle_requires_an_admin() {

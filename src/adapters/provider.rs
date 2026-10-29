@@ -261,7 +261,7 @@ fn prepare_request(
             HeaderValue::from_static("2023-06-01"),
         );
     }
-    if profile.uses_client_bearer() {
+    if profile.uses_subscription_headers() {
         headers.insert(
             HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
             HeaderValue::from_static("true"),
@@ -293,7 +293,15 @@ fn prepare_request(
         headers.insert(HeaderName::from_static("idempotency-key"), value);
     }
     logging::inject_context(&mut headers);
-    if profile.uses_client_bearer() {
+    if profile.is_held_bearer() {
+        let token = profile
+            .held_token()
+            .ok_or(GatewayError::ProviderUnavailable)?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        value.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, value);
+    } else if profile.uses_client_bearer() {
         if !headers.contains_key(header::AUTHORIZATION) {
             return Err(GatewayError::Unauthorized);
         }
@@ -1231,6 +1239,53 @@ pub fn usage_for(
     Ok(usage)
 }
 
+pub fn error_contains_secret(body: &[u8], headers: &HeaderMap, secret: Option<&str>) -> bool {
+    let Some(secret) = secret.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let encoded = serde_json::to_string(secret).unwrap_or_default();
+    let escaped = encoded
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_default();
+    let contains = |bytes: &[u8]| {
+        bytes
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+            || (!escaped.is_empty()
+                && bytes
+                    .windows(escaped.len())
+                    .any(|window| window == escaped.as_bytes()))
+    };
+    fn json_contains(value: &serde_json::Value, secret: &str) -> bool {
+        match value {
+            serde_json::Value::String(value) => value.contains(secret),
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| json_contains(value, secret))
+            }
+            serde_json::Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| key.contains(secret) || json_contains(value, secret)),
+            _ => false,
+        }
+    }
+    contains(body)
+        || serde_json::from_slice::<serde_json::Value>(body)
+            .is_ok_and(|value| json_contains(&value, secret))
+        || headers.values().any(|value| contains(value.as_bytes()))
+}
+
+pub fn remove_secret_headers(headers: &mut HeaderMap, secret: Option<&str>) {
+    let names: Vec<_> = headers
+        .iter()
+        .filter(|(_, value)| error_contains_secret(value.as_bytes(), &HeaderMap::new(), secret))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in names {
+        headers.remove(name);
+    }
+}
+
 #[tracing::instrument(
     name = "provider.attempt",
     skip_all,
@@ -1268,6 +1323,68 @@ mod tests {
     };
 
     #[test]
+    fn escaped_json_credentials_are_detected() {
+        let body = br#"{"answer":"upstream-\u006bey"}"#;
+        assert!(super::error_contains_secret(
+            body,
+            &HeaderMap::new(),
+            Some("upstream-key")
+        ));
+        assert!(!super::error_contains_secret(
+            body,
+            &HeaderMap::new(),
+            Some("different-key")
+        ));
+    }
+
+    #[test]
+    fn personal_api_slots_use_provider_specific_headers() {
+        for (kind, mode, header_name, expected) in [
+            (
+                ProviderKind::Anthropic,
+                AuthenticationMode::ApiKey,
+                "x-api-key",
+                "personal-key",
+            ),
+            (
+                ProviderKind::Gemini,
+                AuthenticationMode::GoogleApiKey,
+                "x-goog-api-key",
+                "personal-key",
+            ),
+            (
+                ProviderKind::OpenAi,
+                AuthenticationMode::Bearer,
+                "authorization",
+                "Bearer personal-key",
+            ),
+            (
+                ProviderKind::Xai,
+                AuthenticationMode::Bearer,
+                "authorization",
+                "Bearer personal-key",
+            ),
+        ] {
+            let slot = ProviderProfile::personal_api_slot(
+                kind,
+                "personal",
+                "source",
+                "https://example.invalid",
+                vec![GatewayOperation::OpenAiResponses],
+                vec![Uuid::nil()],
+            );
+            let mut headers = HeaderMap::new();
+            assert!(apply_authentication(&mut headers, mode, &slot).is_err());
+            let lock = std::fs::File::open("/dev/null").unwrap();
+            let personal = slot
+                .with_personal_api_key(std::sync::Arc::from("personal-key"), lock)
+                .unwrap();
+            apply_authentication(&mut headers, mode, &personal).unwrap();
+            assert_eq!(headers.get(header_name).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn unchanged_model_preserves_every_request_byte() {
         let body =
             br#"{ "model": "public", "vendor": {"number": 123456789012345678901234567890} }"#;
@@ -1290,6 +1407,34 @@ mod tests {
     }
 
     #[test]
+    fn attribution_headers_are_not_forwarded_by_any_provider_adapter() {
+        for kind in [
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAi,
+            ProviderKind::Gemini,
+            ProviderKind::Xai,
+            ProviderKind::Vllm,
+            ProviderKind::Ollama,
+        ] {
+            let adapter = for_kind(kind).unwrap();
+            for name in [
+                "x-apg-prompt-id",
+                "x-apg-prompt-version",
+                "x-apg-skill-set-id",
+                "x-apg-agent-name",
+                "x-apg-agent-version",
+                "x-apg-client-version",
+                "x-apg-task-id",
+            ] {
+                assert!(
+                    !adapter.allows_client_header(&axum::http::HeaderName::from_static(name)),
+                    "{kind:?} {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn anthropic_client_bearer_is_forwarded_with_oauth_headers() {
         let adapter = for_kind(ProviderKind::Anthropic).unwrap();
         let profile = ProviderProfile::client_bearer(
@@ -1302,6 +1447,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer client-oauth".parse().unwrap());
         headers.insert("anthropic-beta", "claude-code-20250219".parse().unwrap());
+        headers.insert("x-apg-task-id", "task-123".parse().unwrap());
         let input = ProviderRequestInput {
             source_path_and_query: "/v1/messages",
             client_headers: &headers,
@@ -1321,6 +1467,8 @@ mod tests {
             .send(plan, Bytes::from_static(b"{}"), &profile, input)
             .unwrap();
 
+        assert!(!prepared.headers().contains_key("x-apg-task-id"));
+
         assert_eq!(
             prepared.headers().get("authorization").unwrap(),
             "Bearer client-oauth"
@@ -1335,6 +1483,71 @@ mod tests {
         assert_eq!(
             prepared.headers().get("anthropic-beta").unwrap(),
             "claude-code-20250219,oauth-2025-04-20"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_token_replaces_the_gateway_key_and_follows_updates() {
+        let adapter = for_kind(ProviderKind::Anthropic).unwrap();
+        let path = std::env::temp_dir().join(format!("held-provider-{}", std::process::id()));
+        let held = crate::held_token::HeldToken::load(path, None).unwrap();
+        let profile = ProviderProfile::held_bearer(
+            "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+            "anthropic-subscription",
+            "https://example.test",
+            vec![GatewayOperation::AnthropicMessages],
+            vec![Uuid::nil()],
+            held.clone(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer aigw_gateway_key".parse().unwrap());
+        let send = |profile: &ProviderProfile| {
+            let input = ProviderRequestInput {
+                source_path_and_query: "/v1/messages",
+                client_headers: &headers,
+                idempotency_key: None,
+            };
+            let plan = adapter
+                .plan_for_target(
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicMessages,
+                    "provider-model",
+                    false,
+                    &input,
+                )
+                .unwrap();
+            adapter.send(plan, Bytes::from_static(b"{}"), profile, input)
+        };
+
+        assert!(matches!(
+            send(&profile),
+            Err(crate::error::GatewayError::ProviderUnavailable)
+        ));
+        held.replace("sk-ant-oat01-one").await.unwrap();
+        let first = send(&profile).unwrap();
+        assert_eq!(
+            first.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-one"
+        );
+        assert_eq!(
+            first.headers().get("anthropic-beta").unwrap(),
+            "oauth-2025-04-20"
+        );
+        held.replace("sk-ant-oat01-two").await.unwrap();
+        let second = send(&profile).unwrap();
+        assert_eq!(
+            second.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-two"
+        );
+        let personal = profile.with_personal_token(std::sync::Arc::from("sk-ant-oat01-personal"));
+        let request = send(&personal).unwrap();
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-personal"
+        );
+        assert_eq!(
+            request.headers().get("anthropic-beta").unwrap(),
+            "oauth-2025-04-20"
         );
     }
 

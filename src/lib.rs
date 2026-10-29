@@ -2,9 +2,31 @@ mod adapters;
 mod admin;
 mod auth;
 pub mod canonical;
+mod capture_anchor;
+#[cfg(test)]
+mod capture_archive;
+mod capture_backup_barrier;
+#[cfg(test)]
+mod capture_crypto;
+#[cfg(test)]
+mod capture_key_usage;
+mod capture_keyring;
+#[cfg(test)]
+mod capture_maintenance;
+mod capture_master_key;
+mod capture_paths;
+#[cfg(test)]
+mod capture_recovery;
+#[cfg(test)]
+mod capture_secret_guard;
+#[cfg(test)]
+mod capture_session;
+#[cfg(test)]
+mod capture_spool;
 mod config;
 mod db;
 mod error;
+mod held_token;
 pub mod identity;
 mod jev;
 pub mod ledger;

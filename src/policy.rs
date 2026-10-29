@@ -57,6 +57,13 @@ pub enum BudgetClass {
     Unrestricted,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentCaptureMode {
+    Metadata,
+    Full,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyValues {
@@ -73,6 +80,8 @@ pub struct PolicyConstraints {
     pub max_quality: Option<PolicyQuality>,
     pub max_budget_class: Option<BudgetClass>,
     pub allowed_models: Option<Vec<String>>,
+    pub content_capture: Option<ContentCaptureMode>,
+    pub content_retention_days: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -111,6 +120,10 @@ impl PolicyDocument {
                 .as_deref()
                 .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 256)
             || (!self.deny && self.deny_reason.is_some())
+            || self
+                .constraints
+                .content_retention_days
+                .is_some_and(|days| !(1..=365).contains(&days))
             || self
                 .constraints
                 .allowed_models
@@ -169,6 +182,8 @@ pub struct EffectivePolicy {
     pub budget_class: BudgetClass,
     pub deadline_at: Option<DateTime<Utc>>,
     pub max_queue_time_ms: Option<u64>,
+    pub content_capture: ContentCaptureMode,
+    pub content_retention_days: u16,
     pub denied: bool,
     denial_kind: Option<PolicyDenial>,
     allowed_models: Option<BTreeSet<String>>,
@@ -176,6 +191,10 @@ pub struct EffectivePolicy {
 }
 
 impl EffectivePolicy {
+    pub(crate) fn disable_content_capture(&mut self) {
+        self.content_capture = ContentCaptureMode::Metadata;
+    }
+
     pub fn allows_model(&self, model: &str) -> bool {
         self.allowed_models
             .as_ref()
@@ -183,7 +202,10 @@ impl EffectivePolicy {
     }
 
     pub fn decision(&self) -> Value {
-        self.decision.clone()
+        let mut decision = self.decision.clone();
+        decision["effective"]["content_capture"] = json!(self.content_capture);
+        decision["effective"]["content_retention_days"] = json!(self.content_retention_days);
+        decision
     }
 
     pub fn ledger_snapshot(&self) -> RequestPolicySnapshot {
@@ -442,6 +464,8 @@ fn evaluate_layers(
     let mut max_quality = None;
     let mut max_budget_class = None;
     let mut allowed_models: Option<BTreeSet<String>> = None;
+    let mut content_capture = ContentCaptureMode::Full;
+    let mut content_retention_days: Option<u16> = None;
     let mut denied = false;
     let mut denial_kind = None;
     let mut denial_reason = None;
@@ -452,6 +476,13 @@ fn evaluate_layers(
         overwrite(&mut values, &document.defaults);
         max_quality = stricter(max_quality, document.constraints.max_quality);
         max_budget_class = stricter(max_budget_class, document.constraints.max_budget_class);
+        if let Some(mode) = document.constraints.content_capture {
+            content_capture = content_capture.min(mode);
+        }
+        content_retention_days = minimum(
+            content_retention_days,
+            document.constraints.content_retention_days,
+        );
         if let Some(models) = document.constraints.allowed_models {
             let models = models.into_iter().collect::<BTreeSet<_>>();
             allowed_models = Some(match allowed_models {
@@ -510,6 +541,7 @@ fn evaluate_layers(
         .or(values.workload_class)
         .unwrap_or(WorkloadClass::Interactive);
     let urgency = hints.urgency.or(values.urgency).unwrap_or(Urgency::Normal);
+    let content_retention_days = content_retention_days.unwrap_or(30);
     let adjustments = json!({
         "quality_clamped": quality != requested_quality,
         "budget_clamped": budget_class != requested_budget,
@@ -549,6 +581,8 @@ fn evaluate_layers(
         budget_class,
         deadline_at,
         max_queue_time_ms,
+        content_capture,
+        content_retention_days,
         denied,
         denial_kind,
         allowed_models,
@@ -733,6 +767,43 @@ mod tests {
                 .unwrap()
                 .len(),
             6
+        );
+    }
+
+    #[test]
+    fn content_capture_uses_strictest_policy_and_bounded_retention() {
+        let default = evaluate_layers(vec![], RequestHints::default(), Utc::now()).unwrap();
+        assert_eq!(default.content_capture, ContentCaptureMode::Full);
+        assert_eq!(default.content_retention_days, 30);
+        let extended = evaluate_layers(
+            vec![row(
+                "global",
+                1,
+                json!({"constraints":{"content_retention_days":90}}),
+            )],
+            RequestHints::default(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(extended.content_retention_days, 90);
+        let restricted = evaluate_layers(vec![
+            row("global", 1, json!({"constraints":{"content_capture":"metadata","content_retention_days":90}})),
+            row("user", 2, json!({"constraints":{"content_capture":"full","content_retention_days":10}})),
+        ], RequestHints::default(), Utc::now()).unwrap();
+        assert_eq!(restricted.content_capture, ContentCaptureMode::Metadata);
+        assert_eq!(restricted.content_retention_days, 10);
+        assert_eq!(
+            restricted.decision()["effective"]["content_capture"],
+            "metadata"
+        );
+        assert!(
+            PolicyDocument::decode(json!({"constraints":{"content_retention_days":0}})).is_err()
+        );
+        assert!(
+            PolicyDocument::decode(json!({"constraints":{"content_retention_days":366}})).is_err()
+        );
+        assert!(
+            PolicyDocument::decode(json!({"constraints":{"content_capture":"unknown"}})).is_err()
         );
     }
 
@@ -984,8 +1055,8 @@ mod tests {
             INSERT INTO policies (
                 id, tenant_id, policy_key, revision, configuration, lifecycle_state
             ) VALUES
-                ($1, $2, 'tenant-default', 1, '{"defaults":{"quality":"economy"}}', 'active'),
-                ($3, $4, 'other-default', 1, '{"defaults":{"quality":"premium"}}', 'active')
+                ($1, $2, 'tenant-default', 1, '{"defaults":{"quality":"economy"},"constraints":{"content_capture":"metadata","content_retention_days":14}}', 'active'),
+                ($3, $4, 'other-default', 1, '{"defaults":{"quality":"premium"},"constraints":{"content_capture":"full","content_retention_days":5}}', 'active')
             "#,
         )
         .bind(Uuid::new_v4())
@@ -1014,6 +1085,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.quality, PolicyQuality::Economy);
+        assert_eq!(result.content_capture, ContentCaptureMode::Metadata);
+        assert_eq!(result.content_retention_days, 14);
         assert_eq!(
             result.decision["applied_policies"][0]["policy_key"],
             "tenant-default"

@@ -12,6 +12,7 @@ use crate::{config::Config, db, logging, metrics, model_sync, routes, state::App
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let config = Config::from_env()?;
+    validate_capture_startup(&config)?;
     let traces = logging::init(config.otlp_endpoint.as_deref());
     let meters = metrics::init(config.otlp_endpoint.as_deref());
     if config.credential_environment == "dev"
@@ -61,6 +62,80 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         move || meters.map_or(Ok(()), |provider| provider.shutdown()),
     )
     .await;
+    Ok(())
+}
+
+pub async fn initialize_content_capture() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let config = Config::from_env()?;
+    crate::capture_paths::validate_paths([
+        &config.content_capture_spool_dir,
+        &config.content_capture_key_dir,
+        &config.content_capture_anchor_dir,
+    ])?;
+    let pool = db::pool(&config.database_url, 1)?;
+    let mut tx = pool.begin().await?;
+    let (records, usage): (bool, bool) = sqlx::query_as("SELECT to_regclass('public.capture_records') IS NOT NULL, to_regclass('public.capture_master_key_usage') IS NOT NULL")
+        .fetch_one(&mut *tx).await?;
+    if records != usage {
+        return Err("content storage database schema is incomplete".into());
+    }
+    if records {
+        sqlx::query(
+            "LOCK TABLE capture_records, capture_master_key_usage IN ACCESS EXCLUSIVE MODE NOWAIT",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let count: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM capture_records) + (SELECT count(*) FROM capture_master_key_usage)")
+            .fetch_one(&mut *tx).await?;
+        if count != 0 {
+            return Err("content storage database already has records".into());
+        }
+    }
+    let others: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND backend_type='client backend' AND pid<>pg_backend_pid()")
+        .fetch_one(&mut *tx).await?;
+    if others != 0 {
+        return Err("content storage initialization requires an isolated database".into());
+    }
+    let keys = config.content_capture_key_dir;
+    let anchors = config.content_capture_anchor_dir;
+    let spool = config.content_capture_spool_dir;
+    let fingerprint = tokio::task::spawn_blocking(move || {
+        crate::capture_keyring::initialize(&keys, &anchors, &spool)
+    })
+    .await??;
+    tx.commit().await?;
+    println!(
+        "content storage initialized: {}",
+        fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    Ok(())
+}
+
+fn validate_capture_startup(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    validate_capture_storage(
+        config.content_capture_enabled,
+        &config.content_capture_spool_dir,
+        &config.content_capture_key_dir,
+        &config.content_capture_anchor_dir,
+    )
+}
+
+fn validate_capture_storage(
+    enabled: bool,
+    spool: &std::path::Path,
+    keys: &std::path::Path,
+    anchors: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !enabled {
+        return Ok(());
+    }
+    crate::capture_paths::validate_paths([spool, keys, anchors])?;
+    let (master, _guard) = crate::capture_keyring::locked_current(keys)?;
+    crate::capture_anchor::check_current_anchor(anchors, &master)?;
     Ok(())
 }
 
@@ -264,12 +339,46 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::initialize_concurrency_guard;
+    use super::{initialize_concurrency_guard, validate_capture_storage};
     use crate::{
         quota::{QuotaEngine, QuotaError},
         scheduler::SchedulerConfig,
     };
     use sqlx::PgPool;
+
+    #[test]
+    fn capture_startup_requires_safe_directories_and_valid_key_and_counter() {
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::path::Path::new("/tmp").join(format!("capture-startup-{}", uuid::Uuid::new_v4()));
+        let spool = base.join("spool");
+        let keys = base.join("keys");
+        let anchors = base.join("anchors");
+        for path in [&base, &spool, &keys, &anchors] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(validate_capture_storage(false, &spool, &keys, &anchors).is_ok());
+        assert!(validate_capture_storage(true, &spool, &keys, &anchors).is_err());
+        let fingerprint = crate::capture_keyring::rotate(&keys, &anchors, &spool).unwrap();
+        assert!(validate_capture_storage(true, &spool, &keys, &anchors).is_ok());
+        let name: String = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(anchors.join(format!("{name}.anchor")))
+            .unwrap();
+        lock.lock().unwrap();
+        assert!(validate_capture_storage(true, &spool, &keys, &anchors).is_err());
+        drop(lock);
+        assert!(validate_capture_storage(true, &spool, &keys, &anchors).is_ok());
+        std::fs::write(anchors.join(format!("{name}.anchor")), [0u8; 81]).unwrap();
+        assert!(validate_capture_storage(true, &spool, &keys, &anchors).is_err());
+        assert!(validate_capture_storage(false, &spool, &keys, &anchors).is_ok());
+    }
 
     #[sqlx::test]
     async fn startup_keeps_single_owner_when_scheduling_is_enabled(pool: PgPool) {

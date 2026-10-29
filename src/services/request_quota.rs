@@ -414,6 +414,7 @@ async fn record_rejection(
             prepared.rejection.client_agent_id.clone(),
             prepared.rejection.parent_agent_id.clone(),
             Some(quota),
+            &prepared.rejection.attribution,
         )
         .await?;
     Ok(())

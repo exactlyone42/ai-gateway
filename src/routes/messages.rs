@@ -125,6 +125,7 @@ pub(super) async fn proxy(
         parent_agent_id: header_text(&headers, "x-claude-code-parent-agent-id"),
         estimated_tokens: matches!(operation, Operation::Messages)
             .then(|| i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+        attribution: crate::ledger::RequestAttribution::from_headers(&headers),
     };
     let decoded = match protocol::decode(gateway_operation, body) {
         Ok(decoded) => decoded,
@@ -178,11 +179,13 @@ pub(super) async fn proxy(
         required,
     )
     .await?;
-    task_decomposition::spawn_shadow(
-        state.shadow_context(),
-        task_decomposition::DecompositionInput::from_request(&canonical),
-        gateway_request_id,
-    );
+    if state.personal_tokens.is_none() {
+        task_decomposition::spawn_shadow(
+            state.shadow_context(),
+            task_decomposition::DecompositionInput::from_request(&canonical),
+            gateway_request_id,
+        );
+    }
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;
@@ -196,7 +199,14 @@ pub(super) async fn proxy(
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
-    let profile = selection.profile.clone();
+    let profile = state
+        .profile_for_user(&canonical.principal, &selection.profile)
+        .await?;
+    let provider_secret = profile
+        .bearer_secret()
+        .or_else(|| profile.api_key_secret())
+        .map(str::to_owned)
+        .or_else(|| profile.held_token().map(|token| token.to_string()));
     let selection_snapshot = selection.ledger_snapshot();
     let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
     let upstream_request = prepare_for_provider(
@@ -239,6 +249,7 @@ pub(super) async fn proxy(
             },
             Some(gateway_request_id),
             quota_snapshot,
+            Some(&prepared.rejection.attribution),
         )
         .await?;
     reservation.annotate_parameters(requested_parameters, provider_parameters);
@@ -279,19 +290,22 @@ pub(super) async fn proxy(
     reservation
         .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
         .await?;
-    let send_state = Arc::clone(&state);
     let send_base_url = profile.base_url.clone();
     let send_provider = profile.provider_key.clone();
     let send_model = provider_model.clone();
+    let send_profile = profile.clone();
+    let client = state.client_for_provider(profile.kind).clone();
     let mut send = Box::pin(async move {
-        provider::send(
-            &send_state.client,
+        let result = provider::send(
+            &client,
             &send_base_url,
             upstream_request,
             &send_provider,
             &send_model,
         )
-        .await
+        .await;
+        drop(send_profile);
+        result
     });
     let upstream = tokio::select! {
         result = &mut send => Some(result),
@@ -301,6 +315,7 @@ pub(super) async fn proxy(
         reservation.set_client_first_byte_at(Utc::now());
         let heartbeat_interval = state.config.stream_heartbeat_interval;
         let event_max_bytes = state.config.stream_event_max_bytes;
+        let deferred_secret = provider_secret.clone();
         let deferred = async_stream::stream! {
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n"));
             let mut heartbeat = tokio::time::interval(heartbeat_interval);
@@ -327,6 +342,7 @@ pub(super) async fn proxy(
                         streaming::RelayLimits {
                             event_max_bytes,
                             heartbeat_interval,
+                            provider_secret: deferred_secret,
                         },
                     ).await {
                         Ok(body) => {
@@ -384,12 +400,20 @@ pub(super) async fn proxy(
     };
 
     let status = upstream.status();
-    let response_headers = upstream.headers().clone();
+    let mut response_headers = upstream.headers().clone();
+    provider::remove_secret_headers(&mut response_headers, provider_secret.as_deref());
     let provider_request_id = response_headers
         .get("request-id")
         .or_else(|| response_headers.get("x-request-id"))
         .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        .filter(|value| {
+            !provider::error_contains_secret(
+                value.as_bytes(),
+                &HeaderMap::new(),
+                provider_secret.as_deref(),
+            )
+        });
     attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
@@ -455,7 +479,13 @@ pub(super) async fn proxy(
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             });
-        attempt.observe_response_id(response_id);
+        attempt.observe_response_id(response_id.filter(|value| {
+            !provider::error_contains_secret(
+                value.as_bytes(),
+                &HeaderMap::new(),
+                provider_secret.as_deref(),
+            )
+        }));
         if status.is_success() && matches!(operation, Operation::Messages) {
             let usage = match provider::usage_for(profile.kind, &bytes) {
                 Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
@@ -514,15 +544,24 @@ pub(super) async fn proxy(
         let incomplete = client_response
             .as_ref()
             .is_some_and(|response| response.incomplete);
+        let contains_secret = client_response.as_ref().is_some_and(|response| {
+            provider::error_contains_secret(
+                &response.body,
+                &response_headers,
+                provider_secret.as_deref(),
+            )
+        });
         attempt.conclude(
-            if incomplete {
+            if incomplete || contains_secret {
                 "failed"
             } else if status.is_success() {
                 "completed"
             } else {
                 "rejected"
             },
-            if incomplete {
+            if contains_secret {
+                Some("provider_secret_in_response".to_owned())
+            } else if incomplete {
                 Some("provider_response_incomplete".to_owned())
             } else {
                 (!status.is_success()).then(|| status.as_u16().to_string())
@@ -532,7 +571,7 @@ pub(super) async fn proxy(
         reservation.set_client_first_byte_at(completed_at);
         let mut request_completion =
             completion(status, model, provider.clone(), attempt, completed_at);
-        if incomplete {
+        if incomplete || contains_secret {
             request_completion.status = "failed".to_owned();
         }
         reservation.finish(request_completion).await?;
@@ -540,6 +579,9 @@ pub(super) async fn proxy(
             return Err(GatewayError::UpstreamProtocol);
         }
         let client_bytes = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
+        if contains_secret {
+            return Err(GatewayError::UpstreamProtocol);
+        }
         let response_headers = if translation.translated {
             translated_response_headers()
         } else {
@@ -569,6 +611,7 @@ pub(super) async fn proxy(
             streaming::RelayLimits {
                 event_max_bytes: state.config.stream_event_max_bytes,
                 heartbeat_interval: state.config.stream_heartbeat_interval,
+                provider_secret: provider_secret.clone(),
             },
         )
         .await?
@@ -583,6 +626,7 @@ pub(super) async fn proxy(
             streaming::RelayLimits {
                 event_max_bytes: state.config.stream_event_max_bytes,
                 heartbeat_interval: state.config.stream_heartbeat_interval,
+                provider_secret,
             },
         )
         .await?

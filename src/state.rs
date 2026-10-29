@@ -25,6 +25,7 @@ use thiserror::Error;
 pub struct AppState {
     pub(crate) config: Config,
     pub(crate) client: Client,
+    pub(crate) local_provider_client: Client,
     pub(crate) bootstrap_key_hash: Option<[u8; 32]>,
     /// Built here, which is after `metrics::init()` in `startup` -- an
     /// instrument binds to the provider installed at build time, so this
@@ -45,9 +46,52 @@ pub struct AppState {
     pub(crate) lifecycle: ProcessLifecycle,
     /// Bounds concurrent shadow decompositions; a busy gateway skips rather than queues.
     pub(crate) shadow_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) held_token: Option<crate::held_token::HeldToken>,
+    pub(crate) personal_tokens: Option<crate::held_token::PersonalTokens>,
 }
 
 impl AppState {
+    pub(crate) fn client_for_provider(&self, kind: ProviderKind) -> &Client {
+        match kind {
+            ProviderKind::Ollama | ProviderKind::Vllm => &self.local_provider_client,
+            _ => &self.client,
+        }
+    }
+
+    pub(crate) async fn profile_for_user(
+        &self,
+        principal: &crate::canonical::PrincipalRef,
+        profile: &ProviderProfile,
+    ) -> Result<ProviderProfile, crate::error::GatewayError> {
+        let Some(store) = self.personal_tokens.as_ref() else {
+            return Ok(profile.clone());
+        };
+        if profile.is_unauthenticated() {
+            return Ok(profile.clone());
+        }
+        let user = principal
+            .user_id
+            .ok_or(crate::error::GatewayError::ProviderUnavailable)?;
+        let is_subscription = profile.is_held_bearer();
+        let api_store = store.api_store(&profile.provider_key);
+        let selected = if is_subscription { store } else { &api_store };
+        let (token, lock) = selected
+            .get_with_lock(principal.tenant_id, user)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "personal provider token read failed");
+                crate::error::GatewayError::ProviderUnavailable
+            })?
+            .ok_or(crate::error::GatewayError::ProviderUnavailable)?;
+        if is_subscription {
+            Ok(profile.with_personal_token_lock(token, lock))
+        } else {
+            profile
+                .with_personal_api_key(token, lock)
+                .ok_or(crate::error::GatewayError::ProviderUnavailable)
+        }
+    }
+
     pub(crate) fn shadow_context(&self) -> crate::services::task_decomposition::ShadowContext {
         crate::services::task_decomposition::ShadowContext {
             pool: self.pool.clone(),
@@ -66,6 +110,10 @@ impl AppState {
                     .map(|key| Sha256::digest(key.as_bytes()).into())
             })
             .flatten();
+        let personal_tokens = config
+            .anthropic_personal_token_dir
+            .clone()
+            .map(crate::held_token::PersonalTokens::new);
         let credentials = CredentialService::new(
             pool.clone(),
             config.credential_hash_key_id.clone(),
@@ -80,7 +128,19 @@ impl AppState {
             .acquire_timeout(Duration::from_secs(2))
             .connect_lazy_with(pool.connect_options().as_ref().clone());
         let mut provider_profiles = Vec::new();
-        if !config.openai_api_key.is_empty() {
+        if config.openai_api_key.is_empty() && personal_tokens.is_some() {
+            provider_profiles.push(ProviderProfile::personal_api_slot(
+                ProviderKind::OpenAi,
+                "env://OPENAI_API_KEY",
+                config.openai_provider.clone(),
+                config.openai_base_url.clone(),
+                vec![
+                    GatewayOperation::OpenAiResponses,
+                    GatewayOperation::OpenAiChatCompletions,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+            ));
+        } else if !config.openai_api_key.is_empty() {
             provider_profiles.push(ProviderProfile::bearer(
                 "env://OPENAI_API_KEY",
                 config.openai_provider.clone(),
@@ -94,11 +154,50 @@ impl AppState {
                 Arc::<str>::from(config.openai_api_key.clone()),
             ));
         }
-        if config.anthropic_client_oauth
+        let held_token = config
+            .anthropic_subscription_token_file
+            .clone()
+            .map(|path| {
+                crate::held_token::HeldToken::load(
+                    path,
+                    config.anthropic_subscription_token_seed.as_deref(),
+                )
+            })
+            .transpose()?;
+        if held_token.is_none()
+            && personal_tokens.is_some()
+            && config.anthropic_api_key.is_empty()
+            && config.anthropic_auth_token.is_none()
+        {
+            provider_profiles.push(ProviderProfile::personal_api_slot(
+                ProviderKind::Anthropic,
+                "env://ANTHROPIC_API_KEY",
+                config.anthropic_provider.clone(),
+                config.anthropic_base_url.clone(),
+                vec![
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicCountTokens,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+            ));
+        } else if held_token.is_some()
+            || config.anthropic_client_oauth
             || config.anthropic_auth_token.is_some()
             || !config.anthropic_api_key.is_empty()
         {
-            provider_profiles.push(if config.anthropic_client_oauth {
+            provider_profiles.push(if let Some(ref token) = held_token {
+                ProviderProfile::held_bearer(
+                    "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+                    config.anthropic_provider.clone(),
+                    config.anthropic_base_url.clone(),
+                    vec![
+                        GatewayOperation::AnthropicMessages,
+                        GatewayOperation::AnthropicCountTokens,
+                    ],
+                    config.provider_allowed_tenant_ids.clone(),
+                    token.clone(),
+                )
+            } else if config.anthropic_client_oauth {
                 ProviderProfile::client_bearer(
                     "env://ANTHROPIC_CLIENT_OAUTH",
                     config.anthropic_provider.clone(),
@@ -149,6 +248,15 @@ impl AppState {
                     config.provider_allowed_tenant_ids.clone(),
                 );
                 Ok(match (extra.kind, extra.secret.as_ref()) {
+                    (
+                        ProviderKind::Anthropic
+                        | ProviderKind::OpenAi
+                        | ProviderKind::Gemini
+                        | ProviderKind::Xai,
+                        None,
+                    ) if personal_tokens.is_some() => ProviderProfile::personal_api_slot(
+                        extra.kind, args.0, args.1, args.2, args.3, args.4,
+                    ),
                     (ProviderKind::Gemini, Some(secret)) => ProviderProfile::api_key_for(
                         extra.kind,
                         args.0,
@@ -221,10 +329,16 @@ impl AppState {
             .connect_timeout(config.provider_connect_timeout)
             .read_timeout(config.provider_idle_timeout)
             .build()?;
+        let local_provider_client = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(config.provider_connect_timeout)
+            .read_timeout(config.local_provider_idle_timeout)
+            .build()?;
         Ok(Self {
             jev: config.jev.clone().map(crate::jev::JevRouter::new),
             config,
             client,
+            local_provider_client,
             bootstrap_key_hash,
             instruments: Instruments::new(),
             pool,
@@ -238,6 +352,8 @@ impl AppState {
             ledger,
             lifecycle: ProcessLifecycle::default(),
             shadow_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            held_token,
+            personal_tokens,
         })
     }
 }
@@ -252,4 +368,6 @@ pub enum StateError {
     Registry(#[from] crate::model_registry::RegistryError),
     #[error("could not initialize the scheduler")]
     Scheduler(#[from] crate::scheduler::SchedulerError),
+    #[error("could not load the held subscription token")]
+    HeldToken(#[from] crate::held_token::HeldTokenError),
 }

@@ -154,6 +154,9 @@ mod tests {
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
+            anthropic_subscription_token_file: None,
+            anthropic_personal_token_dir: None,
+            anthropic_subscription_token_seed: None,
             anthropic_client_oauth: false,
             anthropic_oauth_credential_id: None,
             anthropic_provider: "anthropic-test".to_owned(),
@@ -162,6 +165,7 @@ mod tests {
             stream_event_max_bytes: 32 * 1024 * 1024,
             stream_heartbeat_interval: Duration::from_secs(30),
             provider_idle_timeout: Duration::from_secs(120),
+            local_provider_idle_timeout: Duration::from_secs(300),
             provider_connect_timeout: Duration::from_secs(10),
             request_header_max_bytes: 64 * 1024,
             drain_timeout: Duration::from_secs(30),
@@ -195,6 +199,10 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            content_capture_enabled: false,
+            content_capture_spool_dir: "/var/lib/agent-pool-gateway/capture-spool".into(),
+            content_capture_key_dir: "/var/lib/agent-pool-gateway/capture-keys".into(),
+            content_capture_anchor_dir: "/var/lib/agent-pool-gateway/capture-anchors".into(),
             routing: Default::default(),
             jev: None,
             scheduler: Default::default(),
@@ -223,6 +231,716 @@ mod tests {
             agent_id: None,
             agent_name: None,
         }
+    }
+
+    #[sqlx::test]
+    async fn personal_api_key_reaches_upstream_without_shared_key(pool: PgPool) {
+        use crate::identity::{NewCredential, NewPrincipal};
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = seen.clone();
+        let upstream = Router::new().route("/v1/responses", post(move |headers: HeaderMap| {
+            let captured = captured.clone();
+            async move {
+                let auth = headers.get("authorization").map(|value| value.to_str().unwrap().to_owned())
+                    .unwrap_or_else(|| format!("api:{}", headers.get("x-api-key").unwrap().to_str().unwrap()));
+                captured.lock().unwrap().push(auth);
+                Json(json!({"id":"resp_test","object":"response","status":"completed","model":"upstream-model","output":[],"usage":{"input_tokens":1,"output_tokens":1}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant = Uuid::new_v4();
+        sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,'openai-test','OpenAI','openai',$3,'env://OPENAI_API_KEY',ARRAY['openai_responses'],'active') RETURNING id) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, lifecycle_state) SELECT $4,$2,id,'personal-model','upstream-model','Personal',ARRAY['openai_responses'],'active' FROM p"#)
+            .bind(Uuid::new_v4()).bind(tenant).bind(&base_url).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        let root = std::env::temp_dir().join(format!("personal-api-flow-{}", Uuid::new_v4()));
+        let mut config = test_config();
+        config.openai_base_url = base_url;
+        config.openai_api_key.clear();
+        config.anthropic_api_key.clear();
+        config.anthropic_personal_token_dir = Some(root);
+        config.provider_allowed_tenant_ids = vec![tenant];
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let mut keys = Vec::new();
+        for (name, personal_key) in [
+            ("alice", Some("alice-api-key")),
+            ("bob", Some("bob-api-key")),
+            ("missing", None),
+        ] {
+            let ids = state
+                .credentials
+                .create_principal(NewPrincipal {
+                    tenant_id: tenant,
+                    user_name: name,
+                    device_name: name,
+                    client_name: name,
+                    agent_name: name,
+                })
+                .await
+                .unwrap();
+            if let Some(secret) = personal_key {
+                state
+                    .personal_tokens
+                    .as_ref()
+                    .unwrap()
+                    .api_store("openai-test")
+                    .replace(tenant, ids.user_id, secret)
+                    .await
+                    .unwrap();
+            }
+            keys.push(
+                state
+                    .credentials
+                    .create(NewCredential {
+                        tenant_id: tenant,
+                        display_name: name,
+                        principal: ids,
+                        expires_at: None,
+                    })
+                    .await
+                    .unwrap()
+                    .plaintext,
+            );
+        }
+        let app = router(state);
+        for (index, key) in keys.iter().enumerate() {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header("authorization", format!("Bearer {key}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"model":"personal-model","input":"hello"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if index < 2 {
+                assert_eq!(response.status(), StatusCode::OK);
+            } else {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["Bearer alice-api-key", "Bearer bob-api-key"]
+        );
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn personal_tokens_follow_authenticated_gateway_requests(pool: PgPool) {
+        use crate::identity::{NewCredential, NewPrincipal};
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = seen.clone();
+        let upstream = Router::new().route("/v1/messages", post(move |headers: HeaderMap| {
+            let captured = captured.clone();
+            async move {
+                let auth = headers.get("authorization").map(|value| value.to_str().unwrap().to_owned())
+                    .unwrap_or_else(|| format!("api:{}", headers.get("x-api-key").unwrap().to_str().unwrap()));
+                captured.lock().unwrap().push(auth);
+                Json(json!({"id":"msg_test","type":"message","role":"assistant","model":"upstream-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant = Uuid::new_v4();
+        sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,'anthropic-test','Anthropic','anthropic',$3,'env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE',ARRAY['anthropic_messages'],'active') RETURNING id) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, lifecycle_state) SELECT $4,$2,id,'personal-model','upstream-model','Personal',ARRAY['anthropic_messages'],'active' FROM p"#)
+            .bind(Uuid::new_v4()).bind(tenant).bind(&base_url).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,'anthropic-api','Anthropic API','anthropic',$3,'env://ANTHROPIC_PERSONAL_API',ARRAY['anthropic_messages'],'active') RETURNING id) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, lifecycle_state) SELECT $4,$2,id,'api-model','upstream-model','API',ARRAY['anthropic_messages'],'active' FROM p"#)
+            .bind(Uuid::new_v4()).bind(tenant).bind(&base_url).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        let root = std::env::temp_dir().join(format!("personal-flow-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = test_config();
+        config.anthropic_base_url = base_url;
+        config.anthropic_subscription_token_file = Some(root.join("legacy"));
+        config.anthropic_subscription_token_seed = Some("sk-ant-oat01-legacy".to_owned());
+        config.anthropic_personal_token_dir = Some(root.join("users"));
+        config.provider_allowed_tenant_ids = vec![tenant];
+        config.extra_provider_profiles.push(ExtraProviderProfile {
+            kind: ProviderKind::Anthropic,
+            credential_ref: "env://ANTHROPIC_PERSONAL_API".to_owned(),
+            provider_key: "anthropic-api".to_owned(),
+            base_url: config.anthropic_base_url.clone(),
+            operations: vec![GatewayOperation::AnthropicMessages],
+            secret: None,
+        });
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let mut keys = Vec::new();
+        for (name, token) in [
+            ("alice", Some("sk-ant-oat01-alice")),
+            ("bob", Some("sk-ant-oat01-bob")),
+            ("missing", None),
+        ] {
+            let ids = state
+                .credentials
+                .create_principal(NewPrincipal {
+                    tenant_id: tenant,
+                    user_name: name,
+                    device_name: name,
+                    client_name: name,
+                    agent_name: name,
+                })
+                .await
+                .unwrap();
+            if let Some(token) = token {
+                state
+                    .personal_tokens
+                    .as_ref()
+                    .unwrap()
+                    .replace(tenant, ids.user_id, token)
+                    .await
+                    .unwrap();
+            }
+            if name == "alice" {
+                state
+                    .personal_tokens
+                    .as_ref()
+                    .unwrap()
+                    .api_store("anthropic-api")
+                    .replace(tenant, ids.user_id, "alice-anthropic-api")
+                    .await
+                    .unwrap();
+            }
+            let key = state
+                .credentials
+                .create(NewCredential {
+                    tenant_id: tenant,
+                    display_name: name,
+                    principal: ids,
+                    expires_at: None,
+                })
+                .await
+                .unwrap();
+            keys.push(key.plaintext);
+        }
+        let app = router(state);
+        let logs = logging::capture::Buffer::default();
+        for (index, key) in keys.iter().enumerate() {
+            let (subscriber, _provider) = logging::test_subscriber(logs.clone());
+            let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/messages")
+                .header("x-api-key", key).header("anthropic-version", "2023-06-01").header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"personal-model","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}"#)).unwrap()).with_subscriber(subscriber).await.unwrap();
+            if index < 2 {
+                assert_eq!(response.status(), StatusCode::OK);
+            } else {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+        let api_reply = app.clone().oneshot(Request::builder().method("POST").uri("/v1/messages")
+            .header("x-api-key", &keys[0]).header("anthropic-version", "2023-06-01").header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"api-model","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}"#)).unwrap()).await.unwrap();
+        assert_eq!(api_reply.status(), StatusCode::OK);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "Bearer sk-ant-oat01-alice",
+                "Bearer sk-ant-oat01-bob",
+                "api:alice-anthropic-api"
+            ]
+        );
+        let lines = logs.lines();
+        assert!(!lines.is_empty());
+        let serialized = serde_json::to_string(&lines).unwrap();
+        for secret in [
+            "sk-ant-oat01-alice",
+            "sk-ant-oat01-bob",
+            "sk-ant-oat01-legacy",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        for key in &keys {
+            assert!(!serialized.contains(key));
+        }
+        let injected = format!("{serialized} sk-ant-oat01-alice");
+        assert!(injected.contains("sk-ant-oat01-alice"));
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn personal_gemini_and_xai_keys_follow_the_authenticated_user(pool: PgPool) {
+        use crate::identity::{NewCredential, NewPrincipal};
+        let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let gemini_seen = Arc::clone(&seen);
+        let gemini_stream_seen = Arc::clone(&seen);
+        let xai_seen = Arc::clone(&seen);
+        let upstream = Router::new()
+            .route("/v1beta/models/gemini-target:generateContent", post(move |headers: HeaderMap| {
+                let seen = Arc::clone(&gemini_seen);
+                async move {
+                    seen.lock().unwrap().push(("gemini".to_owned(), headers["x-goog-api-key"].to_str().unwrap().to_owned()));
+                    Json(json!({"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}))
+                }
+            }))
+            .route("/v1beta/models/gemini-target:streamGenerateContent", post(move |headers: HeaderMap| {
+                let seen = Arc::clone(&gemini_stream_seen);
+                async move {
+                    seen.lock().unwrap().push(("gemini-stream".to_owned(), headers["x-goog-api-key"].to_str().unwrap().to_owned()));
+                    ([("content-type", "text/event-stream")], concat!(
+                        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n",
+                        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":1}}\n\n"
+                    ))
+                }
+            }))
+            .route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                let seen = Arc::clone(&xai_seen);
+                async move {
+                    seen.lock().unwrap().push(("xai".to_owned(), headers["authorization"].to_str().unwrap().to_owned()));
+                    if body["stream"] == true {
+                        ([("content-type", "text/event-stream")], concat!(
+                            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_xai\"},\"sequence_number\":0}\n\n",
+                            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"sequence_number\":1}\n\n",
+                            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_xai\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}},\"sequence_number\":2}\n\n"
+                        )).into_response()
+                    } else {
+                        Json(json!({"id":"resp_xai","object":"response","status":"completed","model":"xai-target","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1}})).into_response()
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant = Uuid::new_v4();
+        for (provider_key, provider_type, credential_ref, operation, model, target) in [
+            (
+                "personal-gemini",
+                "gemini",
+                "env://GEMINI_TEST",
+                "gemini_generate_content",
+                "gemini-public",
+                "gemini-target",
+            ),
+            (
+                "personal-xai",
+                "xai",
+                "env://XAI_TEST",
+                "openai_responses",
+                "xai-public",
+                "xai-target",
+            ),
+        ] {
+            sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,$3,$3,$4,$5,$6,ARRAY[$7]::text[],'active') RETURNING id) INSERT INTO models (id,tenant_id,provider_id,public_model_id,provider_model_id,display_name,supported_operations,supports_streaming,lifecycle_state) SELECT $8,$2,id,$9,$10,$9,ARRAY[$7]::text[],true,'active' FROM p"#)
+                .bind(Uuid::new_v4()).bind(tenant).bind(provider_key).bind(provider_type).bind(&base_url).bind(credential_ref).bind(operation).bind(Uuid::new_v4()).bind(model).bind(target).execute(&pool).await.unwrap();
+        }
+        let mut config = test_config();
+        config.provider_allowed_tenant_ids = vec![tenant];
+        config.anthropic_personal_token_dir =
+            Some(std::env::temp_dir().join(format!("personal-providers-{}", Uuid::new_v4())));
+        config.extra_provider_profiles.extend([
+            ExtraProviderProfile {
+                kind: ProviderKind::Gemini,
+                credential_ref: "env://GEMINI_TEST".to_owned(),
+                provider_key: "personal-gemini".to_owned(),
+                base_url: base_url.clone(),
+                operations: vec![GatewayOperation::GeminiGenerateContent],
+                secret: None,
+            },
+            ExtraProviderProfile {
+                kind: ProviderKind::Xai,
+                credential_ref: "env://XAI_TEST".to_owned(),
+                provider_key: "personal-xai".to_owned(),
+                base_url,
+                operations: vec![GatewayOperation::OpenAiResponses],
+                secret: None,
+            },
+        ]);
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let mut keys = Vec::new();
+        for name in ["alice", "bob"] {
+            let ids = state
+                .credentials
+                .create_principal(NewPrincipal {
+                    tenant_id: tenant,
+                    user_name: name,
+                    device_name: name,
+                    client_name: name,
+                    agent_name: name,
+                })
+                .await
+                .unwrap();
+            let (provider, secret) = if name == "alice" {
+                ("personal-gemini", "alice-gemini-secret")
+            } else {
+                ("personal-xai", "bob-xai-secret")
+            };
+            state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .api_store(provider)
+                .replace(tenant, ids.user_id, secret)
+                .await
+                .unwrap();
+            keys.push(
+                state
+                    .credentials
+                    .create(NewCredential {
+                        tenant_id: tenant,
+                        display_name: name,
+                        principal: ids,
+                        expires_at: None,
+                    })
+                    .await
+                    .unwrap()
+                    .plaintext,
+            );
+        }
+        let app = router(state);
+        for (index, model, expected) in [
+            (0, "gemini-public", StatusCode::OK),
+            (1, "gemini-public", StatusCode::SERVICE_UNAVAILABLE),
+            (0, "xai-public", StatusCode::SERVICE_UNAVAILABLE),
+            (1, "xai-public", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header("authorization", format!("Bearer {}", keys[index]))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"model":model,"input":"hello"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let bytes = to_bytes(response.into_body(), 16384).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("alice-gemini-secret") && !text.contains("bob-xai-secret"));
+            if expected == StatusCode::OK {
+                assert!(text.contains("hello"));
+            }
+        }
+        for (index, model) in [(0, "gemini-public"), (1, "xai-public")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header("authorization", format!("Bearer {}", keys[index]))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"model":model,"input":"hello","stream":true}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 16384).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains("hello") && text.contains("response.completed"));
+            assert!(!text.contains("alice-gemini-secret") && !text.contains("bob-xai-secret"));
+        }
+        for (index, model) in [(1, "gemini-public"), (0, "xai-public")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header("authorization", format!("Bearer {}", keys[index]))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"model":model,"input":"hello","stream":true}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                ("gemini".to_owned(), "alice-gemini-secret".to_owned()),
+                ("xai".to_owned(), "Bearer bob-xai-secret".to_owned()),
+                ("gemini-stream".to_owned(), "alice-gemini-secret".to_owned()),
+                ("xai".to_owned(), "Bearer bob-xai-secret".to_owned())
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn personal_token_revocation_waits_for_delayed_upstream_headers() {
+        use crate::model_registry::ProviderProfile;
+
+        let root = std::env::temp_dir().join(format!("personal-delay-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = test_config();
+        config.anthropic_subscription_token_file = Some(root.join("legacy"));
+        config.anthropic_personal_token_dir = Some(root.join("users"));
+        let pool = db::pool(&config.database_url, 1).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let store = state.personal_tokens.as_ref().unwrap();
+        store
+            .replace(tenant, user, "sk-ant-oat01-user")
+            .await
+            .unwrap();
+        let mut identity = principal(tenant);
+        identity.user_id = Some(user);
+        let profile = ProviderProfile::held_bearer(
+            "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+            "anthropic-test",
+            "http://127.0.0.1:1",
+            vec![GatewayOperation::AnthropicMessages],
+            vec![tenant],
+            state.held_token.clone().unwrap(),
+        );
+        let personal = state
+            .profile_for_user(&(&identity).into(), &profile)
+            .await
+            .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server_started = started.clone();
+        let server_release = release.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let started = server_started.clone();
+                let release = server_release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let adapter = crate::adapters::provider::for_kind(ProviderKind::Anthropic).unwrap();
+        let headers = axum::http::HeaderMap::new();
+        let input = crate::adapters::ProviderRequestInput {
+            source_path_and_query: "/v1/messages",
+            client_headers: &headers,
+            idempotency_key: None,
+        };
+        let plan = adapter
+            .plan_for_target(
+                GatewayOperation::AnthropicMessages,
+                GatewayOperation::AnthropicMessages,
+                "provider-model",
+                false,
+                &input,
+            )
+            .unwrap();
+        let prepared = adapter
+            .send(
+                plan,
+                axum::body::Bytes::from_static(b"{}"),
+                &personal,
+                input,
+            )
+            .unwrap();
+        let client = state.client.clone();
+        let sender = tokio::spawn(async move {
+            let response = crate::adapters::provider::send(
+                &client,
+                &format!("http://{address}"),
+                prepared,
+                "anthropic-test",
+                "provider-model",
+            )
+            .await;
+            drop(personal);
+            response
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert!(store.revoke(tenant, user).await.is_err());
+        release.notify_one();
+        assert_eq!(sender.await.unwrap().unwrap().status(), StatusCode::OK);
+        store.revoke(tenant, user).await.unwrap();
+        assert!(store.get(tenant, user).await.unwrap().is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn personal_profile_never_falls_back_to_another_users_token() {
+        use crate::model_registry::ProviderProfile;
+
+        let root = std::env::temp_dir().join(format!("personal-profile-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = test_config();
+        config.anthropic_subscription_token_file = Some(root.join("legacy"));
+        config.anthropic_subscription_token_seed = Some("sk-ant-oat01-legacy".to_owned());
+        config.anthropic_personal_token_dir = Some(root.join("users"));
+        let pool = db::pool(&config.database_url, 1).unwrap();
+        let state = AppState::new(config, pool).unwrap();
+        let tenant = Uuid::new_v4();
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        let store = state.personal_tokens.as_ref().unwrap();
+        store
+            .replace(tenant, alice, "sk-ant-oat01-alice")
+            .await
+            .unwrap();
+        store
+            .replace(tenant, bob, "sk-ant-oat01-bob")
+            .await
+            .unwrap();
+        let profile = ProviderProfile::held_bearer(
+            "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+            "anthropic-test",
+            "http://127.0.0.1:1",
+            vec![GatewayOperation::AnthropicMessages],
+            vec![tenant],
+            state.held_token.clone().unwrap(),
+        );
+        let mut identity = principal(tenant);
+        identity.user_id = Some(alice);
+        let shared = ProviderProfile::bearer(
+            "env://OPENAI_API_KEY",
+            "openai-test",
+            "http://127.0.0.1:1",
+            crate::model_registry::ProviderDialect::OpenAi,
+            vec![GatewayOperation::OpenAiResponses],
+            vec![tenant],
+            Arc::from("shared-secret"),
+        );
+        assert!(
+            state
+                .profile_for_user(&(&identity).into(), &shared)
+                .await
+                .is_err()
+        );
+        store
+            .api_store("openai-test")
+            .replace(tenant, alice, "alice-openai-key")
+            .await
+            .unwrap();
+        let personal_api = state
+            .profile_for_user(&(&identity).into(), &shared)
+            .await
+            .unwrap();
+        assert_eq!(personal_api.bearer_secret(), Some("alice-openai-key"));
+        drop(personal_api);
+        let local = ProviderProfile::unauthenticated_for(
+            ProviderKind::Ollama,
+            "local://model",
+            "local",
+            "http://127.0.0.1:1",
+            vec![GatewayOperation::OpenAiResponses],
+            vec![tenant],
+        );
+        assert!(
+            state
+                .profile_for_user(&(&identity).into(), &local)
+                .await
+                .is_ok()
+        );
+        let alice_profile = state
+            .profile_for_user(&(&identity).into(), &profile)
+            .await
+            .unwrap();
+        assert_eq!(&*alice_profile.held_token().unwrap(), "sk-ant-oat01-alice");
+        identity.user_id = Some(bob);
+        let bob_profile = state
+            .profile_for_user(&(&identity).into(), &profile)
+            .await
+            .unwrap();
+        assert_eq!(&*bob_profile.held_token().unwrap(), "sk-ant-oat01-bob");
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move |headers: axum::http::HeaderMap| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().await.push(
+                        headers
+                            .get("authorization")
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let adapter = crate::adapters::provider::for_kind(ProviderKind::Anthropic).unwrap();
+        let client_headers = axum::http::HeaderMap::new();
+        for chosen in [&alice_profile, &bob_profile] {
+            let input = crate::adapters::ProviderRequestInput {
+                source_path_and_query: "/v1/messages",
+                client_headers: &client_headers,
+                idempotency_key: None,
+            };
+            let plan = adapter
+                .plan_for_target(
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicMessages,
+                    "provider-model",
+                    false,
+                    &input,
+                )
+                .unwrap();
+            let prepared = adapter
+                .send(plan, axum::body::Bytes::from_static(b"{}"), chosen, input)
+                .unwrap();
+            let response = crate::adapters::provider::send(
+                &state.client,
+                &format!("http://{address}"),
+                prepared,
+                "anthropic-test",
+                "provider-model",
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            *received.lock().await,
+            ["Bearer sk-ant-oat01-alice", "Bearer sk-ant-oat01-bob"]
+        );
+        server.abort();
+        assert!(store.revoke(tenant, alice).await.is_err());
+        drop(alice_profile);
+        drop(bob_profile);
+        identity.user_id = None;
+        assert!(
+            state
+                .profile_for_user(&(&identity).into(), &profile)
+                .await
+                .is_err()
+        );
+        identity.user_id = Some(alice);
+        identity.tenant_id = Uuid::new_v4();
+        assert!(
+            state
+                .profile_for_user(&(&identity).into(), &profile)
+                .await
+                .is_err()
+        );
+        identity.tenant_id = tenant;
+        store.revoke(tenant, alice).await.unwrap();
+        assert!(
+            state
+                .profile_for_user(&(&identity).into(), &profile)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -594,11 +1312,94 @@ mod tests {
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn local_provider_timeout_is_longer_without_changing_cloud_timeout() {
+        let upstream = Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                StatusCode::OK
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.provider_idle_timeout = Duration::from_millis(25);
+        config.local_provider_idle_timeout = Duration::from_millis(500);
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = AppState::new(config, pool).unwrap();
+        let url = format!("http://{address}/");
+        assert!(
+            state
+                .client_for_provider(ProviderKind::OpenAi)
+                .get(&url)
+                .send()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state
+                .client_for_provider(ProviderKind::Ollama)
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn local_provider_request_uses_its_own_timeout(pool: PgPool) {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Json(json!({"id":"resp_local","object":"response","status":"completed","model":"local-target","output":[]}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        let base_url = format!("http://{address}");
+        sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,'local-test','Local','local',$3,'env://LOCAL_TEST',ARRAY['openai_responses'],'active') RETURNING id) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, lifecycle_state) SELECT $4,$2,id,'local-model','local-target','Local',ARRAY['openai_responses'],'active' FROM p"#)
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(&base_url).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        let mut config = test_config();
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        config.provider_idle_timeout = Duration::from_millis(25);
+        config.local_provider_idle_timeout = Duration::from_millis(500);
+        config.extra_provider_profiles.push(ExtraProviderProfile {
+            kind: ProviderKind::Ollama,
+            credential_ref: "env://LOCAL_TEST".to_owned(),
+            provider_key: "local-test".to_owned(),
+            base_url,
+            operations: vec![GatewayOperation::OpenAiResponses],
+            secret: None,
+        });
+        let state = AppState::new(config, pool).unwrap();
+        let result = openai::execute(
+            &state,
+            RequestContext {
+                principal: principal(tenant_id),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"local-model","input":"hello"}"#),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, StatusCode::OK);
+        server.abort();
+    }
+
     #[sqlx::test]
     async fn a_successful_request_persists_request_attempt_and_usage(pool: PgPool) {
         let upstream = Router::new().route(
             "/v1/chat/completions",
-            post(|| async {
+            post(|headers: HeaderMap| async move {
+                assert!(!headers.contains_key("x-apg-task-id"));
                 (
                     [("x-request-id", "provider-request")],
                     Json(json!({
@@ -622,6 +1423,7 @@ mod tests {
         });
 
         let mut config = test_config();
+        config.content_capture_enabled = false;
         config.openai_base_url = format!("http://{address}");
         config.openai_provider = "test-provider".to_owned();
         let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
@@ -633,6 +1435,8 @@ mod tests {
                     .header("authorization", "Bearer client-key")
                     .header("content-type", "application/json")
                     .header("x-session-id", "session-one")
+                    .header("x-apg-task-id", "successful-task")
+                    .header("x-apg-prompt-id", "x".repeat(129))
                     .body(Body::from(
                         r#"{"model":"company-default","messages":[{"role":"user","content":"sentinel-prompt"}]}"#,
                     ))
@@ -649,7 +1453,11 @@ mod tests {
                    gr.selected_provider, pa.provider_request_id,
                    pa.provider_response_id, ur.input_tokens, ur.output_tokens,
                    ur.cached_input_tokens, ur.cache_write_input_tokens,
-                   ur.reasoning_tokens, gr.policy_decision
+                   ur.reasoning_tokens, gr.policy_decision,
+                   (SELECT task_id FROM request_attribution a
+                    WHERE (a.tenant_id, a.gateway_request_id) = (gr.tenant_id, gr.id)) AS task_id,
+                   (SELECT prompt_id FROM request_attribution a
+                    WHERE (a.tenant_id, a.gateway_request_id) = (gr.tenant_id, gr.id)) AS prompt_id
             FROM gateway_requests gr
             JOIN provider_attempts pa
               ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
@@ -664,6 +1472,8 @@ mod tests {
         .unwrap();
         assert!(!row.get::<String, _>("request_id").is_empty());
         assert_eq!(row.get::<String, _>("session_id"), "session-one");
+        assert_eq!(row.get::<String, _>("task_id"), "successful-task");
+        assert_eq!(row.get::<Option<String>, _>("prompt_id"), None);
         assert_eq!(row.get::<String, _>("requested_model"), "company-default");
         assert_eq!(row.get::<String, _>("selected_provider"), "test-provider");
         assert_eq!(
@@ -683,7 +1493,169 @@ mod tests {
         assert_eq!(policy["routing"]["attempt_kind"], "initial");
         assert_eq!(policy["routing"]["reason"], "registry");
         assert_eq!(policy["routing"]["same_request_retry"], false);
+        assert_eq!(policy["effective"]["content_capture"], "metadata");
         upstream_task.abort();
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn unavailable_content_capture_stops_before_provider(pool: PgPool) {
+        let called = Arc::new(AtomicUsize::new(0));
+        let upstream_calls = called.clone();
+        let anthropic_calls = called.clone();
+        let upstream = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move || {
+                    let counter = upstream_calls.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/messages",
+                post(move || {
+                    let counter = anthropic_calls.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.content_capture_enabled = true;
+        config.openai_base_url = format!("http://{address}");
+        config.anthropic_base_url = format!("http://{address}");
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let response = router(state.clone()).oneshot(Request::builder().method("POST")
+            .uri("/v1/chat/completions").header("authorization", "Bearer client-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"company-default","messages":[{"role":"user","content":"hello"}]}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "capture_unavailable");
+        let anthropic = router(state.clone()).oneshot(Request::builder().method("POST")
+            .uri("/v1/messages").header("x-api-key", "client-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"company-default","messages":[{"role":"user","content":"hello"}],"max_tokens":10}"#)).unwrap()).await.unwrap();
+        assert_eq!(anthropic.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(anthropic.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "capture_unavailable");
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM gateway_requests WHERE status='rejected' AND policy_decision->>'denial_reason'='capture_unavailable'").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 2);
+        server.abort();
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn admin_login_and_http_task_filter_keep_tenants_separate(pool: PgPool) {
+        let tenant = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        sqlx::query("INSERT INTO gateway_requests (id, tenant_id, request_id, status, created_at, completed_at) VALUES ($1, $2, 'mine', 'completed', now(), now()), ($3, $4, 'other', 'completed', now(), now())")
+            .bind(first).bind(tenant).bind(second).bind(other).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO request_attribution (tenant_id, gateway_request_id, task_id) VALUES ($1, $2, 'same-task'), ($3, $4, 'same-task')")
+            .bind(tenant).bind(first).bind(other).bind(second).execute(&pool).await.unwrap();
+        let mut config = test_config();
+        config.admin_bootstrap_token = Some("synthetic-bootstrap-token-32-chars".to_owned());
+        config.admin_bootstrap_tenant_id = Some(tenant);
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let app = router(state.clone());
+        let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/bootstrap")
+            .header("authorization", "Bearer synthetic-bootstrap-token-32-chars")
+            .header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo(peer))
+            .body(Body::from(
+                r#"{"display_name":"test","credential_name":"test"}"#,
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let issued: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let login = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/sessions")
+            .header(
+                "authorization",
+                format!("Bearer {}", issued["login_token"].as_str().unwrap()),
+            )
+            .extension(axum::extract::ConnectInfo(peer))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(login).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let session: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let from = (Utc::now() - chrono::Duration::days(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let to = (Utc::now() + chrono::Duration::minutes(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let uri = format!("/admin/v1/requests?from={from}&to={to}&task_id=same-task");
+        let unauthorized = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let request = Request::builder()
+            .uri(&uri)
+            .header(
+                "authorization",
+                format!("Bearer {}", session["access_token"].as_str().unwrap()),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], first.to_string());
+        assert_eq!(page["items"][0]["task_id"], "same-task");
+        assert!(page["items"][0]["completed_at"].is_string());
+        let token = format!("Bearer {}", session["access_token"].as_str().unwrap());
+        let own = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/admin/v1/requests/{first}"))
+                    .header("authorization", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(own.status(), StatusCode::OK);
+        let detail: serde_json::Value =
+            serde_json::from_slice(&to_bytes(own.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(detail["attribution"]["task_id"], "same-task");
+        let foreign = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/admin/v1/requests/{second}"))
+                    .header("authorization", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
         std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
     }
 
@@ -1080,6 +2052,8 @@ mod tests {
         let spool_dir = config.ledger_spool_dir.clone();
         config.provider_allowed_tenant_ids = vec![tenant_id];
         let state = AppState::new(config, pool.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apg-task-id", "invalid-request-task".parse().unwrap());
         let result = openai::execute(
             &state,
             RequestContext {
@@ -1098,7 +2072,7 @@ mod tests {
                 },
                 received_at: Utc::now(),
                 path_and_query: "/v1/chat/completions".to_owned(),
-                headers: HeaderMap::new(),
+                headers,
                 body: Bytes::from_static(b"this is not json at all"),
                 operation: OpenAiOperation::ChatCompletions,
             },
@@ -1117,6 +2091,8 @@ mod tests {
                 'reason', gr.policy_decision->'denial_reason',
                 'evaluated', gr.policy_decision->'evaluated',
                 'operation', gr.operation,
+                'task_id', (SELECT a.task_id FROM request_attribution a
+                    WHERE (a.tenant_id, a.gateway_request_id) = (gr.tenant_id, gr.id)),
                 'attempts', (SELECT count(*) FROM provider_attempts pa
                     WHERE (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id))
             )
@@ -1132,6 +2108,7 @@ mod tests {
         // Not an empty decision that reads like a policy allowed it.
         assert_eq!(evidence["evaluated"], false);
         assert_eq!(evidence["operation"], "chat_completions");
+        assert_eq!(evidence["task_id"], "invalid-request-task");
         assert_eq!(evidence["attempts"], 0, "the provider was never called");
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
@@ -1241,6 +2218,8 @@ mod tests {
         config.provider_allowed_tenant_ids = vec![tenant_id];
         let spool_dir = config.ledger_spool_dir.clone();
         let state = AppState::new(config, pool.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apg-task-id", "quota-task".parse().unwrap());
         let result = openai::execute(
             &state,
             RequestContext {
@@ -1259,7 +2238,7 @@ mod tests {
                 },
                 received_at: Utc::now(),
                 path_and_query: "/v1/chat/completions".to_owned(),
-                headers: HeaderMap::new(),
+                headers,
                 body: Bytes::from_static(br#"{"model":"quota-model","max_tokens":10}"#),
                 operation: OpenAiOperation::ChatCompletions,
             },
@@ -1282,6 +2261,8 @@ mod tests {
                 'status', gr.status,
                 'reason', gr.quota_decision->'denial_reason',
                 'limit_kind', gr.quota_decision->'violations'->0->'limit_kind',
+                'task_id', (SELECT a.task_id FROM request_attribution a
+                    WHERE (a.tenant_id, a.gateway_request_id) = (gr.tenant_id, gr.id)),
                 'attempts', (SELECT count(*) FROM provider_attempts pa
                     WHERE (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id))
             )
@@ -1295,6 +2276,7 @@ mod tests {
         assert_eq!(evidence["status"], "rejected");
         assert_eq!(evidence["reason"], "hard_limit");
         assert_eq!(evidence["limit_kind"], "requests_per_minute");
+        assert_eq!(evidence["task_id"], "quota-task");
         assert_eq!(evidence["attempts"], 0);
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
@@ -1730,6 +2712,64 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn translated_openai_stream_sends_heartbeat_before_provider_headers(pool: PgPool) {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let upstream = Router::new().route("/v1/messages", post({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move || {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    ([("content-type", "text/event-stream")], concat!(
+                        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_slow\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    ))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(r#"WITH p AS (INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1,$2,'anthropic-test','Anthropic','anthropic',$3,'env://ANTHROPIC_API_KEY',ARRAY['anthropic_messages'],'active') RETURNING id) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, supports_streaming, max_output_tokens, lifecycle_state) SELECT $4,$2,id,'slow-model','upstream-model','Slow',ARRAY['anthropic_messages'],true,4096,'active' FROM p"#)
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(format!("http://{address}")).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        config.stream_heartbeat_interval = Duration::from_millis(30);
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let task = tokio::spawn(async move {
+            openai::execute(&state, RequestContext {
+                principal: principal(tenant_id), received_at: Utc::now(), path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(), body: Bytes::from_static(br#"{"model":"slow-model","input":"hello","max_output_tokens":16,"stream":true}"#), operation: OpenAiOperation::Responses,
+            }).await
+        });
+        started.notified().await;
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("no translated heartbeat before provider headers")
+            .unwrap()
+            .unwrap();
+        let mut body = response.body.into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), ": keepalive\n\n");
+        release.notify_one();
+        let mut remaining = Vec::new();
+        while let Some(chunk) = body.next().await {
+            remaining.extend_from_slice(&chunk.unwrap());
+        }
+        assert!(String::from_utf8_lossy(&remaining).contains("response.completed"));
+        server.abort();
+    }
+
+    #[sqlx::test]
     async fn translated_openai_target_stream_rejects_before_provider_and_quota(pool: PgPool) {
         let stream = concat!(
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_incomplete\"},\"sequence_number\":0}\n\n",
@@ -1933,6 +2973,8 @@ mod tests {
         let spool_dir = config.ledger_spool_dir.clone();
         config.provider_allowed_tenant_ids = vec![tenant_id];
         let state = AppState::new(config, pool.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apg-task-id", "policy-task".parse().unwrap());
         let result = openai::execute(
             &state,
             RequestContext {
@@ -1951,7 +2993,7 @@ mod tests {
                 },
                 received_at: Utc::now(),
                 path_and_query: "/v1/chat/completions".to_owned(),
-                headers: HeaderMap::new(),
+                headers,
                 body: Bytes::from_static(br#"{"model":"blocked-model"}"#),
                 operation: OpenAiOperation::ChatCompletions,
             },
@@ -1971,6 +3013,13 @@ mod tests {
                 .unwrap();
         assert_eq!(evidence["denied"], true);
         assert_eq!(evidence["denial_reason"], "model_not_allowed");
+        let task: String =
+            sqlx::query_scalar("SELECT task_id FROM request_attribution WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task, "policy-task");
         std::fs::remove_dir_all(spool_dir).unwrap();
     }
 
@@ -2175,6 +3224,173 @@ mod tests {
         idempotency_key: Option<String>,
         beta: Option<String>,
         body: Vec<u8>,
+    }
+
+    #[tokio::test]
+    async fn provider_secret_split_across_stream_events_is_not_reconstructed() {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            ([("content-type", "text/event-stream")], "data: {\"type\":\"response.output_text.delta\",\"delta\":\"upstream-\",\"sequence_number\":1}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"key\",\"sequence_number\":2}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}},\"sequence_number\":3}\n\n")
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut emitted = Vec::new();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => emitted.extend_from_slice(&bytes),
+                Err(_) => break,
+            }
+        }
+        let mut text = String::new();
+        for line in String::from_utf8_lossy(&emitted).lines() {
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(delta) = value.get("delta").and_then(|value| value.as_str())
+            {
+                text.push_str(delta);
+            }
+        }
+        assert!(!text.contains("upstream-key"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn escaped_secret_in_stream_metadata_is_not_sent() {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            ([("content-type", "text/event-stream")], "data: {\"type\":\"response.created\",\"response\":{\"id\":\"upstream-\\u006bey\"},\"sequence_number\":0}\n\n")
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut emitted = Vec::new();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => emitted.extend_from_slice(&bytes),
+                Err(_) => break,
+            }
+        }
+        assert!(!String::from_utf8_lossy(&emitted).contains("upstream-"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn streamed_provider_secret_header_is_not_sent_to_client() {
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                (
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("x-request-id", "upstream-key"),
+                    ],
+                    "data: {}\n\n",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.headers().values().all(|value| {
+            !value
+                .as_bytes()
+                .windows(b"upstream-key".len())
+                .any(|window| window == b"upstream-key")
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn streamed_provider_secret_is_not_sent_to_client() {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            ([("content-type", "text/event-stream")], "data: {\"type\":\"response.output_text.delta\",\"delta\":\"upstream-key\",\"sequence_number\":1}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}},\"sequence_number\":2}\n\n")
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut emitted = Vec::new();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => emitted.extend_from_slice(&bytes),
+                Err(_) => break,
+            }
+        }
+        assert!(!String::from_utf8_lossy(&emitted).contains("upstream-key"));
+        server.abort();
     }
 
     #[tokio::test]
@@ -2463,6 +3679,148 @@ mod tests {
         state.ledger.wait_for_idle().await;
         upstream_task.abort();
         std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_success_never_returns_provider_secret() {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            Json(json!({"id":"upstream-key","object":"response","status":"completed","model":"provider-model","output":[],"usage":{"input_tokens":1,"output_tokens":1}}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"company-default","input":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("upstream-key"));
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn blocked_secret_response_is_recorded_as_failed(pool: PgPool) {
+        let upstream = Router::new().route("/v1/responses", post(|| async {
+            Json(json!({"id":"resp_safe","object":"response","status":"completed","model":"provider-model","output":[{"type":"message","content":[{"type":"output_text","text":"upstream-key"}]}],"usage":{"input_tokens":1,"output_tokens":1}}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("x-request-id", "blocked-secret-ledger")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"company-default","input":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let row = sqlx::query("SELECT gr.status AS request_status, pa.status AS attempt_status, pa.error_type FROM gateway_requests gr JOIN provider_attempts pa ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id) WHERE gr.request_id = 'blocked-secret-ledger'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(row.get::<String, _>("request_status"), "failed");
+        assert_eq!(row.get::<String, _>("attempt_status"), "failed");
+        assert_eq!(
+            row.get::<String, _>("error_type"),
+            "provider_secret_in_response"
+        );
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn blocked_anthropic_secret_response_is_recorded_as_failed(pool: PgPool) {
+        let upstream = Router::new().route("/v1/messages", post(|| async {
+            Json(json!({"id":"msg_safe","type":"message","role":"assistant","content":[{"type":"text","text":"provider-key"}],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models = vec!["claude-test".to_owned()];
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("x-api-key", "client-key")
+                    .header("x-request-id", "blocked-anthropic-secret-ledger")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let row = sqlx::query("SELECT gr.status AS request_status, pa.status AS attempt_status, pa.error_type FROM gateway_requests gr JOIN provider_attempts pa ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id) WHERE gr.request_id = 'blocked-anthropic-secret-ledger'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(row.get::<String, _>("request_status"), "failed");
+        assert_eq!(row.get::<String, _>("attempt_status"), "failed");
+        assert_eq!(
+            row.get::<String, _>("error_type"),
+            "provider_secret_in_response"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn upstream_error_never_returns_provider_secret() {
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":"bad upstream-key"}})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"company-default","input":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("upstream-key"));
+        server.abort();
     }
 
     #[tokio::test]
@@ -2924,6 +4282,216 @@ mod tests {
         .expect("the heartbeat contract test did not finish; inspect the blocked phase");
     }
 
+    #[tokio::test]
+    async fn openai_stream_sends_heartbeat_before_delayed_provider_headers() {
+        let release = Arc::new(Notify::new());
+        let started = Arc::new(Notify::new());
+        let upstream = Router::new().route("/v1/responses", post({
+            let release = Arc::clone(&release);
+            let started = Arc::clone(&started);
+            move || {
+                let release = Arc::clone(&release);
+                let started = Arc::clone(&started);
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    ([("content-type", "text/event-stream")], concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_slow\"},\"sequence_number\":0}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_slow\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}},\"sequence_number\":1}\n\n"
+                    ))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.stream_heartbeat_interval = Duration::from_millis(30);
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let pending = tokio::spawn(
+            router(state).oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        started.notified().await;
+        let response = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("no heartbeat before provider headers")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), ": keepalive\n\n");
+        release.notify_one();
+        let mut remaining = Vec::new();
+        while let Some(chunk) = body.next().await {
+            remaining.extend_from_slice(&chunk.unwrap());
+        }
+        assert!(String::from_utf8_lossy(&remaining).contains("response.completed"));
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn delayed_openai_stream_error_does_not_leak_the_provider_key(pool: PgPool) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let calls = Arc::clone(&server_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    (StatusCode::TOO_MANY_REQUESTS, "upstream-key")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.stream_heartbeat_interval = Duration::from_millis(20);
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .header("x-request-id", "delayed-stream-error")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(": keepalive") && text.contains("\"type\":\"error\""));
+        assert!(!text.contains("upstream-key"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        state.ledger.wait_for_idle().await;
+        state.ledger.flush_startup().await.unwrap();
+        let row = sqlx::query("SELECT gr.status AS request_status, pa.status AS attempt_status, pa.error_type FROM gateway_requests gr JOIN provider_attempts pa ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id) WHERE gr.request_id = 'delayed-stream-error'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(row.get::<String, _>("request_status"), "failed");
+        assert_eq!(row.get::<String, _>("attempt_status"), "failed");
+        assert_eq!(row.get::<String, _>("error_type"), "upstream_status_429");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_openai_stream_while_waiting_closes_provider_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let closed = Arc::new(Notify::new());
+        let server_closed = Arc::clone(&closed);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0u8; 4096];
+            loop {
+                match socket.read(&mut bytes).await {
+                    Ok(0) | Err(_) => {
+                        server_closed.notify_one();
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+        });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.stream_heartbeat_interval = Duration::from_millis(20);
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","input":"x","stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), ": keepalive\n\n");
+        drop(body);
+        tokio::time::timeout(Duration::from_secs(2), closed.notified())
+            .await
+            .expect("provider connection remained open");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_chat_stream_error_uses_chat_error_format() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let calls = Arc::clone(&server_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    (StatusCode::TOO_MANY_REQUESTS, "upstream-key")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut config = test_config();
+        config.openai_base_url = format!("http://{address}");
+        config.stream_heartbeat_interval = Duration::from_millis(20);
+        let pool = db::pool(&config.database_url, config.database_max_connections).unwrap();
+        let state = Arc::new(AppState::new(config, pool).unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"company-default","messages":[],"stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        let event = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(event).unwrap();
+        assert_eq!(value["error"]["type"], "api_error");
+        assert!(!text.contains("upstream-key"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     async fn exercise_heartbeat_before_provider_headers() {
         let release = Arc::new(Notify::new());
         let release_for_server = Arc::clone(&release);
@@ -3181,7 +4749,8 @@ mod tests {
         let upstream = Router::new()
             .route(
                 "/v1/messages",
-                post(|| async {
+                post(|headers: HeaderMap| async move {
+                    assert!(!headers.contains_key("x-apg-task-id"));
                     (
                         [("content-type", "text/event-stream"), ("request-id", "provider-req-db")],
                         concat!(
@@ -3218,6 +4787,7 @@ mod tests {
                     .uri("/v1/messages")
                     .header("x-api-key", "client-key")
                     .header("x-request-id", "gateway-wire-id")
+                    .header("x-apg-task-id", "anthropic-task")
                     .header("x-claude-code-session-id", "session-1")
                     .header("x-claude-code-agent-id", "agent-1")
                     .header("x-claude-code-parent-agent-id", "parent-1")
@@ -3243,7 +4813,9 @@ mod tests {
                    pa.id AS attempt_id, pa.provider, pa.provider_request_id,
                    pa.provider_response_id, pa.provider_request_at,
                    pa.provider_first_byte_at,
-                   pa.provider_ttft IS NOT NULL AS provider_ttft_present
+                   pa.provider_ttft IS NOT NULL AS provider_ttft_present,
+                   (SELECT task_id FROM request_attribution a
+                    WHERE (a.tenant_id, a.gateway_request_id) = (gr.tenant_id, gr.id)) AS task_id
             FROM gateway_requests gr
             JOIN provider_attempts pa ON (pa.tenant_id, pa.gateway_request_id) = (gr.tenant_id, gr.id)
             WHERE gr.request_id = 'gateway-wire-id'
@@ -3255,6 +4827,7 @@ mod tests {
         assert!(!row.get::<Uuid, _>("id").is_nil());
         assert!(!row.get::<Uuid, _>("attempt_id").is_nil());
         assert_eq!(row.get::<String, _>("session_id"), "session-1");
+        assert_eq!(row.get::<String, _>("task_id"), "anthropic-task");
         assert_eq!(row.get::<String, _>("client_agent_id"), "agent-1");
         assert_eq!(row.get::<String, _>("parent_agent_id"), "parent-1");
         assert_eq!(

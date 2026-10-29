@@ -98,11 +98,17 @@ struct BufferedContext {
     model: String,
     provider: String,
     provider_kind: ProviderKind,
+    provider_secret: Option<String>,
     operation: Operation,
     translation: ValidatedTranslationPlan,
     gateway_request_id: uuid::Uuid,
     response_max_bytes: usize,
     canonical: CanonicalRequest,
+}
+
+enum DeferredProtocol {
+    Native(OpenAiObserver),
+    Translated(Box<(CrossStreamObserver, CrossStreamEncoder)>),
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
@@ -121,6 +127,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         client_agent_id: None,
         parent_agent_id: None,
         estimated_tokens: Some(i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+        attribution: crate::ledger::RequestAttribution::from_headers(&request.headers),
     };
     let decoded = match protocol::decode(operation, request.body) {
         Ok(decoded) => decoded,
@@ -190,11 +197,13 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         required,
     )
     .await?;
-    task_decomposition::spawn_shadow(
-        state.shadow_context(),
-        task_decomposition::DecompositionInput::from_request(&canonical),
-        gateway_request_id,
-    );
+    if state.personal_tokens.is_none() {
+        task_decomposition::spawn_shadow(
+            state.shadow_context(),
+            task_decomposition::DecompositionInput::from_request(&canonical),
+            gateway_request_id,
+        );
+    }
     let routing_reason = prepared_quota.routing_reason;
     let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;
@@ -213,7 +222,9 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
-    let profile = selection.profile.clone();
+    let profile = state
+        .profile_for_user(&canonical.principal, &selection.profile)
+        .await?;
     let selection_snapshot = selection.ledger_snapshot();
     let upstream_request = prepare_for_provider(
         &canonical,
@@ -253,6 +264,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             },
             Some(gateway_request_id),
             quota_snapshot,
+            Some(&prepared.rejection.attribution),
         )
         .await?;
     reservation.annotate_parameters(requested_parameters, provider_parameters);
@@ -301,15 +313,116 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     reservation
         .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
         .await?;
-    let upstream = match provider::send(
-        &state.client,
-        &profile.base_url,
-        upstream_request,
-        &profile.provider_key,
-        &provider_model,
-    )
-    .await
-    {
+    let provider_kind = profile.kind;
+    let provider_secret = profile
+        .bearer_secret()
+        .or_else(|| profile.api_key_secret())
+        .map(str::to_owned)
+        .or_else(|| profile.held_token().map(|token| token.to_string()));
+    let client = state.client_for_provider(profile.kind).clone();
+    let send_base_url = profile.base_url.clone();
+    let send_provider = profile.provider_key.clone();
+    let send_model = provider_model.clone();
+    let mut send = Box::pin(async move {
+        let result = provider::send(
+            &client,
+            &send_base_url,
+            upstream_request,
+            &send_provider,
+            &send_model,
+        )
+        .await;
+        drop(profile);
+        result
+    });
+    let upstream = tokio::select! {
+        result = &mut send => Some(result),
+        () = tokio::time::sleep(state.config.stream_heartbeat_interval), if is_stream => None,
+    };
+    if upstream.is_none() {
+        let protocol = if translation.translated {
+            DeferredProtocol::Translated(Box::new((
+                CrossStreamObserver::new(translation.target_operation)
+                    .map_err(|_| GatewayError::InvalidConfiguration)?,
+                CrossStreamEncoder::new(
+                    translation.source_operation,
+                    format!("resp_apg_{}", gateway_request_id.simple()),
+                    model.clone(),
+                    &canonical,
+                )
+                .map_err(|_| GatewayError::InvalidConfiguration)?,
+            )))
+        } else {
+            DeferredProtocol::Native(request.operation.observer(canonical.source_document())?)
+        };
+        let heartbeat_interval = state.config.stream_heartbeat_interval;
+        let event_max_bytes = state.config.stream_event_max_bytes;
+        let deferred_secret = provider_secret.clone();
+        let operation = request.operation;
+        reservation.set_client_first_byte_at(Utc::now());
+        let deferred = async_stream::stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n"));
+            let mut heartbeat = tokio::time::interval(heartbeat_interval);
+            heartbeat.tick().await;
+            let upstream = loop {
+                tokio::select! {
+                    result = &mut send => break result,
+                    _ = heartbeat.tick() => yield Ok(Bytes::from_static(b": keepalive\n\n")),
+                }
+            };
+            match upstream {
+                Ok(response) if response.status().is_success()
+                    && response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("text/event-stream")) =>
+                {
+                    let provider_request_id = response.headers().get("x-request-id").or_else(|| response.headers().get("request-id"))
+                        .and_then(|value| value.to_str().ok()).map(ToOwned::to_owned)
+                        .filter(|value| !provider::error_contains_secret(value.as_bytes(), &HeaderMap::new(), deferred_secret.as_deref()));
+                    attempt.observe_request_id(provider_request_id);
+                    let limits = crate::services::streaming::RelayLimits { event_max_bytes, heartbeat_interval, provider_secret: deferred_secret };
+                    let relayed = match protocol {
+                        DeferredProtocol::Native(observer) => relay(response, reservation, attempt, model, provider, observer, limits).await,
+                        DeferredProtocol::Translated(pair) => relay_transcoded(response, reservation, attempt, model, provider, *pair, limits).await,
+                    };
+                    match relayed {
+                        Ok(body) => {
+                            let mut body = body.into_data_stream();
+                            while let Some(item) = body.next().await {
+                                yield item.map_err(std::io::Error::other);
+                            }
+                        }
+                        Err(error) => yield Err(std::io::Error::other(error)),
+                    }
+                }
+                result => {
+                    let completed_at = Utc::now();
+                    let error_type = match result {
+                        Ok(response) if response.status().is_success() => "upstream_protocol_error".to_owned(),
+                        Ok(response) => format!("upstream_status_{}", response.status().as_u16()),
+                        Err(error) => error.kind().to_owned(),
+                    };
+                    attempt.conclude("failed", Some(error_type), completed_at);
+                    if let Err(error) = reservation.finish(RequestCompletion {
+                        status: "failed".to_owned(), selected_model: Some(model), selected_provider: Some(provider),
+                        attempts: vec![attempt], completed_at,
+                    }).await {
+                        tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %error);
+                    }
+                    let event = match operation {
+                        Operation::Responses => Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"code\":\"upstream_unavailable\",\"message\":\"upstream failed after streaming began\",\"param\":null,\"sequence_number\":0}\n\n"),
+                        Operation::ChatCompletions => Bytes::from_static(b"data: {\"error\":{\"type\":\"api_error\",\"message\":\"upstream failed after streaming began\"}}\n\n"),
+                    };
+                    yield Ok(event);
+                }
+            }
+        };
+        return Ok(Reply {
+            status: StatusCode::OK,
+            headers: translated_stream_headers(),
+            body: Body::from_stream(deferred),
+            streaming: true,
+        });
+    }
+    let upstream = match upstream.ok_or(GatewayError::InvalidConfiguration)? {
         Ok(response) => response,
         Err(error) => {
             let completed_at = Utc::now();
@@ -326,15 +439,22 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             return Err(error);
         }
     };
-
     let status = upstream.status();
-    let response_headers = response_headers(upstream.headers());
+    let mut response_headers = response_headers(upstream.headers());
+    provider::remove_secret_headers(&mut response_headers, provider_secret.as_deref());
     let provider_request_id = upstream
         .headers()
         .get("x-request-id")
         .or_else(|| upstream.headers().get("request-id"))
         .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        .filter(|value| {
+            !provider::error_contains_secret(
+                value.as_bytes(),
+                &HeaderMap::new(),
+                provider_secret.as_deref(),
+            )
+        });
     attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
@@ -384,6 +504,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 crate::services::streaming::RelayLimits {
                     event_max_bytes: state.config.stream_event_max_bytes,
                     heartbeat_interval: state.config.stream_heartbeat_interval,
+                    provider_secret: provider_secret.clone(),
                 },
             )
             .await?
@@ -398,6 +519,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 crate::services::streaming::RelayLimits {
                     event_max_bytes: state.config.stream_event_max_bytes,
                     heartbeat_interval: state.config.stream_heartbeat_interval,
+                    provider_secret: provider_secret.clone(),
                 },
             )
             .await?
@@ -422,7 +544,8 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         attempt,
         model,
         provider,
-        provider_kind: profile.kind,
+        provider_kind,
+        provider_secret,
         operation: request.operation,
         translation,
         gateway_request_id,
@@ -442,6 +565,7 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         model,
         provider,
         provider_kind,
+        provider_secret,
         operation,
         translation,
         gateway_request_id,
@@ -500,12 +624,23 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     let body = Bytes::from(bytes);
     let completed_at = Utc::now();
     let response_value = serde_json::from_slice::<Value>(&body).ok();
-    attempt.observe_response_id(response_value.as_ref().and_then(|value| {
-        value
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-    }));
+    attempt.observe_response_id(
+        response_value
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .filter(|value| {
+                !provider::error_contains_secret(
+                    value.as_bytes(),
+                    &HeaderMap::new(),
+                    provider_secret.as_deref(),
+                )
+            }),
+    );
     if status.is_success() {
         let usage = match provider::usage_for(provider_kind, &body) {
             Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
@@ -564,7 +699,16 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     let incomplete = client_response
         .as_ref()
         .is_some_and(|response| response.incomplete);
-    let (request_status, attempt_status, error_type) = if incomplete {
+    let contains_secret = client_response.as_ref().is_some_and(|response| {
+        provider::error_contains_secret(&response.body, &headers, provider_secret.as_deref())
+    });
+    let (request_status, attempt_status, error_type) = if contains_secret {
+        (
+            "failed",
+            "failed",
+            Some("provider_secret_in_response".to_owned()),
+        )
+    } else if incomplete {
         (
             "failed",
             "failed",
@@ -590,6 +734,9 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         return Err(GatewayError::UpstreamProtocol);
     }
     let client_body = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
+    if contains_secret {
+        return Err(GatewayError::UpstreamProtocol);
+    }
     Ok(Reply {
         status,
         headers: if translation.translated {

@@ -465,10 +465,40 @@ enum ProviderAuthorization {
     Bearer(Arc<str>),
     ApiKey(Arc<str>),
     ClientBearer,
+    HeldBearer(crate::held_token::HeldToken),
+    PersonalBearer(Arc<str>, Option<Arc<std::fs::File>>),
+    PersonalApiKey(Arc<str>, Arc<std::fs::File>),
+    PersonalApiBearer(Arc<str>, Arc<std::fs::File>),
+    PersonalApiSlot,
+    PersonalBearerSlot,
     None,
 }
 
 impl ProviderProfile {
+    pub(crate) fn personal_api_slot(
+        kind: ProviderKind,
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: kind.dialect(),
+            kind,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: match kind {
+                ProviderKind::Anthropic | ProviderKind::Gemini => {
+                    ProviderAuthorization::PersonalApiSlot
+                }
+                _ => ProviderAuthorization::PersonalBearerSlot,
+            },
+        }
+    }
     pub fn bearer(
         credential_ref: impl Into<String>,
         provider_key: impl Into<String>,
@@ -598,15 +628,103 @@ impl ProviderProfile {
         }
     }
 
+    pub fn held_bearer(
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+        token: crate::held_token::HeldToken,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: ProviderDialect::Anthropic,
+            kind: ProviderKind::Anthropic,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: ProviderAuthorization::HeldBearer(token),
+        }
+    }
+
     pub fn uses_client_bearer(&self) -> bool {
         matches!(self.authorization, ProviderAuthorization::ClientBearer)
+    }
+
+    pub fn uses_subscription_headers(&self) -> bool {
+        matches!(
+            self.authorization,
+            ProviderAuthorization::ClientBearer
+                | ProviderAuthorization::HeldBearer(_)
+                | ProviderAuthorization::PersonalBearer(_, _)
+        )
+    }
+
+    pub fn held_token(&self) -> Option<Arc<str>> {
+        match &self.authorization {
+            ProviderAuthorization::HeldBearer(token) => token.get(),
+            ProviderAuthorization::PersonalBearer(token, lock) => {
+                let _guard = lock;
+                Some(token.clone())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_held_bearer(&self) -> bool {
+        matches!(
+            self.authorization,
+            ProviderAuthorization::HeldBearer(_) | ProviderAuthorization::PersonalBearer(_, _)
+        )
+    }
+
+    pub(crate) fn is_unauthenticated(&self) -> bool {
+        matches!(self.authorization, ProviderAuthorization::None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_personal_token(&self, token: Arc<str>) -> Self {
+        let mut profile = self.clone();
+        profile.authorization = ProviderAuthorization::PersonalBearer(token, None);
+        profile
+    }
+
+    pub(crate) fn with_personal_token_lock(&self, token: Arc<str>, lock: std::fs::File) -> Self {
+        let mut profile = self.clone();
+        profile.authorization = ProviderAuthorization::PersonalBearer(token, Some(Arc::new(lock)));
+        profile
+    }
+
+    pub(crate) fn with_personal_api_key(&self, key: Arc<str>, lock: std::fs::File) -> Option<Self> {
+        let authorization = match self.authorization {
+            ProviderAuthorization::ApiKey(_) | ProviderAuthorization::PersonalApiSlot => {
+                ProviderAuthorization::PersonalApiKey(key, Arc::new(lock))
+            }
+            ProviderAuthorization::Bearer(_) | ProviderAuthorization::PersonalBearerSlot => {
+                ProviderAuthorization::PersonalApiBearer(key, Arc::new(lock))
+            }
+            _ => return None,
+        };
+        let mut profile = self.clone();
+        profile.authorization = authorization;
+        Some(profile)
     }
 
     pub fn bearer_secret(&self) -> Option<&str> {
         match &self.authorization {
             ProviderAuthorization::Bearer(secret) => Some(secret),
+            ProviderAuthorization::PersonalApiBearer(secret, lock) => {
+                let _guard = lock;
+                Some(secret)
+            }
             ProviderAuthorization::ApiKey(_)
             | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::PersonalBearer(_, _)
+            | ProviderAuthorization::PersonalApiKey(_, _)
+            | ProviderAuthorization::PersonalApiSlot
+            | ProviderAuthorization::PersonalBearerSlot
             | ProviderAuthorization::None => None,
         }
     }
@@ -615,8 +733,17 @@ impl ProviderProfile {
         match &self.authorization {
             ProviderAuthorization::Bearer(_)
             | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::PersonalBearer(_, _)
+            | ProviderAuthorization::PersonalApiBearer(_, _)
+            | ProviderAuthorization::PersonalApiSlot
+            | ProviderAuthorization::PersonalBearerSlot
             | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
+            ProviderAuthorization::PersonalApiKey(secret, lock) => {
+                let _guard = lock;
+                Some(secret)
+            }
         }
     }
 }

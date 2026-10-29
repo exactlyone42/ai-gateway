@@ -1,65 +1,55 @@
 # LOOP: agent-platform-decisions
 
-> 分支 `feature/agent-platform-decisions`｜研究與證據，不是 Gateway 實作
+## 目標
 
-| 欄位 | 值 |
-| --- | --- |
-| 狀態 | 進行中（計畫已交付，產品實作待做） |
-| 優先度 | P1 |
-| 前置 | 無 |
-| 開始 | `2026-10-22` |
-| 結束 | 未結束 |
+做出企業可用的 Agent：先有命令列（CLI），再有桌面 App；Windows、macOS、Linux 都要能用。架構照 `/home/cash/work_space/private/agent-platform/docs/agent-target-architecture.pdf`：Agent 在員工電腦上跑，模型一律經公司 Gateway 取得。完整需求與驗收見同 repo 的 PLAN.md。
 
-## 目的
+## 做事規則
 
-從現有 Gateway 走到可實際工作的 AI 平台：自己的操作介面能接收任務、掌握對話與必要資料，使用本地或遠端模型，呼叫工具操作檔案、網頁與電腦；Gateway 繼續提供模型服務入口。算力不足時再評估雲端 GPU。
+- 本檔是唯一 LOOP，不另建第二份或排程。歷史證據只經 cash-rule-checkpoint 寫進同目錄 checkpoints.jsonl。
+- 產品 repo `/home/cash/work_space/private/agent-platform`，分支 `feature/agent-plan`，最新提交 22f20e4（未推送）。
+- 每輪只做一個小切片，做完跑會失敗的對照測試，通過才標完成。連兩輪沒新證據就換方法。
+- 不花錢、不刪真實資料、不跳 hooks；公開 repo 或發布套件要使用者另外同意。部署已授權，測試過可直接部署。
 
-本階段交付現況與目標分區架構圖，各區塊列出技術選項與來源，再按依賴安排實作順序，讓 cash 決定重大方向後逐塊實作。
+## 階段（照架構圖的框，由上往下做）
 
-## 完成判準
+階段 0（P01）設計取捨（圖上 agent-harness 與其擴充）。狀態：取捨表已寫在 `docs/harness-design.md`，待使用者看過。
+- 驗收：使用者確認取捨表；階段 1 的測試清單對應表中標為「核心」的每一項。
 
-- [x] A1 Gateway、上下文、快取、本地模型、工具、自家 Client、雲端 GPU 各有證據、候選、代價與未驗證事項。
-- [ ] A2 使用者確認重要方向，逐項定案後才實作；以真實流程驗收。
-- [x] A3 PDF 與進度同步，區分已實測、未測、已部署。
-- [ ] 已定案的第一個完整任務能從操作介面送出，經模型與工具完成，看到結果並能停止；後續以相同任務比較品質、時間與用量。
-- [ ] 陰性對照：把未定案的方案寫成已選定，進度表與圖的檢查必須變紅。小測試完成只代表取得證據，整體目標仍未完成。
+階段 1（P01）核心迴圈（圖上 agent-harness）。狀態：功能已有，還欠兩項。
+- 還要做：模型回傳壞的工具參數時，現在整個任務會中止；改成把錯誤回報給模型，任務繼續。
+- 驗收：新測試通過；把修正拿掉，該測試必須失敗。
 
-## 已知
+階段 2（P01）批准與任務紀錄（圖上批准閘門、批准轉接、任務資料庫）。狀態：功能與測試已有。
+- 還要做：跑變異測試（故意改壞程式，看測試抓不抓得到），補上漏抓的。
+- 驗收：沒抓到的改動降為零，或逐條寫明為什麼改了也不影響結果。
 
-- 2026-10-24 使用者要求 Agent 獨立 repo、Tauri 桌面 Client 與可長任務執行的計畫。舊「任務放 Gateway／預設 Web」不再當未決方向。
-- 新 repo：`/home/cash/work_space/private/agent-platform`，https://github.com/DnaBoss/agent-platform。PLAN.md 列 10 步、技術、交付、驗收、錯誤注入與 Evaluation，並補 14 個開源來源。
-- P01 至 P10 均 PENDING。Rust 全套、Tauri 實機、模型完整任務、RAG、Memory、Computer Use、故障與 Evaluation 未跑。
-- 舊 followup／cancellation 只是局部證據，不能當新產品已整合。
-- 正式環境未動，未花費、部署或刪除。原排程 `ad8983b6-1875-4762-8031-1a12b989a6aa` 讀回 enabled=false，沒有宣稱產品正在背景開發。
+階段 3（P02）連上 Gateway（圖上 OpenAI 格式轉接 → Gateway）。狀態：只對假伺服器測過。
+- 還要做：用個人金鑰連真的 Gateway，完成一次真實請求。
+- 驗收：用 CLI 實際送出一個任務，Gateway 帳本出現這筆紀錄；金鑰錯誤時 CLI 顯示清楚的錯誤。
 
-## 已做
+階段 4（P02）CLI 完整任務（圖上 CLI、任務執行）。
+- 驗收：真模型修好一個測試資料夾裡壞掉的連結；拒絕批准與中途取消都不會寫入任何檔案；模型亂說「完成」會被獨立檢查擋下。
 
-| 步驟 | 成果 | 狀態 |
-| --- | --- | --- |
-| S01 | 查證現況、識別決策衝突、取得初步實測 | DONE |
-| S02 | 使用者確定 Agent 獨立 repo 與桌面 Client | DONE |
-| S03 | 完成不依賴架構選擇的五項小測試 | DONE |
-| S05 | 定位取消失敗並驗證獨立容器停止工作 | DONE |
-| S06 | 七區決策圖、選項與依賴；本地研究交付 | DONE |
-| S04 | PLAN 已交付；P01 至 P10 待實作與產品驗收 | READY |
+階段 5（P04）中斷後接續。
+- 驗收：工具執行前後程式崩潰、等待批准時重開，都不會重複做已經做過的動作；取消後觀察 10 秒沒有新寫入。
 
-## 已確定不可行
+階段 6（P03a/b）三平台與安裝。
+- 驗收：三個系統各自從乾淨帳號安裝並跑完階段 4 的任務；簽章錯誤會被拒絕。沒有 Windows／Mac 實機前先做其他階段。
 
-- 舊 `feature/multi-model-orchestration-plan` 在 Gateway 拆解任務，與 PDF 邊界不同，不可直接接手其實作。
-- 不再擴做單一取消問題；它只是局部證據。
+階段 7（P05–P07）擴充（圖上規劃中擴充）：知識檢索與向量庫（P05）、記憶（P06）、電腦操作（P07），另有串流；各自驗收後才算數，詳細驗收見 PLAN.md 與 delivery-steps.md。
 
-## 證據
+階段 8（P09）桌面 ADE 在另一個 repo（agent-ade），不做完整 IDE。本 repo 只負責有版本號的事件契約與相容測試。
+- 驗收：CLI 建的任務桌面看得到、接得上，同一個任務不會被兩邊同時執行。
 
-- 計畫品質：新 repo `docs/evidence/plan-validation.json`；格式、13 個內部連結、架構圖、22 項共用 policy 測試通過。證明計畫文件可用，證明不了產品可用。
-- 指定 PDF：`/home/cash/Documents/高質量文件/agent-platform-技術棧決策.pdf`。
-- checkpoint 第 21 筆 RUNNING／READY 表示可接續，不代表背景程序已啟動。
+階段 9（P08、P10）整體評測與交接：逐項核對原需求，全過才算整案完成。
 
-## 來源
+提交前每次都要：格式化、靜態檢查、全部測試通過；推送前再跑變異測試。
 
-- 本地 loops、分支、開啟的 issue／PR 已查，無同名全案；既有 #20 是上層工程議題，不另建外部卡。
-- 研究資料與來源清單在 `docs/agent-platform-decision-progress.md` 與 `docs/evidence/`。
+## 目前狀態
 
-## 下一步
+階段 1、2 程式已寫好（commit 22f20e4），全部測試通過；上面各階段「還要做」的項目都還沒做。Codex 同題比較屬階段 1，尚未做。
 
-1. 依新 repo `docs/longrun.md` 查重，從 P01 續做：比較 Codex 現成 Rust Harness 與 Rig。
-2. 使用者確認重要方向（A2）後才實作。
+## 唯一下一步
+
+先等使用者確認階段 0；之後做階段 1：在 `crates/openai` 的 `read_reply` 先寫「壞工具參數」失敗測試，再修，附對照；通過後做階段 2。

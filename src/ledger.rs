@@ -237,6 +237,8 @@ struct RequestRecord {
     requested_parameters: Option<Value>,
     #[serde(default)]
     provider_parameters: Option<Value>,
+    #[serde(default)]
+    attribution: Option<RequestAttribution>,
     selected_model: Option<String>,
     selected_provider: Option<String>,
     estimated_tokens: Option<i64>,
@@ -300,6 +302,43 @@ struct RequestRecord {
     created_at: DateTime<Utc>,
     started_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(crate) struct RequestAttribution {
+    prompt_id: Option<String>,
+    prompt_version: Option<String>,
+    skill_set_id: Option<String>,
+    agent_name: Option<String>,
+    agent_version: Option<String>,
+    client_version: Option<String>,
+    task_id: Option<String>,
+}
+
+impl RequestAttribution {
+    pub(crate) fn from_headers(headers: &axum::http::HeaderMap) -> Self {
+        fn value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+            let mut values = headers.get_all(name).iter();
+            let bytes = values.next()?.as_bytes();
+            if values.next().is_some()
+                || bytes.is_empty()
+                || bytes.len() > 128
+                || !bytes.iter().all(|byte| (0x20..=0x7e).contains(byte))
+            {
+                return None;
+            }
+            String::from_utf8(bytes.to_vec()).ok()
+        }
+        Self {
+            prompt_id: value(headers, "x-apg-prompt-id"),
+            prompt_version: value(headers, "x-apg-prompt-version"),
+            skill_set_id: value(headers, "x-apg-skill-set-id"),
+            agent_name: value(headers, "x-apg-agent-name"),
+            agent_version: value(headers, "x-apg-agent-version"),
+            client_version: value(headers, "x-apg-client-version"),
+            task_id: value(headers, "x-apg-task-id"),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -392,16 +431,18 @@ impl Ledger {
     }
 
     pub async fn reserve(&self, start: RequestStart) -> Result<Reservation, LedgerError> {
-        self.reserve_with_quota(start, None, None).await
+        self.reserve_with_quota(start, None, None, None).await
     }
 
-    pub async fn reserve_with_quota(
+    pub(crate) async fn reserve_with_quota(
         &self,
         start: RequestStart,
         gateway_request_id: Option<Uuid>,
         quota: Option<RequestQuotaSnapshot>,
+        attribution: Option<&RequestAttribution>,
     ) -> Result<Reservation, LedgerError> {
-        let envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
+        let mut envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
+        envelope.request.attribution = attribution.cloned();
         let id = envelope.request.id;
         let spool = Arc::clone(&self.inner.spool);
         let stored = envelope.clone();
@@ -418,26 +459,37 @@ impl Ledger {
         })
     }
 
-    pub async fn reject(
+    pub(crate) async fn reject(
         &self,
         start: RequestStart,
         operation: &str,
         client_agent_id: Option<String>,
         parent_agent_id: Option<String>,
+        attribution: &RequestAttribution,
     ) -> Result<(), LedgerError> {
-        self.reject_with_quota(start, operation, client_agent_id, parent_agent_id, None)
-            .await
+        self.reject_with_quota(
+            start,
+            operation,
+            client_agent_id,
+            parent_agent_id,
+            None,
+            attribution,
+        )
+        .await
     }
 
-    pub async fn reject_with_quota(
+    pub(crate) async fn reject_with_quota(
         &self,
         start: RequestStart,
         operation: &str,
         client_agent_id: Option<String>,
         parent_agent_id: Option<String>,
         quota: Option<RequestQuotaSnapshot>,
+        attribution: &RequestAttribution,
     ) -> Result<(), LedgerError> {
-        let mut reservation = self.reserve_with_quota(start, None, quota).await?;
+        let mut reservation = self
+            .reserve_with_quota(start, None, quota, Some(attribution))
+            .await?;
         reservation.annotate_protocol(operation, client_agent_id, parent_agent_id);
         reservation
             .finish(RequestCompletion {
@@ -992,6 +1044,7 @@ impl RequestEnvelope {
                 requested_model: bounded(start.requested_model),
                 requested_parameters: None,
                 provider_parameters: None,
+                attribution: None,
                 selected_model: None,
                 selected_provider: None,
                 estimated_tokens: start.estimated_tokens,
@@ -1626,6 +1679,133 @@ mod tests {
     use sqlx::{Pool, Postgres, Row as _};
 
     use super::*;
+
+    #[test]
+    fn attribution_accepts_only_one_short_printable_header() {
+        use axum::http::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apg-task-id", HeaderValue::from_static("task-123"));
+        headers.insert(
+            "x-apg-prompt-id",
+            HeaderValue::from_str(&"x".repeat(129)).unwrap(),
+        );
+        headers.insert(
+            "x-apg-agent-name",
+            HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+        headers.append("x-apg-client-version", HeaderValue::from_static("one"));
+        headers.append("x-apg-client-version", HeaderValue::from_static("two"));
+        let attribution = RequestAttribution::from_headers(&headers);
+        assert_eq!(attribution.task_id.as_deref(), Some("task-123"));
+        assert!(attribution.prompt_id.is_none());
+        assert!(attribution.agent_name.is_none());
+        assert!(attribution.client_version.is_none());
+        assert!(attribution.skill_set_id.is_none());
+    }
+
+    #[sqlx::test]
+    async fn attribution_survives_ledger_ingestion_and_old_envelopes(pool: Pool<Postgres>) {
+        let mut envelope = RequestEnvelope::started(request_start("attribution"));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-apg-task-id",
+            axum::http::HeaderValue::from_static("task-123"),
+        );
+        envelope.request.attribution = Some(RequestAttribution::from_headers(&headers));
+        let id = envelope.request.id;
+        let tenant = envelope.request.tenant_id;
+        let now = Utc::now();
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![],
+            completed_at: now,
+        });
+        let payload = serde_json::json!([envelope]);
+        for _ in 0..2 {
+            sqlx::query("SELECT ingest_usage_envelopes($1)")
+                .bind(&payload)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let task: String = sqlx::query_scalar(
+            "SELECT task_id FROM request_attribution WHERE tenant_id=$1 AND gateway_request_id=$2",
+        )
+        .bind(tenant)
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(task, "task-123");
+        assert!(sqlx::query("UPDATE request_attribution SET task_id='changed' WHERE tenant_id=$1 AND gateway_request_id=$2")
+            .bind(tenant).bind(id).execute(&pool).await.is_err());
+        let mut old = RequestEnvelope::started(request_start("legacy-attribution"));
+        old.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![],
+            completed_at: Utc::now(),
+        });
+        let mut payload = serde_json::json!([old]);
+        payload[0]["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attribution");
+        sqlx::query("SELECT ingest_usage_envelopes($1)")
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn rejected_requests_keep_attribution(pool: Pool<Postgres>) {
+        let directory = test_directory("rejected-attribution");
+        let ledger = Ledger::open(pool.clone(), directory, 192 * 1024, 32 * 1024).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-apg-task-id",
+            axum::http::HeaderValue::from_static("rejected-task"),
+        );
+        let attribution = RequestAttribution::from_headers(&headers);
+        let initial = ledger
+            .reserve_with_quota(
+                request_start("initial-attribution"),
+                None,
+                None,
+                Some(&attribution),
+            )
+            .await
+            .unwrap();
+        let bytes = fs::read(ledger.inner.spool.path(initial.id.unwrap(), "reserved")).unwrap();
+        let end = bytes
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .map_or(0, |index| index + 1);
+        let stored: RequestEnvelope = serde_json::from_slice(&bytes[..end]).unwrap();
+        assert_eq!(
+            stored.request.attribution.unwrap().task_id.as_deref(),
+            Some("rejected-task")
+        );
+        drop(initial);
+        ledger
+            .reject(
+                request_start("rejected-attribution"),
+                "messages",
+                None,
+                None,
+                &attribution,
+            )
+            .await
+            .unwrap();
+        ledger.wait_for_idle().await;
+        let task: String = sqlx::query_scalar("SELECT a.task_id FROM request_attribution a JOIN gateway_requests r ON r.tenant_id=a.tenant_id AND r.id=a.gateway_request_id WHERE r.request_id='rejected-attribution' AND r.status='rejected'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(task, "rejected-task");
+    }
     use crate::db;
 
     #[test]

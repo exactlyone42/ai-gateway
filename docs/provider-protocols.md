@@ -88,6 +88,8 @@ wire sidecar preserves the same-dialect request bytes:
 
 ### Streaming and accounting contract
 
+OpenAI 格式的串流若供應商尚未回傳標頭，Gateway 會先送 SSE 等待訊號，讓 Client 知道連線仍在；上游的閒置逾時設定仍然有效。等待訊號送出後，HTTP 狀態已固定為 200，若供應商之後拒絕或連線失敗，Gateway 會在串流中送出通用錯誤並記為失敗，不會重送請求。原生格式與轉換格式都適用；這項修改尚未部署，仍需原 Client 驗證。
+
 - The shared relay frames one complete bounded SSE event without rewriting its
   bytes. Provider observers emit `CanonicalStreamEvent` values for lifecycle,
   response ID, usage, completion hints, and failures.

@@ -34,6 +34,14 @@ require_container() {
     fail "container $1 is not there; set COMPOSE_PROJECT to the running stack"
 }
 
+require_capture_backup_unsupported() {
+  local capture_present
+  capture_present=$(docker exec "$postgres" psql -U gateway -d gateway -Atqc \
+    "SELECT to_regclass('public.capture_records') IS NOT NULL OR to_regclass('public.capture_master_key_usage') IS NOT NULL") ||
+    fail "cannot check encrypted capture state; backup operation was not started"
+  [ "$capture_present" = "f" ] || fail "database has encrypted capture state; safe capture backup and restore are not implemented"
+}
+
 # Removes every dated directory beyond the newest `keep`. The name pattern is
 # the guard: a root that also holds notes or a symlink keeps them.
 prune() {
@@ -55,6 +63,7 @@ create() {
   local keep="${BACKUP_KEEP:-14}"
   local directory="$root/$(date -u +%Y%m%dT%H%M%SZ)"
   require_container "$postgres"
+  require_capture_backup_unsupported
   mkdir -p "$directory"
   chmod 700 "$directory"
 
@@ -78,6 +87,14 @@ restore() {
   [ -s "$directory/gateway.dump" ] || fail "no database dump in $directory"
   [ -f "$directory/ledger-spool.tgz" ] || fail "no spool archive in $directory"
   require_container "$postgres"
+
+  local inventory
+  inventory=$(docker exec -i "$postgres" pg_restore --list < "$directory/gateway.dump") ||
+    fail "cannot inspect backup; restore was not started"
+  if printf '%s\n' "$inventory" | grep -Eq ' TABLE public (capture_records|capture_master_key_usage) '; then
+    fail "backup contains encrypted captures; safe capture restore is not implemented"
+  fi
+  require_capture_backup_unsupported
 
   docker stop "${project}-gateway-1" >/dev/null
   docker exec -i "$postgres" pg_restore -U gateway -d gateway --clean --if-exists \

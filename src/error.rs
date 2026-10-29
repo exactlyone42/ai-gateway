@@ -35,6 +35,8 @@ pub enum GatewayError {
     ProcessDraining,
     #[error("no provider is currently available")]
     ProviderUnavailable,
+    #[error("content storage is unavailable")]
+    CaptureUnavailable,
     #[error("model cannot satisfy required capability: {0}")]
     CapabilityMismatch(&'static str),
     #[error("request body is not valid JSON")]
@@ -95,6 +97,7 @@ impl GatewayError {
             Self::SchedulerClosed => "scheduler_closed",
             Self::ProcessDraining => "process_draining",
             Self::ProviderUnavailable => "provider_unavailable",
+            Self::CaptureUnavailable => "capture_unavailable",
             Self::CapabilityMismatch(_) => "model_capability_mismatch",
             Self::InvalidRequest(_) => "invalid_request",
             Self::UnsupportedRequest => "unsupported_request",
@@ -129,6 +132,7 @@ impl GatewayError {
             | Self::SchedulerClosed
             | Self::ProcessDraining
             | Self::ProviderUnavailable
+            | Self::CaptureUnavailable
             | Self::CapabilityMismatch(_)
             | Self::UnsupportedRequest
             | Self::PayloadTooLarge
@@ -164,6 +168,7 @@ impl IntoResponse for GatewayError {
             Self::QueueExpired => StatusCode::REQUEST_TIMEOUT,
             Self::SchedulerClosed | Self::ProcessDraining => StatusCode::SERVICE_UNAVAILABLE,
             Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CaptureUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::CapabilityMismatch(_) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedRequest => StatusCode::BAD_REQUEST,
@@ -188,7 +193,10 @@ impl IntoResponse for GatewayError {
         response.extensions_mut().insert(failure);
         if matches!(
             self,
-            Self::QueueFull | Self::SchedulerClosed | Self::ProcessDraining
+            Self::QueueFull
+                | Self::SchedulerClosed
+                | Self::ProcessDraining
+                | Self::CaptureUnavailable
         ) {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
