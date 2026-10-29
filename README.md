@@ -10,21 +10,22 @@ dependency.
 
 ## Important boundary
 
-This project pools **official API capacity**, not consumer or business
-subscription logins. It does not extract session tokens, share seats, automate
-interactive logins, or rotate Claude Code/Codex subscription accounts. Those
-patterns can violate provider terms and weaken auditability. Subscription seats
-remain assigned to their users; shared usage goes through organization API
-accounts or approved enterprise endpoints.
+The gateway only provides the path and method; it supplies no accounts or quota. Everyone uses only their own accounts, and each person chooses a
+subscription or an API key. Today the gateway runs on the owner's computer.
+For Claude, the client sends only a Gateway key; the container holds the
+owner's subscription token and calls Anthropic itself (flow in
+`docs/architecture.md`, terms in `docs/terminology.md`). API keys and local
+models are also supported, but none is required.
+The gateway does not log in for other people, share seats, rotate accounts,
+automate interactive logins, or extract cookies or refresh tokens.
 
 ## Target clients
 
-Any tool that supports an OpenAI-compatible base URL and API key can connect
-directly. Others use a small, explicit adapter:
+Tools that support a compatible endpoint and Gateway key are candidates for
+integration; each protocol, feature, and authentication path requires validation:
 
 - Hermes and VS Code extensions: OpenAI-compatible endpoint.
-- Claude Code / Claude Desktop: supported only where the product exposes an
-  approved custom API/provider configuration; no login interception.
+- Claude Code: base URL and Gateway key; verified with a real request. Claude Desktop requires separate verification.
 - Codex CLI/Desktop: supported when custom provider/base URL configuration is
   available under the organization's product policy.
 - Orca and other IDEs: OpenAI-compatible endpoint or a documented adapter.
@@ -53,7 +54,7 @@ The repository contains the native Anthropic and OpenAI data-plane slice:
 An explicitly configured bootstrap key and `ALLOWED_MODELS` remain a dev-only compatibility path. Issued virtual
 credentials resolve through PostgreSQL to a user, device, client and agent.
 
-The work from here is split into 18 independently reviewable segments. Read
+The work from here is split into 19 independently reviewable segments. Read
 `docs/work-breakdown.md` for the boundaries and dependency order, and
 `loops/README.md` for what is in progress right now. The runbook sections below
 (migration, first admin, create identities, issue keys, configure providers)

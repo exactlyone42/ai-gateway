@@ -50,7 +50,7 @@ async fn ledger_schema_is_tenant_safe_idempotent_and_append_only(pool: PgPool) {
 
 #[sqlx::test]
 async fn all_nine_acceptance_queries_are_executable(pool: PgPool) {
-    pool.execute(include_str!("../docs/usage-ledger-queries.sql"))
+    pool.execute(include_str!("../scripts/usage-ledger-queries.sql"))
         .await
         .unwrap();
 }
