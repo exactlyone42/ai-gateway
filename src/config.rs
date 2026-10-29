@@ -47,6 +47,8 @@ pub struct Config {
     pub anthropic_base_url: String,
     pub anthropic_api_key: String,
     pub anthropic_auth_token: Option<String>,
+    pub anthropic_subscription_token_file: Option<std::path::PathBuf>,
+    pub anthropic_subscription_token_seed: Option<String>,
     pub anthropic_client_oauth: bool,
     pub anthropic_oauth_credential_id: Option<Uuid>,
     pub anthropic_provider: String,
@@ -151,6 +153,8 @@ pub enum ConfigError {
     InvalidAnthropicRequestLimit(String),
     #[error("ANTHROPIC_CLIENT_OAUTH and ANTHROPIC_OAUTH_CREDENTIAL_ID must be configured together")]
     IncompleteAnthropicClientOauth,
+    #[error("ANTHROPIC_SUBSCRIPTION_TOKEN_FILE cannot be combined with ANTHROPIC_CLIENT_OAUTH")]
+    ConflictingAnthropicSubscription,
     #[error("invalid Anthropic client OAuth configuration: {0}")]
     InvalidAnthropicClientOauth(String),
     #[error("invalid OPENAI_REQUEST_MAX_BYTES: {0}")]
@@ -232,6 +236,13 @@ impl Config {
             return Err(ConfigError::IncompleteAnthropicClientOauth);
         }
         let anthropic_auth_token = setting("ANTHROPIC_AUTH_TOKEN").ok();
+        let anthropic_subscription_token_file = setting("ANTHROPIC_SUBSCRIPTION_TOKEN_FILE")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let anthropic_subscription_token_seed = setting("ANTHROPIC_SUBSCRIPTION_TOKEN").ok();
+        if anthropic_subscription_token_file.is_some() && anthropic_client_oauth {
+            return Err(ConfigError::ConflictingAnthropicSubscription);
+        }
         let anthropic_api_key = setting("ANTHROPIC_API_KEY").unwrap_or_default();
         let anthropic_provider = provider_name("ANTHROPIC_PROVIDER", "anthropic")?;
         let anthropic_request_max_bytes = setting("ANTHROPIC_REQUEST_MAX_BYTES")
@@ -500,6 +511,8 @@ impl Config {
             anthropic_base_url,
             anthropic_api_key,
             anthropic_auth_token,
+            anthropic_subscription_token_file,
+            anthropic_subscription_token_seed,
             anthropic_client_oauth,
             anthropic_oauth_credential_id,
             anthropic_provider,

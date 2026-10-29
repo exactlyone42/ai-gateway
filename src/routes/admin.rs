@@ -56,6 +56,10 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
+            "/admin/v1/provider-tokens/anthropic",
+            axum::routing::put(replace_anthropic_token),
+        )
+        .route(
             "/admin/v1/{resource}/{id}/lifecycle",
             post(set_registry_lifecycle),
         )
@@ -503,6 +507,42 @@ async fn rotate_credential(
         )
         .await?;
     Ok((StatusCode::CREATED, Json(output)))
+}
+
+#[derive(serde::Deserialize)]
+struct ReplaceTokenInput {
+    token: String,
+}
+
+async fn replace_anthropic_token(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<ReplaceTokenInput>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let held = state.held_token.as_ref().ok_or(AdminError::NotFound)?;
+    let fingerprint = held
+        .replace(&input.token)
+        .await
+        .map_err(|error| match error {
+            crate::held_token::HeldTokenError::Invalid => AdminError::InvalidRequest,
+            crate::held_token::HeldTokenError::Storage(_) => AdminError::Unavailable,
+        })?;
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    state
+        .admin
+        .audit_provider_token_update(
+            &context,
+            &fingerprint,
+            source,
+            peer.ip(),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(Json(
+        serde_json::json!({"provider": "anthropic", "fingerprint": fingerprint}),
+    ))
 }
 
 async fn require_admin_session(

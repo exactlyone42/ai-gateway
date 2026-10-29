@@ -45,6 +45,7 @@ pub struct AppState {
     pub(crate) lifecycle: ProcessLifecycle,
     /// Bounds concurrent shadow decompositions; a busy gateway skips rather than queues.
     pub(crate) shadow_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) held_token: Option<crate::held_token::HeldToken>,
 }
 
 impl AppState {
@@ -94,11 +95,34 @@ impl AppState {
                 Arc::<str>::from(config.openai_api_key.clone()),
             ));
         }
-        if config.anthropic_client_oauth
+        let held_token = config
+            .anthropic_subscription_token_file
+            .clone()
+            .map(|path| {
+                crate::held_token::HeldToken::load(
+                    path,
+                    config.anthropic_subscription_token_seed.as_deref(),
+                )
+            })
+            .transpose()?;
+        if held_token.is_some()
+            || config.anthropic_client_oauth
             || config.anthropic_auth_token.is_some()
             || !config.anthropic_api_key.is_empty()
         {
-            provider_profiles.push(if config.anthropic_client_oauth {
+            provider_profiles.push(if let Some(ref token) = held_token {
+                ProviderProfile::held_bearer(
+                    "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+                    config.anthropic_provider.clone(),
+                    config.anthropic_base_url.clone(),
+                    vec![
+                        GatewayOperation::AnthropicMessages,
+                        GatewayOperation::AnthropicCountTokens,
+                    ],
+                    config.provider_allowed_tenant_ids.clone(),
+                    token.clone(),
+                )
+            } else if config.anthropic_client_oauth {
                 ProviderProfile::client_bearer(
                     "env://ANTHROPIC_CLIENT_OAUTH",
                     config.anthropic_provider.clone(),
@@ -238,6 +262,7 @@ impl AppState {
             ledger,
             lifecycle: ProcessLifecycle::default(),
             shadow_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            held_token,
         })
     }
 }
@@ -252,4 +277,6 @@ pub enum StateError {
     Registry(#[from] crate::model_registry::RegistryError),
     #[error("could not initialize the scheduler")]
     Scheduler(#[from] crate::scheduler::SchedulerError),
+    #[error("could not load the held subscription token")]
+    HeldToken(#[from] crate::held_token::HeldTokenError),
 }

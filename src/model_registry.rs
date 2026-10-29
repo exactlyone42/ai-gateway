@@ -465,6 +465,7 @@ enum ProviderAuthorization {
     Bearer(Arc<str>),
     ApiKey(Arc<str>),
     ClientBearer,
+    HeldBearer(crate::held_token::HeldToken),
     None,
 }
 
@@ -598,8 +599,46 @@ impl ProviderProfile {
         }
     }
 
+    pub fn held_bearer(
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+        token: crate::held_token::HeldToken,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: ProviderDialect::Anthropic,
+            kind: ProviderKind::Anthropic,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: ProviderAuthorization::HeldBearer(token),
+        }
+    }
+
     pub fn uses_client_bearer(&self) -> bool {
         matches!(self.authorization, ProviderAuthorization::ClientBearer)
+    }
+
+    pub fn uses_subscription_headers(&self) -> bool {
+        matches!(
+            self.authorization,
+            ProviderAuthorization::ClientBearer | ProviderAuthorization::HeldBearer(_)
+        )
+    }
+
+    pub fn held_token(&self) -> Option<Arc<str>> {
+        match &self.authorization {
+            ProviderAuthorization::HeldBearer(token) => token.get(),
+            _ => None,
+        }
+    }
+
+    pub fn is_held_bearer(&self) -> bool {
+        matches!(self.authorization, ProviderAuthorization::HeldBearer(_))
     }
 
     pub fn bearer_secret(&self) -> Option<&str> {
@@ -607,6 +646,7 @@ impl ProviderProfile {
             ProviderAuthorization::Bearer(secret) => Some(secret),
             ProviderAuthorization::ApiKey(_)
             | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::HeldBearer(_)
             | ProviderAuthorization::None => None,
         }
     }
@@ -615,6 +655,7 @@ impl ProviderProfile {
         match &self.authorization {
             ProviderAuthorization::Bearer(_)
             | ProviderAuthorization::ClientBearer
+            | ProviderAuthorization::HeldBearer(_)
             | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
         }

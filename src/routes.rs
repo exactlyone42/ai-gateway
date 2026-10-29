@@ -154,6 +154,8 @@ mod tests {
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
+            anthropic_subscription_token_file: None,
+            anthropic_subscription_token_seed: None,
             anthropic_client_oauth: false,
             anthropic_oauth_credential_id: None,
             anthropic_provider: "anthropic-test".to_owned(),

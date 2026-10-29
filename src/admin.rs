@@ -230,6 +230,12 @@ pub const RBAC_RULES: &[RbacRule] = &[
         roles: WRITERS,
     },
     RbacRule {
+        method: "PUT",
+        route: "/admin/v1/provider-tokens/anthropic",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
         method: "GET",
         route: "/admin/v1/admin-accounts",
         action: AdminAction::ManageRbac,
@@ -708,6 +714,36 @@ impl AdminService {
                 target_id: None,
                 before: None,
                 after: Some(json!({"method": method, "route": route})),
+                source_ip,
+                peer_ip,
+                request_id,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn audit_provider_token_update(
+        &self,
+        context: &AdminContext,
+        fingerprint: &str,
+        source_ip: IpAddr,
+        peer_ip: IpAddr,
+        request_id: &str,
+    ) -> Result<(), AdminError> {
+        let mut transaction = self.pool.begin().await?;
+        append_audit(
+            &mut transaction,
+            AuditEntry {
+                tenant_id: context.tenant_id,
+                actor_id: context.account_id,
+                role: context.role,
+                action: "admin.provider_token.replace",
+                target_type: "provider_token",
+                target_id: None,
+                before: None,
+                after: Some(json!({"provider": "anthropic", "fingerprint": fingerprint})),
                 source_ip,
                 peer_ip,
                 request_id,

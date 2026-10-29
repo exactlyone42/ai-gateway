@@ -5,6 +5,7 @@ pub mod canonical;
 mod config;
 mod db;
 mod error;
+mod held_token;
 pub mod identity;
 mod jev;
 pub mod ledger;
