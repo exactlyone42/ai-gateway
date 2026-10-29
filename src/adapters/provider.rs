@@ -261,7 +261,7 @@ fn prepare_request(
             HeaderValue::from_static("2023-06-01"),
         );
     }
-    if profile.uses_client_bearer() {
+    if profile.uses_subscription_headers() {
         headers.insert(
             HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
             HeaderValue::from_static("true"),
@@ -293,7 +293,15 @@ fn prepare_request(
         headers.insert(HeaderName::from_static("idempotency-key"), value);
     }
     logging::inject_context(&mut headers);
-    if profile.uses_client_bearer() {
+    if profile.is_held_bearer() {
+        let token = profile
+            .held_token()
+            .ok_or(GatewayError::ProviderUnavailable)?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        value.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, value);
+    } else if profile.uses_client_bearer() {
         if !headers.contains_key(header::AUTHORIZATION) {
             return Err(GatewayError::Unauthorized);
         }
@@ -1335,6 +1343,61 @@ mod tests {
         assert_eq!(
             prepared.headers().get("anthropic-beta").unwrap(),
             "claude-code-20250219,oauth-2025-04-20"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_token_replaces_the_gateway_key_and_follows_updates() {
+        let adapter = for_kind(ProviderKind::Anthropic).unwrap();
+        let path = std::env::temp_dir().join(format!("held-provider-{}", std::process::id()));
+        let held = crate::held_token::HeldToken::load(path, None).unwrap();
+        let profile = ProviderProfile::held_bearer(
+            "env://ANTHROPIC_SUBSCRIPTION_TOKEN_FILE",
+            "anthropic-subscription",
+            "https://example.test",
+            vec![GatewayOperation::AnthropicMessages],
+            vec![Uuid::nil()],
+            held.clone(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer aigw_gateway_key".parse().unwrap());
+        let send = |profile: &ProviderProfile| {
+            let input = ProviderRequestInput {
+                source_path_and_query: "/v1/messages",
+                client_headers: &headers,
+                idempotency_key: None,
+            };
+            let plan = adapter
+                .plan_for_target(
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicMessages,
+                    "provider-model",
+                    false,
+                    &input,
+                )
+                .unwrap();
+            adapter.send(plan, Bytes::from_static(b"{}"), profile, input)
+        };
+
+        assert!(matches!(
+            send(&profile),
+            Err(crate::error::GatewayError::ProviderUnavailable)
+        ));
+        held.replace("sk-ant-oat01-one").await.unwrap();
+        let first = send(&profile).unwrap();
+        assert_eq!(
+            first.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-one"
+        );
+        assert_eq!(
+            first.headers().get("anthropic-beta").unwrap(),
+            "oauth-2025-04-20"
+        );
+        held.replace("sk-ant-oat01-two").await.unwrap();
+        let second = send(&profile).unwrap();
+        assert_eq!(
+            second.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-two"
         );
     }
 
