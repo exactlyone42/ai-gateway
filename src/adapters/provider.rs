@@ -4,18 +4,14 @@ use axum::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::canonical::prelude::*;
+use crate::prelude::*;
 use crate::{
-    adapters::ProviderRequestInput,
-    adapters::gemini_wire,
-    canonical::{
-        CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalToolArguments,
-        CanonicalToolChoice, CanonicalUsage,
-    },
-    error::GatewayError,
+    adapters::{ProviderRequestInput, gemini_wire},
+    canonical::{CanonicalToolArguments, CanonicalToolChoice, CanonicalUsage},
     logging,
     model_registry::{
-        CanonicalOperation, GatewayOperation, ProviderDialect, ProviderKind, ProviderProfile,
-        rewrite_model,
+        CanonicalOperation, ProviderDialect, ProviderKind, ProviderProfile, rewrite_model,
     },
     quota::cost_for_usage,
 };

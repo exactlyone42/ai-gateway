@@ -3,15 +3,12 @@ use std::collections::HashSet;
 use axum::body::Bytes;
 use serde_json::{Map, Value, json};
 
-use crate::{
-    canonical::{
-        CanonicalContent, CanonicalMessage, CanonicalRequest, CanonicalResponse, CanonicalRole,
-        CanonicalStructuredOutputKind, CanonicalToolArguments, CanonicalToolCall,
-        CanonicalToolChoice, CanonicalUsage, ProviderOptions,
-    },
-    error::GatewayError,
-    model_registry::GatewayOperation,
+use crate::canonical::prelude::*;
+use crate::canonical::{
+    CanonicalMessage, CanonicalResponse, CanonicalStructuredOutputKind, CanonicalToolArguments,
+    CanonicalToolCall, CanonicalToolChoice, CanonicalUsage, ProviderOptions,
 };
+use crate::prelude::*;
 
 #[cfg(test)]
 pub fn transcode_buffered(

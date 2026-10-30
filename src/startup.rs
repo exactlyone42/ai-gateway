@@ -5,7 +5,8 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{config::Config, db, logging, metrics, routes, state::AppState};
+use crate::prelude::*;
+use crate::{config::Config, db, logging, metrics, routes};
 
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.

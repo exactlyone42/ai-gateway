@@ -6,7 +6,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::{error::GatewayError, model_registry::ModelSelection};
+use crate::model_registry::ModelSelection;
+use crate::prelude::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingConfig {

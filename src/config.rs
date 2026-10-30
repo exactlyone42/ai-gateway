@@ -10,7 +10,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::ledger::MIN_ENTRY_MAX_BYTES;
-use crate::model_registry::{GatewayOperation, ProviderKind};
+use crate::model_registry::ProviderKind;
+use crate::prelude::*;
 use crate::routing::RoutingConfig;
 use crate::scheduler::SchedulerConfig;
 

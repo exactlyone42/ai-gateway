@@ -1,13 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    canonical::{
-        CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalStructuredOutputKind,
-        CanonicalUsage,
-    },
-    error::GatewayError,
-};
+use crate::canonical::prelude::*;
+use crate::canonical::{CanonicalStructuredOutputKind, CanonicalUsage};
+use crate::prelude::*;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fmt};
 
+use crate::ledger::prelude::*;
+use crate::prelude::*;
 use axum::body::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
-
-use crate::{identity::PrincipalContext, ledger::TokenUsage, model_registry::GatewayOperation};
 
 pub type ProviderOptions = BTreeMap<String, Value>;
 
@@ -534,6 +534,10 @@ impl CanonicalRequest {
     pub(crate) fn source_document(&self) -> &Value {
         &self.native.document
     }
+}
+
+pub(crate) mod prelude {
+    pub(crate) use super::{CanonicalContent, CanonicalRequest, CanonicalRole};
 }
 
 #[cfg(test)]

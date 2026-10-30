@@ -18,8 +18,8 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::prelude::*;
 use crate::{
-    identity::PrincipalContext,
     quota::{cost_for_usage, total_tokens},
     routing::RoutingLease,
     scheduler::SchedulerLease,
@@ -1592,6 +1592,10 @@ fn nonempty_bounded(value: String) -> String {
 
 fn to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+pub(crate) mod prelude {
+    pub(crate) use super::{RequestCompletion, TokenUsage};
 }
 
 #[cfg(test)]

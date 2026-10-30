@@ -3,13 +3,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use axum::body::Bytes;
 use serde_json::{Value, json};
 
+use crate::canonical::prelude::*;
+use crate::prelude::*;
 use crate::{
     adapters::response::openai_response_envelope,
     canonical::{
-        CanonicalContent, CanonicalError, CanonicalRequest, CanonicalRole, CanonicalStreamEvent,
-        CanonicalToolArguments, CanonicalToolCall, CanonicalUsage, ProviderOptions,
+        CanonicalError, CanonicalStreamEvent, CanonicalToolArguments, CanonicalToolCall,
+        CanonicalUsage, ProviderOptions,
     },
-    model_registry::{GatewayOperation, ProviderKind},
+    model_registry::ProviderKind,
     services::streaming::{ProtocolError, StreamEncoder, StreamObserver, event_data},
 };
 

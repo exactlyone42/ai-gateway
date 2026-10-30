@@ -7,13 +7,11 @@ use axum::{
     response::Response,
 };
 
+use crate::prelude::*;
 use crate::{
-    error::GatewayError,
-    identity::PrincipalContext,
     middleware::RequestReceivedAt,
     routes::{BodyBytes, StreamingResponse, body_bytes},
     services::openai::{self, Operation, RequestContext},
-    state::AppState,
 };
 
 pub async fn handle(

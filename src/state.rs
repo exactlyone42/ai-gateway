@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use std::{sync::Arc, time::Duration};
 
+use crate::prelude::*;
 use crate::{
     admin::{AdminService, AdminServiceConfig},
     config::Config,
@@ -11,8 +12,8 @@ use crate::{
     lifecycle::ProcessLifecycle,
     metrics::Instruments,
     model_registry::{
-        GatewayOperation, ModelRegistry, ProviderDialect, ProviderKind, ProviderProfile,
-        ProviderProfiles, RegistryError,
+        ModelRegistry, ProviderDialect, ProviderKind, ProviderProfile, ProviderProfiles,
+        RegistryError,
     },
     policy::PolicyEngine,
     quota::QuotaEngine,

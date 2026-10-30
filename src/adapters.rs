@@ -8,13 +8,11 @@ use axum::http::{HeaderMap, HeaderValue};
 
 use serde_json::Value;
 
+use crate::canonical::prelude::*;
+use crate::prelude::*;
 use crate::{
-    canonical::{
-        CanonicalContent, CanonicalRequest, CanonicalRole, CanonicalStructuredOutputKind,
-        CanonicalToolArguments, ProviderOptions,
-    },
-    error::GatewayError,
-    model_registry::{GatewayOperation, ModelSelection, ProviderDialect, ProviderProfile},
+    canonical::{CanonicalStructuredOutputKind, CanonicalToolArguments, ProviderOptions},
+    model_registry::{ModelSelection, ProviderDialect, ProviderProfile},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

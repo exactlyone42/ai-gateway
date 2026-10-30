@@ -15,6 +15,7 @@ mod metrics;
 mod middleware;
 mod model_registry;
 mod policy;
+mod prelude;
 mod quota;
 mod routes;
 mod routing;

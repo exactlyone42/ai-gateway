@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
+use crate::prelude::*;
 use crate::{
-    model_registry::GatewayOperation,
     policy::validate_document as validate_policy_document,
     quota::{ADMISSION_LOCK_NAMESPACE, validate_document as validate_quota_document},
 };

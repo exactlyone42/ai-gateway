@@ -5,9 +5,10 @@ use chrono::Utc;
 use futures_util::StreamExt as _;
 use thiserror::Error;
 
+use crate::ledger::prelude::*;
 use crate::{
     canonical::CanonicalStreamEvent,
-    ledger::{ProviderAttempt, RequestCompletion, Reservation},
+    ledger::{ProviderAttempt, Reservation},
 };
 
 const DEFAULT_EVENT_MAX_BYTES: usize = 32 * 1024 * 1024;

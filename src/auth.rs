@@ -1,11 +1,8 @@
 use axum::http::{HeaderMap, header};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    error::GatewayError,
-    identity::{IdentityError, PrincipalContext},
-    state::AppState,
-};
+use crate::identity::IdentityError;
+use crate::prelude::*;
 
 /// Resolves a development bootstrap key or a tenant-scoped database credential.
 ///

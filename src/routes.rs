@@ -21,10 +21,8 @@ use tower_http::{
     set_header::SetResponseHeaderLayer,
 };
 
-use crate::{
-    middleware::{REQUEST_ID_HEADER, access_log, process_gate, require_client_key},
-    state::AppState,
-};
+use crate::middleware::{REQUEST_ID_HEADER, access_log, process_gate, require_client_key};
+use crate::prelude::*;
 
 /// The route table: which endpoints exist, which of them need a client key,
 /// and the layers every request crosses.

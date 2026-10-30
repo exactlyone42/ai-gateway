@@ -10,19 +10,20 @@ use hmac::{Hmac, Mac as _};
 use serde_json::Value;
 use sha2::Sha256;
 
+use crate::canonical::prelude::*;
+use crate::ledger::prelude::*;
+use crate::prelude::*;
 use crate::{
     adapters::{
         ProviderRequestInput, ValidatedTranslationPlan, prepare_for_provider, protocol, provider,
         response,
         stream::{CrossStreamEncoder, CrossStreamObserver},
     },
-    canonical::{CanonicalRequest, CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
-    error::GatewayError,
-    identity::PrincipalContext,
-    ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
+    canonical::{CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
+    ledger::{ProviderAttempt, RequestStart},
     logging,
     middleware::REQUEST_ID_HEADER,
-    model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, ProviderKind},
+    model_registry::{CapabilityRequirements, ModelSelector, ProviderKind},
     policy::value_text,
     quota::QuotaAdmission,
     services::{
@@ -30,7 +31,6 @@ use crate::{
         request_quota,
         streaming::{ProtocolError, StreamObserver, event_data, relay, relay_transcoded},
     },
-    state::AppState,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]

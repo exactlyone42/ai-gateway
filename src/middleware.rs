@@ -52,15 +52,10 @@ use futures_util::Stream;
 use tracing::Instrument as _;
 use tracing_opentelemetry::{OpenTelemetrySpanExt as _, SetParentError};
 
+use crate::prelude::*;
 use crate::{
-    auth,
-    error::{ErrorType, GatewayError},
-    identity::PrincipalContext,
-    lifecycle::ActiveRequest,
-    logging,
-    metrics::RequestScope,
+    auth, error::ErrorType, lifecycle::ActiveRequest, logging, metrics::RequestScope,
     routes::StreamingResponse,
-    state::AppState,
 };
 
 /// Turns a request away before it reaches any handler unless it carries a

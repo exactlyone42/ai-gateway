@@ -3,15 +3,16 @@ use std::collections::BTreeMap;
 use axum::body::Bytes;
 use serde_json::{Map, Value};
 
+use crate::canonical::prelude::*;
+use crate::prelude::*;
 use crate::{
     canonical::{
-        CanonicalContent, CanonicalMessage, CanonicalReasoning, CanonicalRequest,
-        CanonicalRequestPayload, CanonicalRole, CanonicalStructuredOutput,
+        CanonicalMessage, CanonicalReasoning, CanonicalRequestPayload, CanonicalStructuredOutput,
         CanonicalStructuredOutputKind, CanonicalToolArguments, CanonicalToolCall,
         CanonicalToolChoice, CanonicalToolDefinition, NativeWire, ProviderOptions,
         RequestEnrichment,
     },
-    model_registry::{GatewayOperation, parse_request},
+    model_registry::parse_request,
 };
 
 pub struct DecodedProtocolRequest {

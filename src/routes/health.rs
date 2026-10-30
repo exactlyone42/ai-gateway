@@ -3,7 +3,8 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 
-use crate::{db, state::AppState};
+use crate::db;
+use crate::prelude::*;
 
 /// `GET /health` -- liveness. The process is running and can answer.
 ///
