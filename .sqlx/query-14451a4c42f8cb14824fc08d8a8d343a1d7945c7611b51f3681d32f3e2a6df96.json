@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE quotas SET configuration = $1 WHERE id = '00000000-0000-0000-0000-000000002001'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14451a4c42f8cb14824fc08d8a8d343a1d7945c7611b51f3681d32f3e2a6df96"
+}

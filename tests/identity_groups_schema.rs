@@ -62,6 +62,27 @@ async fn email_is_optional_and_unique_per_tenant_ignoring_case(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn duplicate_email_check_detects_a_missing_unique_index(pool: PgPool) {
+    user(&pool, 1, TENANT_A, Some("Cash@Example.com"))
+        .await
+        .unwrap();
+    assert!(
+        user(&pool, 2, TENANT_A, Some("cash@example.com"))
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(include_str!("drop_email_uniqueness.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        user(&pool, 2, TENANT_A, Some("cash@example.com"))
+            .await
+            .is_ok()
+    );
+}
+
+#[sqlx::test]
 async fn group_members_stay_inside_one_tenant_and_are_unique(pool: PgPool) {
     user(&pool, 1, TENANT_A, None).await.unwrap();
     user(&pool, 2, TENANT_B, None).await.unwrap();
@@ -85,6 +106,18 @@ async fn group_members_stay_inside_one_tenant_and_are_unique(pool: PgPool) {
         member(&pool, TENANT_B, 10, 2).await.is_err(),
         "a group from another tenant accepted a member"
     );
+}
+
+#[sqlx::test]
+async fn cross_tenant_member_check_detects_missing_foreign_key(pool: PgPool) {
+    user(&pool, 2, TENANT_B, None).await.unwrap();
+    group(&pool, 10, TENANT_A, "team").await.unwrap();
+    assert!(member(&pool, TENANT_A, 10, 2).await.is_err());
+    sqlx::raw_sql(include_str!("drop_group_member_user_fk.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(member(&pool, TENANT_A, 10, 2).await.is_ok());
 }
 
 #[sqlx::test]

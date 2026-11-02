@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use chrono::{DateTime, Datelike as _, Duration, TimeZone as _, Timelike as _, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{FromRow, PgPool, Postgres, pool::PoolConnection};
+use sqlx::{Connection as _, FromRow, PgPool, Postgres, pool::PoolConnection};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -226,7 +226,8 @@ impl QuotaEngine {
 
     pub async fn acquire_single_instance_guard(&self) -> Result<(), QuotaError> {
         let mut guard = self.singleton_guard.lock().await;
-        if guard.is_some() {
+        if let Some(connection) = guard.as_mut() {
+            connection.ping().await?;
             return Ok(());
         }
         let mut connection = self.pool.acquire().await?;
@@ -239,6 +240,29 @@ impl QuotaEngine {
         }
         *guard = Some(connection);
         Ok(())
+    }
+
+    pub async fn verify_single_instance_guard(&self) -> Result<(), QuotaError> {
+        let mut guard = self.singleton_guard.lock().await;
+        let connection = guard.as_mut().ok_or(QuotaError::MultipleInstances)?;
+        connection.ping().await?;
+        Ok(())
+    }
+
+    pub async fn wait_for_single_instance_guard_loss(&self) {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if !matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    self.verify_single_instance_guard()
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+        }
     }
 
     #[tracing::instrument(name = "quota.admit", skip_all)]
@@ -295,17 +319,20 @@ impl QuotaEngine {
             .iter()
             .map(|value| value.provider_id)
             .collect::<Vec<_>>();
-        let rows = sqlx::query_as::<_, QuotaRow>(ACTIVE_QUOTAS_SQL)
-            .bind(principal.tenant_id)
-            .bind(principal.user_id)
-            .bind(principal.device_id)
-            .bind(principal.client_id)
-            .bind(principal.agent_id)
-            .bind(principal.credential_id)
-            .bind(&model_ids)
-            .bind(&provider_ids)
-            .fetch_all(&mut *transaction)
-            .await?;
+        let rows = sqlx::query_file_as!(
+            QuotaRow,
+            "queries/quota/active.sql",
+            principal.tenant_id,
+            principal.user_id,
+            principal.device_id,
+            principal.client_id,
+            principal.agent_id,
+            principal.credential_id,
+            &model_ids,
+            &provider_ids
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
         let quotas = rows
             .into_iter()
             .map(|row| {
@@ -829,28 +856,6 @@ fn to_i64(value: u64) -> Result<i64, QuotaError> {
     i64::try_from(value).map_err(|_| QuotaError::InvalidDocument)
 }
 
-const ACTIVE_QUOTAS_SQL: &str = r#"
-    WITH requested_credential AS (
-        SELECT COALESCE(rotation_root_id, id) AS root_id
-        FROM credentials
-        WHERE tenant_id = $1 AND id = $6
-    )
-    SELECT q.id, q.quota_key, q.revision, q.model_id, q.provider_id, q.configuration
-    FROM quotas q
-    LEFT JOIN credentials target_credential
-      ON (target_credential.tenant_id, target_credential.id) = (q.tenant_id, q.credential_id)
-    WHERE q.tenant_id = $1 AND q.lifecycle_state = 'active' AND (
-        (q.user_id IS NULL AND q.device_id IS NULL AND q.client_id IS NULL
-         AND q.agent_id IS NULL AND q.credential_id IS NULL
-         AND q.model_id IS NULL AND q.provider_id IS NULL)
-        OR q.user_id = $2 OR q.device_id = $3 OR q.client_id = $4 OR q.agent_id = $5
-        OR COALESCE(target_credential.rotation_root_id, target_credential.id)
-             = (SELECT root_id FROM requested_credential)
-        OR q.model_id = ANY($7) OR q.provider_id = ANY($8)
-    )
-    ORDER BY q.id
-"#;
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1020,6 +1025,105 @@ mod tests {
             snapshot.decision["violations"][0]["limit_kind"],
             "requests_per_minute"
         );
+    }
+
+    #[sqlx::test]
+    async fn personal_quota_replaces_matching_group_limit_during_admission(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../tests/group_quota_limits_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tenant = Uuid::from_u128(0x100);
+        let mut identity = principal(tenant);
+        identity.user_id = Some(Uuid::from_u128(1));
+        let engine = QuotaEngine::new(pool.clone());
+        let estimate = QuotaEstimate {
+            input_upper_bound: 10,
+            requested_output_tokens: Some(10),
+            output_multiplier: 1,
+            billable: true,
+            unbounded_input: false,
+            requires_extended_pricing: false,
+            unsupported_cost_features: false,
+        };
+        let candidate = selection(tenant, "direct-model", Uuid::new_v4(), Uuid::new_v4());
+        let first = engine
+            .admit(
+                Uuid::new_v4(),
+                &identity,
+                vec![candidate.clone()],
+                estimate,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            QuotaOutcome::Rejected(_, QuotaRejection::HardLimit)
+        ));
+        sqlx::raw_sql(include_str!("../tests/group_quota_personal_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query_file!("tests/group_quota_second_limit.sql", 0_i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let other_group = engine
+            .admit(
+                Uuid::new_v4(),
+                &identity,
+                vec![candidate.clone()],
+                estimate,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            other_group,
+            QuotaOutcome::Rejected(_, QuotaRejection::HardLimit)
+        ));
+        sqlx::query_file!("tests/group_quota_second_limit.sql", 100_i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query_file!("tests/personal_quota_key.sql", "different")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mismatched = engine
+            .admit(
+                Uuid::new_v4(),
+                &identity,
+                vec![candidate.clone()],
+                estimate,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            mismatched,
+            QuotaOutcome::Rejected(_, QuotaRejection::HardLimit)
+        ));
+        sqlx::query_file!("tests/personal_quota_key.sql", "first")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second = engine
+            .admit(
+                Uuid::new_v4(),
+                &identity,
+                vec![candidate],
+                estimate,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(second, QuotaOutcome::Allowed(_)));
     }
 
     #[sqlx::test]
@@ -1396,6 +1500,42 @@ mod tests {
             second.acquire_single_instance_guard().await,
             Err(QuotaError::MultipleInstances)
         ));
+    }
+
+    #[sqlx::test]
+    async fn lost_single_instance_connection_permits_another_owner(pool: PgPool) {
+        let first = QuotaEngine::new(pool.clone());
+        let second = QuotaEngine::new(pool.clone());
+        first.acquire_single_instance_guard().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1100),
+                first.wait_for_single_instance_guard_loss()
+            )
+            .await
+            .is_err()
+        );
+        let backend: i32 = {
+            let mut guard = first.singleton_guard.lock().await;
+            sqlx::query_file_scalar!("tests/current_backend_pid.sql")
+                .fetch_one(&mut **guard.as_mut().unwrap())
+                .await
+                .unwrap()
+        };
+        let terminated: bool =
+            sqlx::query_file_scalar!("tests/terminate_lock_connection.sql", backend)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(terminated);
+        second.acquire_single_instance_guard().await.unwrap();
+        assert!(first.verify_single_instance_guard().await.is_err());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            first.wait_for_single_instance_guard_loss(),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]

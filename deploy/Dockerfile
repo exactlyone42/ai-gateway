@@ -11,6 +11,8 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY queries ./queries
+COPY .sqlx ./.sqlx
 # The migration runner reads this directory at compile time, so it has to be
 # present in the build context even while it is empty.
 COPY migrations ./migrations

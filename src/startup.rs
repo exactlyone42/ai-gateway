@@ -1,4 +1,12 @@
-use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use axum_server::Handle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
@@ -48,7 +56,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     info!(%address, "agent pool gateway started");
-    serve_with_shutdown(listener, Arc::clone(&state), shutdown_signal()).await?;
+    let quota_guard = state.quotas.clone();
+    let guard_lost = Arc::new(AtomicBool::new(false));
+    let shutdown_guard_lost = Arc::clone(&guard_lost);
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = quota_guard.wait_for_single_instance_guard_loss() => {
+                shutdown_guard_lost.store(true, Ordering::Release);
+                tracing::error!(error.type = "single_instance_guard_lost", "single instance guard is unavailable");
+            }
+        }
+    };
+    serve_with_shutdown(listener, Arc::clone(&state), shutdown).await?;
     model_sync.abort();
 
     report_flush_bounded("spans", state.config.shutdown_finalize_timeout, move || {
@@ -61,6 +81,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         move || meters.map_or(Ok(()), |provider| provider.shutdown()),
     )
     .await;
+    if guard_lost.load(Ordering::Acquire) {
+        return Err("single instance guard lost".into());
+    }
     Ok(())
 }
 

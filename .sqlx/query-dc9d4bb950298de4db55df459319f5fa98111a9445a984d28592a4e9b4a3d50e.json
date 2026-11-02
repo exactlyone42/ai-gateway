@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE policies current SET lifecycle_state = 'disabled',\n                    version = current.version + 1, updated_at = now()\n                FROM policies target\n                WHERE target.tenant_id = $1 AND target.id = $2\n                  AND current.tenant_id = target.tenant_id\n                  AND current.id <> target.id AND current.lifecycle_state = 'active'\n                  AND current.group_id IS NOT DISTINCT FROM target.group_id\n                  AND current.user_id IS NOT DISTINCT FROM target.user_id\n                  AND current.device_id IS NOT DISTINCT FROM target.device_id\n                  AND current.client_id IS NOT DISTINCT FROM target.client_id\n                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id\n                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dc9d4bb950298de4db55df459319f5fa98111a9445a984d28592a4e9b4a3d50e"
+}

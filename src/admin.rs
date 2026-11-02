@@ -22,10 +22,12 @@ use crate::policy::PolicyEngine;
 use crate::scheduler::Scheduler;
 
 mod accounts;
+mod groups;
 mod incidents;
 mod reports;
 mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
+pub use groups::GroupCreate;
 pub use incidents::{IncidentCreate, IncidentEventCreate, IncidentListQuery, IncidentPatch};
 pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, UsageQuery};
 pub use resources::{
@@ -85,6 +87,36 @@ const WRITERS: &[AdminRole] = &[AdminRole::Admin, AdminRole::Operator];
 const ADMINS: &[AdminRole] = &[AdminRole::Admin];
 
 pub const RBAC_RULES: &[RbacRule] = &[
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/groups",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "POST",
+        route: "/admin/v1/groups",
+        action: AdminAction::MutateResource,
+        roles: WRITERS,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/groups/{group}/members",
+        action: AdminAction::ReadResource,
+        roles: ALL_ROLES,
+    },
+    RbacRule {
+        method: "POST",
+        route: "/admin/v1/groups/{group}/members/{user}",
+        action: AdminAction::MutateResource,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "DELETE",
+        route: "/admin/v1/groups/{group}/members/{user}",
+        action: AdminAction::MutateResource,
+        roles: ADMINS,
+    },
     RbacRule {
         method: "DELETE",
         route: "/admin/v1/session",
@@ -955,6 +987,31 @@ mod tests {
             assert!(authorize(method, route, AdminRole::Operator).is_some());
             assert!(authorize(method, route, AdminRole::Viewer).is_none());
         }
+    }
+
+    #[test]
+    fn group_routes_enforce_role_permissions() {
+        let groups = "/admin/v1/groups";
+        let members = "/admin/v1/groups/{group}/members";
+        let member = "/admin/v1/groups/{group}/members/{user}";
+        for role in [AdminRole::Admin, AdminRole::Operator, AdminRole::Viewer] {
+            assert!(authorize("GET", groups, role).is_some());
+            assert!(authorize("GET", members, role).is_some());
+            assert_eq!(
+                authorize("POST", groups, role).is_some(),
+                role != AdminRole::Viewer
+            );
+            assert_eq!(
+                authorize("POST", member, role).is_some(),
+                role == AdminRole::Admin
+            );
+            assert_eq!(
+                authorize("DELETE", member, role).is_some(),
+                role == AdminRole::Admin
+            );
+        }
+        assert!(authorize("PUT", member, AdminRole::Admin).is_none());
+        assert!(authorize("POST", "/admin/v1/groups/{group}/unknown", AdminRole::Admin).is_none());
     }
 
     fn service(pool: PgPool, tenant_id: Uuid) -> AdminService {

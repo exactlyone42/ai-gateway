@@ -268,63 +268,37 @@ impl PolicyEngine {
             return Err(PolicyError::InvalidTenant);
         }
         let cache_key = PolicyCacheKey::from(principal);
-        if let Some(rows) = self.cache_lock()?.get(&cache_key) {
-            return evaluate_layers(rows, hints, received_at);
-        }
-        let rows = sqlx::query_as::<_, PolicyRow>(
-            r#"
-            WITH requested_credential AS (
-                SELECT id, COALESCE(rotation_root_id, id) AS rotation_root_id
-                FROM credentials WHERE tenant_id = $1 AND id = $6
-            )
-            SELECT policies.id, policies.policy_key, policies.revision, policies.configuration,
-                   CASE
-                     WHEN policies.credential_id IS NOT NULL THEN 'credential'
-                     WHEN policies.agent_id IS NOT NULL THEN 'agent'
-                     WHEN policies.client_id IS NOT NULL THEN 'client'
-                     WHEN policies.device_id IS NOT NULL THEN 'device'
-                     WHEN policies.user_id IS NOT NULL THEN 'user'
-                     ELSE 'global'
-                   END AS scope
-            FROM policies
-            LEFT JOIN credentials target_credential
-              ON target_credential.tenant_id = policies.tenant_id
-             AND target_credential.id = policies.credential_id
-            WHERE policies.tenant_id = $1 AND lifecycle_state = 'active'
-              AND (
-                (policies.user_id IS NULL AND policies.device_id IS NULL
-                 AND policies.client_id IS NULL AND policies.agent_id IS NULL
-                 AND policies.credential_id IS NULL)
-                OR policies.user_id = $2 OR policies.device_id = $3
-                OR policies.client_id = $4 OR policies.agent_id = $5
-                OR COALESCE(target_credential.rotation_root_id, target_credential.id) =
-                   (SELECT rotation_root_id FROM requested_credential)
-              )
-            ORDER BY CASE
-                WHEN policies.user_id IS NOT NULL THEN 1
-                WHEN policies.device_id IS NOT NULL THEN 2
-                WHEN policies.client_id IS NOT NULL THEN 3
-                WHEN policies.agent_id IS NOT NULL THEN 4
-                WHEN policies.credential_id IS NOT NULL THEN 5
-                ELSE 0
-              END
-            "#,
+        let generation = {
+            let mut cache = self.cache_lock()?;
+            if principal.user_id.is_none()
+                && let Some(rows) = cache.get(&cache_key)
+            {
+                return evaluate_layers(rows, hints, received_at);
+            }
+            cache.generation
+        };
+        let rows = sqlx::query_file_as!(
+            PolicyRow,
+            "queries/policy/evaluate.sql",
+            principal.tenant_id,
+            principal.user_id,
+            principal.device_id,
+            principal.client_id,
+            principal.agent_id,
+            principal.credential_id
         )
-        .bind(principal.tenant_id)
-        .bind(principal.user_id)
-        .bind(principal.device_id)
-        .bind(principal.client_id)
-        .bind(principal.agent_id)
-        .bind(principal.credential_id)
         .fetch_all(&self.pool)
         .await?;
-        self.cache_lock()?.insert(
-            cache_key,
-            rows.clone(),
-            Instant::now()
-                .checked_add(self.cache_ttl)
-                .ok_or(PolicyError::CacheUnavailable)?,
-        );
+        if principal.user_id.is_none() {
+            self.cache_lock()?.insert_if_current(
+                generation,
+                cache_key,
+                rows.clone(),
+                Instant::now()
+                    .checked_add(self.cache_ttl)
+                    .ok_or(PolicyError::CacheUnavailable)?,
+            );
+        }
         evaluate_layers(rows, hints, received_at)
     }
 
@@ -372,6 +346,7 @@ struct CachedPolicies {
 
 struct PolicyCache {
     capacity: usize,
+    generation: Uuid,
     entries: HashMap<PolicyCacheKey, CachedPolicies>,
     order: VecDeque<PolicyCacheKey>,
 }
@@ -380,6 +355,7 @@ impl PolicyCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
+            generation: Uuid::new_v4(),
             entries: HashMap::new(),
             order: VecDeque::new(),
         }
@@ -412,7 +388,20 @@ impl PolicyCache {
         }
     }
 
+    fn insert_if_current(
+        &mut self,
+        generation: Uuid,
+        key: PolicyCacheKey,
+        rows: Vec<PolicyRow>,
+        valid_until: Instant,
+    ) {
+        if self.generation == generation {
+            self.insert(key, rows, valid_until);
+        }
+    }
+
     fn clear_tenant(&mut self, tenant_id: Uuid) {
+        self.generation = Uuid::new_v4();
         self.entries.retain(|key, _| key.tenant_id != tenant_id);
         self.order.retain(|key| key.tenant_id != tenant_id);
     }
@@ -706,6 +695,32 @@ mod tests {
     }
 
     #[test]
+    fn invalidation_prevents_inflight_lookup_from_repopulating_stale_policy() {
+        let tenant_id = Uuid::new_v4();
+        let key = PolicyCacheKey {
+            tenant_id,
+            user_id: Some(Uuid::new_v4()),
+            device_id: None,
+            client_id: None,
+            agent_id: None,
+            credential_id: Uuid::new_v4(),
+        };
+        let mut cache = PolicyCache::new(2);
+        let generation = cache.generation;
+        cache.clear_tenant(tenant_id);
+        let expiry = Instant::now() + StdDuration::from_secs(60);
+        cache.insert_if_current(
+            generation,
+            key.clone(),
+            vec![row("group", 1, json!({}))],
+            expiry,
+        );
+        assert!(cache.get(&key).is_none());
+        cache.insert(key.clone(), vec![row("group", 1, json!({}))], expiry);
+        assert!(cache.get(&key).is_some());
+    }
+
+    #[test]
     fn every_layer_overrides_defaults_in_declared_order() {
         let rows = [
             ("global", "batch"),
@@ -734,6 +749,31 @@ mod tests {
                 .len(),
             6
         );
+    }
+
+    #[test]
+    fn personal_defaults_override_group_defaults_without_relaxing_group_ceiling() {
+        let group = row(
+            "group",
+            1,
+            json!({"defaults":{"workload_class":"batch"},"constraints":{"max_quality":"standard"}}),
+        );
+        let user = row(
+            "user",
+            2,
+            json!({"defaults":{"workload_class":"critical","quality":"premium"}}),
+        );
+        let result = evaluate_layers(
+            vec![group.clone(), user.clone()],
+            RequestHints::default(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.workload_class, WorkloadClass::Critical);
+        assert_eq!(result.quality, PolicyQuality::Standard);
+        let reversed =
+            evaluate_layers(vec![user, group], RequestHints::default(), Utc::now()).unwrap();
+        assert_eq!(reversed.workload_class, WorkloadClass::Batch);
     }
 
     #[test]
@@ -1033,6 +1073,73 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn group_deny_survives_personal_policy_and_cache_invalidation(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../tests/group_policy_deny_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tenant = Uuid::from_u128(0x100);
+        let principal = PrincipalContext {
+            tenant_id: tenant,
+            credential_id: Uuid::new_v4(),
+            credential_name: "test".to_owned(),
+            user_id: Some(Uuid::from_u128(1)),
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        };
+        let engine = PolicyEngine::with_cache(pool.clone(), 8, StdDuration::from_secs(60));
+        let selector = ModelSelector::parse("company-default").unwrap();
+        let first = engine
+            .evaluate(&principal, &HeaderMap::new(), &selector, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            first.decision["applied_policies"].as_array().unwrap().len(),
+            2
+        );
+        assert!(first.denied);
+        sqlx::raw_sql(include_str!("../tests/group_selection_user_override.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale = engine
+            .evaluate(&principal, &HeaderMap::new(), &selector, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            stale.decision["applied_policies"].as_array().unwrap().len(),
+            3
+        );
+        assert!(stale.denied);
+        engine.clear_tenant_cache(tenant);
+        let refreshed = engine
+            .evaluate(&principal, &HeaderMap::new(), &selector, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            refreshed.decision["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(refreshed.denied);
+        assert_eq!(
+            refreshed.decision["applied_policies"][2]["policy_key"],
+            "personal"
+        );
+    }
+
+    #[sqlx::test]
     async fn rotated_credentials_keep_the_family_policy_and_cache_is_bounded(pool: PgPool) {
         let tenant = Uuid::new_v4();
         let user = Uuid::new_v4();
@@ -1099,16 +1206,30 @@ mod tests {
             .unwrap();
         assert_eq!(result.quality, PolicyQuality::Economy);
 
+        let mut without_user = principal.clone();
+        without_user.user_id = None;
+        let cached_before = engine
+            .evaluate(&without_user, &HeaderMap::new(), &selector, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(cached_before.quality, PolicyQuality::Economy);
+
         pool.close().await;
         let cached = engine
-            .evaluate(&principal, &HeaderMap::new(), &selector, Utc::now())
+            .evaluate(&without_user, &HeaderMap::new(), &selector, Utc::now())
             .await
             .unwrap();
         assert_eq!(cached.quality, PolicyQuality::Economy);
-        engine.clear_tenant_cache(tenant);
         assert!(matches!(
             engine
                 .evaluate(&principal, &HeaderMap::new(), &selector, Utc::now())
+                .await,
+            Err(PolicyError::Database(_))
+        ));
+        engine.clear_tenant_cache(tenant);
+        assert!(matches!(
+            engine
+                .evaluate(&without_user, &HeaderMap::new(), &selector, Utc::now())
                 .await,
             Err(PolicyError::Database(_))
         ));

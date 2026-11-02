@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE credentials SET status = 'disabled' WHERE tenant_id = $1 AND id = $2\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34a7db4325866ab050458f1afc529a922f9585b4089bd97d203e8bcfcd759f3b"
+}
