@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "task": "codex-held-auth",
+  "project": "/home/cash/work_space/private/agent-pool-gateway-codex",
+  "steps": {
+    "runtime-auth": {
+      "kind": "feature",
+      "environment": "production",
+      "artifact": {
+        "path": "/home/cash/work_space/private/agent-pool-gateway-codex/.artifacts/codex-held-auth-delivery/gateway",
+        "sha256": "107825fc8636e3500bdeed094cfce81fd31e29508f1e17f06b787f7ba7ad41a8"
+      },
+      "validation": {
+        "path": "/home/cash/work_space/private/agent-pool-gateway-codex/.artifacts/codex-held-auth-delivery/validation.json",
+        "sha256": "fd1336ba34e4b813917dcc7624b070772300d6e00c48368f4e5f9225f67e8242"
+      },
+      "deploy": {
+        "path": "/home/cash/work_space/private/agent-pool-gateway-codex/.artifacts/codex-held-auth-delivery/deploy.py",
+        "sha256": "8a109a5b23d5860acd0acfdfae1fd26e4a9de29b9ece04505f9fb917c2169cc0"
+      },
+      "readback": {
+        "path": "/home/cash/work_space/private/agent-pool-gateway-codex/.artifacts/codex-held-auth-delivery/readback.py",
+        "sha256": "0f7793a4be32a784b50705f9571f1ed3a06465b65d1fe9bea1c590e2b432eef5"
+      },
+      "timeout_seconds": 120,
+      "authorization": {
+        "path": "/home/cash/work_space/private/agent-pool-gateway-codex/.artifacts/codex-held-auth-delivery/authorization.json",
+        "sha256": "7b7b31a7ec0e148b7867562ba0eb66b7244e9f09b078fa17062b552516fc6e8a"
+      }
+    }
+  }
+}

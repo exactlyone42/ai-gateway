@@ -268,6 +268,15 @@ class DeploymentTests(unittest.TestCase):
                 self.assertNotIn('kill', value)
                 self.assertNotIn('rm', value)
 
+    def test_created_resources_have_expiry_labels(self):
+        deploy_gateway.deploy(self.args)
+        commands = [value for kind, value in self.events if kind == 'run']
+        created = [command for command in commands if command[:2] in [['docker', 'create'], ['docker', 'run']] or command[:3] == ['docker', 'volume', 'create']]
+        self.assertEqual(len(created), 3)
+        for command in created:
+            self.assertIn('--label', command)
+            self.assertTrue(command[command.index('--label') + 1].startswith('expire='))
+
     def test_wrong_database_is_rejected_before_container_creation(self):
         self.failure = 'database-host'
         with self.assertRaisesRegex(RuntimeError, '預檢資料庫'):
