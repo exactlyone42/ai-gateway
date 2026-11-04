@@ -128,3 +128,5 @@ for which problem, so you do not have to load everything.
 Proprietary. All rights reserved.
 
 本機個人試用與 Jev 設定：[使用說明](docs/jev-local.md)。
+
+Codex 個人訂閱的動態憑證設定與限制見 [使用自己的 Codex 訂閱](docs/codex-subscription.md)。

@@ -330,6 +330,7 @@ case "${1:-gate}" in
   all|pre-push)
     python3 scripts/check-migrations.py
     python3 -m unittest discover -s scripts -p "test_deploy*.py"
+    python3 -m unittest discover -s scripts -p "test_sync_codex_auth.py"
     frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh

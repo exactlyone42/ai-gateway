@@ -330,3 +330,13 @@ class DeploymentTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CredentialMountTests(unittest.TestCase):
+    def test_preserves_existing_credentials_and_replaces_only_spool(self):
+        source = {'Mounts': [{'Source': '/held', 'Destination': '/held', 'RW': True}, {'Source': '/old-spool', 'Destination': '/var/lib/agent-pool-gateway/ledger-spool', 'RW': True}]}
+        result = deploy_gateway.credential_mounts(source)
+        self.assertIn('type=bind,src=/held,dst=/held', result)
+        self.assertFalse(any('/old-spool' in item for item in result))
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIn('type=bind,src=' + root + ',dst=/run/gateway-codex,readonly', deploy_gateway.credential_mounts(source, root))
