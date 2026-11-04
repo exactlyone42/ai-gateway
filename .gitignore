@@ -13,3 +13,5 @@
 /.artifacts/
 
 /scripts/__pycache__/
+
+/loops/*.checkpoints.jsonl.lock

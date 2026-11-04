@@ -13,3 +13,5 @@ Gateway 只讀取登入後的存取權杖，不替使用者登入，不改用 AP
 來源：https://learn.chatgpt.com/docs/auth 、https://learn.chatgpt.com/docs/enterprise/connect-to-a-gateway ，查證 2026-11-04。
 
 主機同步服務使用 deploy/gateway-codex-auth-sync.service 與同名 timer，每 10 秒執行一次。程式安裝在 root 擁有的 /usr/local/lib/agent-pool-gateway/，來源路徑放在 /etc/agent-pool-gateway/codex-auth-sync.conf；專用輸出目錄為 /var/lib/agent-pool-gateway/codex-auth，容器使用者 UID 10001，目錄唯讀掛載到 /run/gateway-codex。同步服務只更新憑證快照，不會呼叫模型。
+
+當候選包含 Codex 訂閱時，只保留訂閱候選，略過任務分類與自動選模型，避免明確選擇訂閱後又被改成其他供應商。沒有可用訂閱憑證時仍回傳 503，不改走 API。

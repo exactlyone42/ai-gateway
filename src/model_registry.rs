@@ -638,6 +638,10 @@ impl ProviderProfile {
         profile
     }
 
+    pub(crate) fn is_codex_subscription(&self) -> bool {
+        matches!(self.authorization, ProviderAuthorization::CodexFile(_, _))
+    }
+
     pub(crate) fn codex_credentials(
         &self,
     ) -> Result<Option<crate::codex_auth::Credentials>, crate::error::GatewayError> {
