@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=32
+EXPECTED_ASSERTS=33
 
 ran=0
 failed=0
@@ -308,6 +308,16 @@ fixture declared.rs <<'RS'
 pub fn f() {}
 RS
 expect_green "declared file is reachable"
+
+reset
+fixture main.rs <<'RS'
+pub(crate) mod declared;
+fn main() {}
+RS
+fixture declared.rs <<'RS'
+pub fn f() {}
+RS
+expect_green "crate-visible module is reachable"
 
 gate_cmd=run_bans
 

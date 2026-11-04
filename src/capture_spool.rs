@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::capture_crypto::{CaptureCipher, CaptureIdentity, CaptureLeg};
-use crate::capture_key_usage::{WrapPermit, reserve_master_wrap};
+use crate::capture_key_usage::WrapPermit;
+#[cfg(test)]
+use crate::capture_key_usage::reserve_master_wrap;
 use crate::capture_secret_guard::CaptureSecretGuard;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use sqlx::PgPool;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -22,6 +25,15 @@ const MAX_SEALED_BLOCK_BYTES: usize = 1024 * 1024 + 28;
 pub(crate) struct CaptureLimits {
     pub per_file: u64,
     pub total: u64,
+}
+
+impl Default for CaptureLimits {
+    fn default() -> Self {
+        Self {
+            per_file: 256 * 1024 * 1024,
+            total: 4 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +170,7 @@ fn lock_capacity(root: &Path, total: u64) -> Result<std::fs::File, CaptureSpoolE
 }
 
 impl CaptureSpool {
+    #[cfg(test)]
     pub async fn create(
         pool: &PgPool,
         root: &Path,
@@ -224,6 +237,7 @@ impl CaptureSpool {
         })
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -323,6 +337,7 @@ impl CaptureSpool {
             .map_err(|_| CaptureSpoolError::Unavailable)
     }
 
+    #[cfg(test)]
     pub fn read(
         path: &Path,
         identity: CaptureIdentity,
@@ -350,6 +365,7 @@ impl CaptureSpool {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn read_verified(
         path: &Path,
         identity: CaptureIdentity,
@@ -361,9 +377,10 @@ impl CaptureSpool {
             .metadata()
             .map_err(|_| CaptureSpoolError::Unavailable)?
             .len();
-        Self::verify_reader(file, size, identity, master, max_bytes, false)
+        Self::verify_reader(file, size, identity, master, max_bytes, false, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn recover(
         path: &Path,
         master: &[u8; 32],
@@ -372,6 +389,7 @@ impl CaptureSpool {
         Self::recover_inner(path, master, max_bytes, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn recover_incomplete(
         path: &Path,
         master: &[u8; 32],
@@ -445,6 +463,7 @@ impl CaptureSpool {
             master,
             max_bytes,
             allow_incomplete,
+            true,
         )
     }
 
@@ -462,6 +481,24 @@ impl CaptureSpool {
         max_bytes: u64,
     ) -> Result<(VerifiedSpool, LockedSpoolFile), CaptureSpoolError> {
         Self::open_for_cleanup(path, key_root, max_bytes, true)
+    }
+
+    pub(crate) fn is_truncated_for_cleanup(path: &Path) -> Result<bool, CaptureSpoolError> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| CaptureSpoolError::Unavailable)?;
+        file.try_lock()
+            .map_err(|_| CaptureSpoolError::Unavailable)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| CaptureSpoolError::Unavailable)?;
+        if !metadata.is_file() {
+            return Err(CaptureSpoolError::Unavailable);
+        }
+        Ok(metadata.len() < HEADER_BYTES)
     }
 
     fn open_for_cleanup(
@@ -562,6 +599,7 @@ impl CaptureSpool {
         Self::recover_inner(path, &master, max_bytes, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn verify_serialized(
         data: &[u8],
         identity: CaptureIdentity,
@@ -576,6 +614,26 @@ impl CaptureSpool {
             master,
             max_bytes,
             allow_incomplete,
+            true,
+        )
+    }
+
+    pub(crate) fn verify_without_retaining(
+        file: impl Read,
+        size: u64,
+        identity: CaptureIdentity,
+        master: &[u8; 32],
+        max_bytes: u64,
+        allow_incomplete: bool,
+    ) -> Result<VerifiedSpool, CaptureSpoolError> {
+        Self::verify_reader(
+            file,
+            size,
+            identity,
+            master,
+            max_bytes,
+            allow_incomplete,
+            false,
         )
     }
 
@@ -586,6 +644,7 @@ impl CaptureSpool {
         master: &[u8; 32],
         max_bytes: u64,
         allow_incomplete: bool,
+        retain_blocks: bool,
     ) -> Result<VerifiedSpool, CaptureSpoolError> {
         if size < HEADER_BYTES || size > max_bytes {
             return Err(CaptureSpoolError::Unavailable);
@@ -614,6 +673,8 @@ impl CaptureSpool {
         let mut digest = Sha256::new();
         let mut records = Vec::new();
         let mut elapsed_ns = Vec::new();
+        let mut last_elapsed = None;
+        let mut position = 0u64;
         while remaining > 0 {
             if remaining < RECORD_HEADER_BYTES as u64 {
                 if allow_incomplete {
@@ -671,8 +732,10 @@ impl CaptureSpool {
                 if *manifest != expected {
                     return Err(CaptureSpoolError::Unavailable);
                 }
-                records.push((leg, sequence, sealed));
-                elapsed_ns.push(0);
+                if retain_blocks {
+                    records.push((leg, sequence, sealed));
+                    elapsed_ns.push(0);
+                }
                 return Ok(VerifiedSpool {
                     cipher,
                     blocks: records,
@@ -683,18 +746,22 @@ impl CaptureSpool {
             if sequence != next[leg.index()] || sequence >= MAX_BLOCKS_PER_LEG {
                 return Err(CaptureSpoolError::Unavailable);
             }
-            if elapsed > i64::MAX as u64 || elapsed_ns.last().is_some_and(|last| elapsed < *last) {
+            if elapsed > i64::MAX as u64 || last_elapsed.is_some_and(|last| elapsed < last) {
                 return Err(CaptureSpoolError::Unavailable);
             }
             digest.update(record);
             digest.update(&sealed);
             let _plaintext = Zeroizing::new(
                 cipher
-                    .unseal_timed(leg, sequence, records.len() as u64, elapsed, &sealed)
+                    .unseal_timed(leg, sequence, position, elapsed, &sealed)
                     .map_err(|_| CaptureSpoolError::Unavailable)?,
             );
-            records.push((leg, sequence, sealed));
-            elapsed_ns.push(elapsed);
+            if retain_blocks {
+                records.push((leg, sequence, sealed));
+                elapsed_ns.push(elapsed);
+            }
+            last_elapsed = Some(elapsed);
+            position += 1;
             next[leg.index()] += 1;
         }
         if allow_incomplete {

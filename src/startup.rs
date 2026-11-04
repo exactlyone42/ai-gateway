@@ -7,9 +7,37 @@ use tracing::info;
 
 use crate::{config::Config, db, logging, metrics, model_sync, routes, state::AppState};
 
+fn erasure_floor_error(error: std::io::Error) -> std::io::Error {
+    tracing::error!(error.type = "capture_erasure_floor_invalid", error.kind = ?error.kind(), "capture erasure position check failed");
+    let message = match error.kind() {
+        std::io::ErrorKind::WouldBlock => "capture erasure journal busy",
+        std::io::ErrorKind::InvalidData => "capture erasure position mismatch",
+        _ => "capture erasure position unavailable",
+    };
+    std::io::Error::other(message)
+}
+
+pub fn inspect_capture_erasure(expected: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let (journal, witness) = crate::config::capture_erasure_paths();
+    if expected.is_some_and(|position| position.len() > 1024) {
+        return Err("erasure position is too large".into());
+    }
+    let expected = expected.map(serde_json::from_str).transpose()?;
+    let current = crate::capture_erasure::inspect_position(&journal, &witness, expected.as_ref())?;
+    println!("{}", serde_json::to_string(&current)?);
+    Ok(())
+}
+
 /// Brings the process up: environment, logging, configuration, then serves
 /// until a shutdown signal arrives.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut shutdown = Box::pin(shutdown_signal());
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => return Err("startup stopped".into()),
+        _ = tokio::task::yield_now() => {},
+    }
     dotenvy::dotenv().ok();
     let config = Config::from_env()?;
     validate_capture_startup(&config)?;
@@ -29,11 +57,133 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let address = config.listen_address;
 
     let pool = db::pool(&config.database_url, config.data_database_max_connections())?;
-    db::migrate(&pool).await?;
+    tokio::select! {
+        result = db::ensure_restore_complete(&pool) => result?,
+        _ = &mut shutdown => return Err("startup stopped".into()),
+    }
+    {
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let migration = db::migrate_notified(&pool, Some(sender));
+        tokio::pin!(migration);
+        let mut backend = None;
+        let mut receiver_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    if backend.is_none() {
+                        backend = receiver.try_recv().ok();
+                    }
+                    if let Some(backend) = backend.as_ref()
+                        && !matches!(timeout(Duration::from_secs(1), db::cancel_migration(&config.database_url, backend)).await, Ok(Ok(true)))
+                    {
+                        tracing::warn!(event.name = "startup_migration_cancel_unconfirmed", "database migration cancellation was not confirmed");
+                    }
+                    return Err("startup stopped".into());
+                }
+                identity = &mut receiver, if receiver_open => {
+                    backend = identity.ok();
+                    receiver_open = false;
+                }
+                result = &mut migration => {
+                    result?;
+                    break;
+                }
+            }
+        }
+    }
     info!("database schema is up to date");
 
-    let state = Arc::new(AppState::new(config, pool)?);
-    if let Err(error) = model_sync::refresh(&state.pool, &state.client).await {
+    let (erasure, replayed) = if config.content_capture_enabled {
+        let journal = config.content_capture_erasure_dir.clone();
+        let witness = config.content_capture_witness_dir.clone();
+        let remote = config
+            .content_capture_remote_witness_url
+            .as_deref()
+            .map(|url| {
+                crate::capture_remote_witness::RemoteWitness::new(url, &config.database_url)
+                    .map(Arc::new)
+            })
+            .transpose()?;
+        if remote.is_none() {
+            tracing::warn!(error.type = "capture_remote_witness_missing", "capture erasure lacks an independent witness");
+        }
+        let active = tokio::task::spawn_blocking(move || {
+            crate::capture_erasure::ActiveErasure::open_with_remote(&journal, &witness, remote)
+        })
+        .await??;
+        let active = Arc::new(active);
+        let floor = sqlx::query_file!("queries/capture_erasure_floor_get.sql")
+            .fetch_optional(&pool)
+            .await?;
+        if let Some(floor) = floor {
+            let expected = crate::capture_erasure::ErasurePosition::from_database(
+                floor.install,
+                floor.sequence,
+                floor.tip,
+            )
+            .map_err(erasure_floor_error)?;
+            let active = active.clone();
+            tokio::task::spawn_blocking(move || active.verify_position(&expected))
+                .await?
+                .map_err(erasure_floor_error)?;
+        } else {
+            tracing::warn!(error.type = "capture_erasure_floor_missing", "capture erasure position is not bound");
+        }
+        let spool = config.content_capture_spool_dir.clone();
+        let backup_guard =
+            tokio::task::spawn_blocking(move || crate::capture_backup_barrier::try_shared(&spool))
+                .await??;
+        let replayed = crate::capture_archive::replay_erasure(
+            &pool,
+            active.clone(),
+            &config.content_capture_spool_dir,
+            &config.content_capture_key_dir,
+            crate::capture_spool::CaptureLimits::default(),
+            0,
+        )
+        .await?;
+        drop(backup_guard);
+        (Some(active), replayed)
+    } else {
+        (None, 0)
+    };
+    let mut state = AppState::new(config, pool)?;
+    state.capture_erasure = erasure;
+    let state = Arc::new(state);
+    let capture_maintenance = if state.config.content_capture_enabled {
+        let maintenance = crate::capture_maintenance::CaptureMaintenance::new(
+            state.config.content_capture_spool_dir.clone(),
+            state.config.content_capture_key_dir.clone(),
+            crate::capture_spool::CaptureLimits::default(),
+            state
+                .capture_erasure
+                .clone()
+                .ok_or("erasure journal unavailable")?,
+            replayed,
+        );
+        tracing::info!(
+            event.name = "capture_startup_cleanup_started",
+            "checking capture cleanup"
+        );
+        tokio::select! {
+            result = maintenance.prepare(&state.pool) => result?,
+            _ = &mut shutdown => return Err("capture startup cleanup stopped".into()),
+        }
+        tracing::info!(
+            event.name = "capture_startup_cleanup_finished",
+            "capture cleanup checked"
+        );
+        Some(maintenance)
+    } else {
+        None
+    };
+    let refresh = tokio::select! {
+        biased;
+        _ = &mut shutdown => return Err("startup stopped".into()),
+        result = model_sync::refresh(&state.pool, &state.client) => result,
+    };
+    if let Err(error) = refresh {
         tracing::warn!(event.name = "model_catalog.refresh_failed", exception.message = %error, "startup model catalog refresh failed");
     }
     let model_sync = model_sync::spawn(state.pool.clone(), state.client.clone());
@@ -48,9 +198,39 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
+    let capture_maintenance = if let Some(maintenance) = capture_maintenance {
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let pool = state.pool.clone();
+        let task = tokio::spawn(async move {
+            maintenance
+                .run(&pool, Duration::from_secs(30), receiver)
+                .await
+        });
+        Some((stop, task))
+    } else {
+        None
+    };
+
     info!(%address, "agent pool gateway started");
-    serve_with_shutdown(listener, Arc::clone(&state), shutdown_signal()).await?;
+    let serve_result = serve_with_shutdown(listener, Arc::clone(&state), shutdown).await;
     model_sync.abort();
+    if let Some((stop, mut task)) = capture_maintenance {
+        let _ = stop.send(true);
+        match timeout(state.config.shutdown_finalize_timeout, &mut task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::error!(error.type = "capture_maintenance_failed", exception.message = %error)
+            }
+            Ok(Err(error)) => {
+                tracing::error!(error.type = "capture_maintenance_failed", exception.message = %error)
+            }
+            Err(_) => {
+                task.abort();
+                tracing::error!(error.type = "capture_maintenance_shutdown_timeout");
+            }
+        }
+    }
+    serve_result?;
 
     report_flush_bounded("spans", state.config.shutdown_finalize_timeout, move || {
         traces.map_or(Ok(()), |provider| provider.shutdown())
@@ -72,22 +252,25 @@ pub async fn initialize_content_capture() -> Result<(), Box<dyn std::error::Erro
         &config.content_capture_spool_dir,
         &config.content_capture_key_dir,
         &config.content_capture_anchor_dir,
+        &config.content_capture_erasure_dir,
+        &config.content_capture_witness_dir,
     ])?;
     let pool = db::pool(&config.database_url, 1)?;
+    db::ensure_restore_complete(&pool).await?;
     let mut tx = pool.begin().await?;
-    let (records, usage): (bool, bool) = sqlx::query_as("SELECT to_regclass('public.capture_records') IS NOT NULL, to_regclass('public.capture_master_key_usage') IS NOT NULL")
-        .fetch_one(&mut *tx).await?;
-    if records != usage {
+    let schema = sqlx::query_file!("queries/capture_initialize_schema.sql")
+        .fetch_one(&mut *tx)
+        .await?;
+    if schema.records != schema.usage || schema.records != schema.marks {
         return Err("content storage database schema is incomplete".into());
     }
-    if records {
-        sqlx::query(
-            "LOCK TABLE capture_records, capture_master_key_usage IN ACCESS EXCLUSIVE MODE NOWAIT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        let count: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM capture_records) + (SELECT count(*) FROM capture_master_key_usage)")
-            .fetch_one(&mut *tx).await?;
+    if schema.records {
+        sqlx::query_file!("queries/capture_initialize_lock.sql")
+            .execute(&mut *tx)
+            .await?;
+        let count: i64 = sqlx::query_file_scalar!("queries/capture_initialize_count.sql")
+            .fetch_one(&mut *tx)
+            .await?;
         if count != 0 {
             return Err("content storage database already has records".into());
         }
@@ -100,8 +283,32 @@ pub async fn initialize_content_capture() -> Result<(), Box<dyn std::error::Erro
     let keys = config.content_capture_key_dir;
     let anchors = config.content_capture_anchor_dir;
     let spool = config.content_capture_spool_dir;
+    let erasure = config.content_capture_erasure_dir;
+    let witness = config.content_capture_witness_dir;
     let fingerprint = tokio::task::spawn_blocking(move || {
+        let exists = |path: &std::path::Path| match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        };
+        let current = exists(&keys.join("current"))?;
+        let pending = exists(&keys.join(".initializing"))?;
+        let _erasure = if current {
+            if !pending {
+                return Err(std::io::Error::other(
+                    "content storage is already initialized",
+                ));
+            }
+            let active = crate::capture_erasure::ActiveErasure::open(&erasure, &witness)?;
+            if !active.verified_records()?.is_empty() {
+                return Err(std::io::Error::other("erasure journal is not empty"));
+            }
+            active
+        } else {
+            crate::capture_erasure::ActiveErasure::initialize(&erasure, &witness)?
+        };
         crate::capture_keyring::initialize(&keys, &anchors, &spool)
+            .map_err(|_| std::io::Error::other("content key initialization failed"))
     })
     .await??;
     tx.commit().await?;
@@ -116,12 +323,28 @@ pub async fn initialize_content_capture() -> Result<(), Box<dyn std::error::Erro
 }
 
 fn validate_capture_startup(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    if config.content_capture_enabled {
+        crate::capture_paths::validate_paths([
+            &config.content_capture_spool_dir,
+            &config.content_capture_key_dir,
+            &config.content_capture_anchor_dir,
+            &config.content_capture_erasure_dir,
+            &config.content_capture_witness_dir,
+        ])?;
+    }
     validate_capture_storage(
         config.content_capture_enabled,
         &config.content_capture_spool_dir,
         &config.content_capture_key_dir,
         &config.content_capture_anchor_dir,
-    )
+    )?;
+    if config.content_capture_enabled
+        && config.content_capture_remote_witness_url.is_none()
+        && !config.content_capture_test_allow_local_witness
+    {
+        return Err("independent erasure witness required".into());
+    }
+    Ok(())
 }
 
 fn validate_capture_storage(
@@ -345,6 +568,24 @@ mod tests {
         scheduler::SchedulerConfig,
     };
     use sqlx::PgPool;
+
+    #[test]
+    fn erasure_floor_errors_distinguish_busy_mismatch_and_io_failure() {
+        use std::io::{Error, ErrorKind};
+        for (kind, expected) in [
+            (ErrorKind::WouldBlock, "capture erasure journal busy"),
+            (ErrorKind::InvalidData, "capture erasure position mismatch"),
+            (
+                ErrorKind::PermissionDenied,
+                "capture erasure position unavailable",
+            ),
+        ] {
+            assert_eq!(
+                super::erasure_floor_error(Error::from(kind)).to_string(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn capture_startup_requires_safe_directories_and_valid_key_and_counter() {

@@ -1,4 +1,5 @@
 mod admin;
+mod capture;
 mod chat_completions;
 mod health;
 mod messages;
@@ -13,7 +14,7 @@ use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, rejection::BytesRejection},
     http::{HeaderName, HeaderValue, header},
-    routing::{get, head, post},
+    routing::{delete, get, head, post},
 };
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -44,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(openai)
         .merge(anthropic)
         .route("/v1/models", get(messages::models))
+        .route("/v1/request-captures/{id}", delete(capture::delete))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_client_key,
@@ -203,6 +205,10 @@ mod tests {
             content_capture_spool_dir: "/var/lib/agent-pool-gateway/capture-spool".into(),
             content_capture_key_dir: "/var/lib/agent-pool-gateway/capture-keys".into(),
             content_capture_anchor_dir: "/var/lib/agent-pool-gateway/capture-anchors".into(),
+            content_capture_erasure_dir: "/var/lib/agent-pool-gateway/capture-erasure".into(),
+            content_capture_witness_dir: "/var/lib/agent-pool-gateway/capture-witness".into(),
+            content_capture_remote_witness_url: None,
+            content_capture_test_allow_local_witness: false,
             routing: Default::default(),
             jev: None,
             scheduler: Default::default(),
@@ -1499,6 +1505,1980 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn prepared_requests_are_encrypted_before_upstream_send(pool: PgPool) {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::path::Path::new("/tmp").join(format!("capture-request-{}", Uuid::new_v4()));
+        let spool = base.join("spool");
+        let keys = base.join("keys");
+        let anchors = base.join("anchors");
+        for path in [&base, &spool, &keys, &anchors] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        crate::capture_keyring::rotate(&keys, &anchors, &spool).unwrap();
+        let mut config = test_config();
+        config.content_capture_enabled = true;
+        config.content_capture_spool_dir = spool.clone();
+        config.content_capture_key_dir = keys.clone();
+        config.content_capture_anchor_dir = anchors;
+        let state = AppState::new(config, pool).unwrap();
+        let principal = PrincipalContext {
+            tenant_id: Uuid::new_v4(),
+            credential_id: Uuid::new_v4(),
+            credential_name: "fixture".to_owned(),
+            user_id: Some(Uuid::new_v4()),
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer gateway-secret".parse().unwrap());
+        let selector = crate::model_registry::ModelSelector::parse("company-default").unwrap();
+        let policy = state
+            .policies
+            .evaluate(&principal, &headers, &selector, Utc::now())
+            .await
+            .unwrap();
+        let original = Bytes::from_static(br#"{"model":"company-default","messages":[{"role":"user","content":"private-prompt"}]}"#);
+        let decoded = crate::adapters::protocol::decode(
+            GatewayOperation::OpenAiChatCompletions,
+            original.clone(),
+        )
+        .unwrap();
+        let id = Uuid::new_v4();
+        let mut canonical = decoded.enrich(crate::canonical::RequestEnrichment {
+            gateway_request_id: id,
+            trace_id: None,
+            session_id: None,
+            principal: (&principal).into(),
+            requested_model: "company-default".to_owned(),
+            requested_quality: None,
+            workload_class: "interactive".to_owned(),
+            urgency: "normal".to_owned(),
+            budget_class: "normal".to_owned(),
+            deadline: None,
+        });
+        let upstream = br#"{"model":"provider-model","messages":[{"role":"user","content":"private-prompt"}]}"#;
+        let session = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(session);
+        let path = spool.join(format!("{id}.capture"));
+        let encrypted = std::fs::read(&path).unwrap();
+        assert!(
+            !encrypted
+                .windows(b"private-prompt".len())
+                .any(|window| window == b"private-prompt")
+        );
+        let recovered =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&path, &keys, 4096).unwrap();
+        assert!(!recovered.complete);
+        let first = recovered
+            .cipher
+            .unseal_timed(
+                recovered.blocks[0].0,
+                recovered.blocks[0].1,
+                0,
+                recovered.elapsed_ns[0],
+                &recovered.blocks[0].2,
+            )
+            .unwrap();
+        let second = recovered
+            .cipher
+            .unseal_timed(
+                recovered.blocks[1].0,
+                recovered.blocks[1].1,
+                1,
+                recovered.elapsed_ns[1],
+                &recovered.blocks[1].2,
+            )
+            .unwrap();
+        assert_eq!(first, original);
+        assert_eq!(second, upstream);
+        let mut metadata = policy.clone();
+        metadata.disable_content_capture();
+        assert!(
+            crate::services::capture_request::start(
+                &state,
+                &metadata,
+                &canonical,
+                &headers,
+                upstream,
+                Some("provider-secret")
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+        canonical.principal.user_id = None;
+        assert!(
+            crate::services::capture_request::start(
+                &state,
+                &policy,
+                &canonical,
+                &headers,
+                upstream,
+                Some("provider-secret")
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+        canonical.principal.user_id = principal.user_id;
+        canonical.gateway_request_id = Uuid::new_v4();
+        let session = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        crate::services::capture_request::finish_buffered(
+            session,
+            b"provider-response",
+            b"client-response",
+        )
+        .await
+        .unwrap();
+        let completed = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(completed.complete);
+        assert_eq!(completed.blocks.len(), 5);
+        canonical.gateway_request_id = Uuid::new_v4();
+        let interrupted = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        crate::services::capture_request::save_buffered(
+            &interrupted,
+            b"provider-response",
+            b"client-response",
+        )
+        .await
+        .unwrap();
+        drop(interrupted);
+        let pending = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(!pending.complete);
+        assert_eq!(pending.blocks.len(), 4);
+        for (position, expected) in [
+            original.as_ref(),
+            upstream.as_slice(),
+            b"provider-response",
+            b"client-response",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (leg, sequence, sealed) = &completed.blocks[position];
+            let plaintext = completed
+                .cipher
+                .unseal_timed(
+                    *leg,
+                    *sequence,
+                    position as u64,
+                    completed.elapsed_ns[position],
+                    sealed,
+                )
+                .unwrap();
+            assert_eq!(plaintext, expected);
+        }
+        canonical.gateway_request_id = Uuid::new_v4();
+        let session = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        let error = crate::error::GatewayError::UpstreamProtocol;
+        crate::services::capture_request::finish_error(session, b"bad-provider-response", &error)
+            .await
+            .unwrap();
+        let recorded = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(recorded.complete);
+        let (leg, sequence, sealed) = &recorded.blocks[3];
+        let client_error = recorded
+            .cipher
+            .unseal_timed(*leg, *sequence, 3, recorded.elapsed_ns[3], sealed)
+            .unwrap();
+        let actual = to_bytes(error.into_response().into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(client_error, actual);
+        canonical.gateway_request_id = Uuid::new_v4();
+        let pending_error = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        crate::services::capture_request::save_error(
+            &pending_error,
+            b"bad-provider-response",
+            &crate::error::GatewayError::UpstreamProtocol,
+        )
+        .await
+        .unwrap();
+        drop(pending_error);
+        let pending = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(!pending.complete);
+        assert_eq!(pending.blocks.len(), 4);
+        canonical.gateway_request_id = Uuid::new_v4();
+        let session = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        crate::services::capture_request::finish_incomplete_error(
+            session,
+            b"partial-provider-response",
+            &crate::error::GatewayError::UpstreamProtocol,
+        )
+        .await
+        .unwrap();
+        let interrupted = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(!interrupted.complete);
+        assert_eq!(interrupted.blocks.len(), 4);
+        let (leg, sequence, sealed) = &interrupted.blocks[2];
+        assert_eq!(
+            interrupted
+                .cipher
+                .unseal_timed(*leg, *sequence, 2, interrupted.elapsed_ns[2], sealed)
+                .unwrap(),
+            b"partial-provider-response"
+        );
+        canonical.gateway_request_id = Uuid::new_v4();
+        let session = crate::services::capture_request::start(
+            &state,
+            &policy,
+            &canonical,
+            &headers,
+            upstream,
+            Some("provider-secret"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::services::capture_request::finish_buffered(
+                session,
+                b"provider-secret",
+                b"client-response"
+            )
+            .await
+            .is_err()
+        );
+        let failed = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", canonical.gateway_request_id)),
+            &keys,
+            4096,
+        )
+        .unwrap();
+        assert!(!failed.complete);
+        assert_eq!(failed.blocks.len(), 2);
+        canonical.gateway_request_id = Uuid::new_v4();
+        assert!(
+            crate::services::capture_request::start(
+                &state,
+                &policy,
+                &canonical,
+                &headers,
+                b"provider-secret",
+                Some("provider-secret")
+            )
+            .await
+            .is_err()
+        );
+        let partial =
+            std::fs::read(spool.join(format!("{}.capture", canonical.gateway_request_id))).unwrap();
+        assert!(
+            !partial
+                .windows(b"provider-secret".len())
+                .any(|window| window == b"provider-secret")
+        );
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn streaming_relay_saves_both_wire_directions_before_completion(pool: PgPool) {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::path::Path::new("/tmp").join(format!("capture-stream-{}", Uuid::new_v4()));
+        let spool = base.join("spool");
+        let keys = base.join("keys");
+        let anchors = base.join("anchors");
+        for path in [&base, &spool, &keys, &anchors] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        crate::capture_keyring::rotate(&keys, &anchors, &spool).unwrap();
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'fixture')")
+            .bind(user)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let principal = PrincipalContext {
+            tenant_id: tenant,
+            credential_id: Uuid::nil(),
+            credential_name: "fixture".to_owned(),
+            user_id: Some(user),
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        };
+        let state = AppState::new(test_config(), pool.clone()).unwrap();
+        let identity = crate::capture_crypto::CaptureIdentity {
+            tenant,
+            capture: Uuid::new_v4(),
+            user,
+            created_ms: Utc::now().timestamp_millis(),
+            retention_days: 30,
+        };
+        let session = Arc::new(
+            crate::capture_session::AsyncCaptureSession::create_from_keyring(
+                &pool,
+                crate::capture_session::CapturePaths {
+                    spool: &spool,
+                    anchors: &anchors,
+                },
+                &keys,
+                identity,
+                &[],
+                crate::capture_spool::CaptureLimits::for_test(16384),
+                Arc::new(tokio::sync::Semaphore::new(4)),
+            )
+            .await
+            .unwrap(),
+        );
+        session
+            .save_requests(b"client-request".to_vec(), b"provider-request".to_vec())
+            .await
+            .unwrap();
+        let mut reservation = state
+            .ledger
+            .reserve_with_quota(
+                RequestStart {
+                    request_id: "capture-stream".to_owned(),
+                    session_id: None,
+                    trace_id: None,
+                    requested_model: Some("model".to_owned()),
+                    workload_class: None,
+                    urgency: None,
+                    quality: None,
+                    budget_class: None,
+                    estimated_tokens: None,
+                    selection: None,
+                    policy: None,
+                    principal: principal.clone(),
+                    created_at: Utc::now(),
+                },
+                Some(identity.capture),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        reservation.attach_capture(session.clone());
+        let attempt = crate::ledger::ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            crate::ledger::TokenUsage::default(),
+        );
+        const WIRE: &str = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(|| async { ([("content-type", "text/event-stream")], WIRE) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .send()
+            .await
+            .unwrap();
+        let body = crate::services::streaming::relay(
+            response,
+            reservation,
+            attempt,
+            "model".to_owned(),
+            "provider".to_owned(),
+            crate::services::sse::MetadataParser::default(),
+            crate::services::streaming::RelayLimits {
+                event_max_bytes: 4096,
+                heartbeat_interval: Duration::from_secs(30),
+                provider_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let sent = to_bytes(body, 16384).await.unwrap();
+        assert_eq!(sent.as_ref(), WIRE.as_bytes());
+        drop(session);
+        let recorded = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", identity.capture)),
+            &keys,
+            16384,
+        )
+        .unwrap();
+        assert!(recorded.complete);
+        let mut provider_bytes = Vec::new();
+        let mut client_bytes = Vec::new();
+        for (position, (leg, sequence, sealed)) in recorded.blocks.iter().enumerate() {
+            if matches!(
+                leg,
+                crate::capture_crypto::CaptureLeg::ProviderResponse
+                    | crate::capture_crypto::CaptureLeg::ClientResponse
+            ) {
+                let bytes = recorded
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        recorded.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap();
+                match leg {
+                    crate::capture_crypto::CaptureLeg::ProviderResponse => {
+                        provider_bytes.extend(bytes)
+                    }
+                    _ => client_bytes.extend(bytes),
+                }
+            }
+        }
+        assert_eq!(provider_bytes, WIRE.as_bytes());
+        assert_eq!(client_bytes, sent);
+        state.ledger.wait_for_idle().await;
+        let ledger_failure_identity = crate::capture_crypto::CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..identity
+        };
+        let ledger_failure = Arc::new(
+            crate::capture_session::AsyncCaptureSession::create_from_keyring(
+                &pool,
+                crate::capture_session::CapturePaths {
+                    spool: &spool,
+                    anchors: &anchors,
+                },
+                &keys,
+                ledger_failure_identity,
+                &[],
+                crate::capture_spool::CaptureLimits::for_test(16384),
+                Arc::new(tokio::sync::Semaphore::new(4)),
+            )
+            .await
+            .unwrap(),
+        );
+        ledger_failure
+            .save_requests(b"client-request".to_vec(), b"provider-request".to_vec())
+            .await
+            .unwrap();
+        let mut reservation = state
+            .ledger
+            .reserve_with_quota(
+                RequestStart {
+                    request_id: "capture-stream-ledger-failure".to_owned(),
+                    session_id: None,
+                    trace_id: None,
+                    requested_model: Some("model".to_owned()),
+                    workload_class: None,
+                    urgency: None,
+                    quality: None,
+                    budget_class: None,
+                    estimated_tokens: None,
+                    selection: None,
+                    policy: None,
+                    principal: principal.clone(),
+                    created_at: Utc::now(),
+                },
+                Some(ledger_failure_identity.capture),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        reservation.attach_capture(ledger_failure.clone());
+        let attempt = crate::ledger::ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            crate::ledger::TokenUsage::default(),
+        );
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .send()
+            .await
+            .unwrap();
+        let body = crate::services::streaming::relay(
+            response,
+            reservation,
+            attempt,
+            "model".to_owned(),
+            "provider".to_owned(),
+            crate::services::sse::MetadataParser::default(),
+            crate::services::streaming::RelayLimits {
+                event_max_bytes: 4096,
+                heartbeat_interval: Duration::from_secs(30),
+                provider_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let ledger_dir = &state.config.ledger_spool_dir;
+        let held_ledger_dir = ledger_dir.with_extension("held");
+        std::fs::rename(ledger_dir, &held_ledger_dir).unwrap();
+        let mut output = body.into_data_stream();
+        assert!(matches!(output.next().await, Some(Err(_))));
+        drop(output);
+        state.ledger.wait_for_idle().await;
+        std::fs::rename(&held_ledger_dir, ledger_dir).unwrap();
+        drop(ledger_failure);
+        let incomplete = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", ledger_failure_identity.capture)),
+            &keys,
+            16384,
+        )
+        .unwrap();
+        assert!(!incomplete.complete);
+        let cancelled_identity = crate::capture_crypto::CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..identity
+        };
+        let cancelled = Arc::new(
+            crate::capture_session::AsyncCaptureSession::create_from_keyring(
+                &pool,
+                crate::capture_session::CapturePaths {
+                    spool: &spool,
+                    anchors: &anchors,
+                },
+                &keys,
+                cancelled_identity,
+                &[],
+                crate::capture_spool::CaptureLimits::for_test(16384),
+                Arc::new(tokio::sync::Semaphore::new(4)),
+            )
+            .await
+            .unwrap(),
+        );
+        cancelled
+            .save_requests(b"client-request".to_vec(), b"provider-request".to_vec())
+            .await
+            .unwrap();
+        let mut reservation = state
+            .ledger
+            .reserve_with_quota(
+                RequestStart {
+                    request_id: "capture-stream-cancelled".to_owned(),
+                    session_id: None,
+                    trace_id: None,
+                    requested_model: Some("model".to_owned()),
+                    workload_class: None,
+                    urgency: None,
+                    quality: None,
+                    budget_class: None,
+                    estimated_tokens: None,
+                    selection: None,
+                    policy: None,
+                    principal: principal.clone(),
+                    created_at: Utc::now(),
+                },
+                Some(cancelled_identity.capture),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        reservation.attach_capture(cancelled.clone());
+        let attempt = crate::ledger::ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            crate::ledger::TokenUsage::default(),
+        );
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .send()
+            .await
+            .unwrap();
+        let body = crate::services::streaming::relay(
+            response,
+            reservation,
+            attempt,
+            "model".to_owned(),
+            "provider".to_owned(),
+            crate::services::sse::MetadataParser::default(),
+            crate::services::streaming::RelayLimits {
+                event_max_bytes: 4096,
+                heartbeat_interval: Duration::from_secs(30),
+                provider_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut output = body.into_data_stream();
+        assert!(matches!(output.next().await, Some(Ok(_))));
+        drop(output);
+        drop(cancelled);
+        let incomplete = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", cancelled_identity.capture)),
+            &keys,
+            16384,
+        )
+        .unwrap();
+        assert!(!incomplete.complete);
+        let failed_identity = crate::capture_crypto::CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..identity
+        };
+        let failed = Arc::new(
+            crate::capture_session::AsyncCaptureSession::create_from_keyring(
+                &pool,
+                crate::capture_session::CapturePaths {
+                    spool: &spool,
+                    anchors: &anchors,
+                },
+                &keys,
+                failed_identity,
+                &[],
+                crate::capture_spool::CaptureLimits {
+                    per_file: 512,
+                    total: 16384 * 16,
+                },
+                Arc::new(tokio::sync::Semaphore::new(4)),
+            )
+            .await
+            .unwrap(),
+        );
+        failed
+            .save_requests(b"client-request".to_vec(), b"provider-request".to_vec())
+            .await
+            .unwrap();
+        let mut reservation = state
+            .ledger
+            .reserve_with_quota(
+                RequestStart {
+                    request_id: "capture-stream-full".to_owned(),
+                    session_id: None,
+                    trace_id: None,
+                    requested_model: Some("model".to_owned()),
+                    workload_class: None,
+                    urgency: None,
+                    quality: None,
+                    budget_class: None,
+                    estimated_tokens: None,
+                    selection: None,
+                    policy: None,
+                    principal,
+                    created_at: Utc::now(),
+                },
+                Some(failed_identity.capture),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        reservation.attach_capture(failed.clone());
+        let attempt = crate::ledger::ProviderAttempt::begin(
+            "provider".to_owned(),
+            "model".to_owned(),
+            None,
+            Utc::now(),
+            crate::ledger::TokenUsage::default(),
+        );
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .send()
+            .await
+            .unwrap();
+        let body = crate::services::streaming::relay(
+            response,
+            reservation,
+            attempt,
+            "model".to_owned(),
+            "provider".to_owned(),
+            crate::services::sse::MetadataParser::default(),
+            crate::services::streaming::RelayLimits {
+                event_max_bytes: 4096,
+                heartbeat_interval: Duration::from_secs(30),
+                provider_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut output = body.into_data_stream();
+        assert!(matches!(output.next().await, Some(Err(_))));
+        drop(output);
+        drop(failed);
+        let incomplete = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", failed_identity.capture)),
+            &keys,
+            512,
+        )
+        .unwrap();
+        assert!(!incomplete.complete);
+        assert_eq!(incomplete.blocks.len(), 2);
+        let error_identity = crate::capture_crypto::CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..identity
+        };
+        let error_session = Arc::new(
+            crate::capture_session::AsyncCaptureSession::create_from_keyring(
+                &pool,
+                crate::capture_session::CapturePaths {
+                    spool: &spool,
+                    anchors: &anchors,
+                },
+                &keys,
+                error_identity,
+                &[],
+                crate::capture_spool::CaptureLimits::for_test(16384),
+                Arc::new(tokio::sync::Semaphore::new(4)),
+            )
+            .await
+            .unwrap(),
+        );
+        error_session
+            .save_requests(b"client-request".to_vec(), b"provider-request".to_vec())
+            .await
+            .unwrap();
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/messages"))
+            .send()
+            .await
+            .unwrap();
+        let event = Bytes::from_static(b"event: error\n\n");
+        crate::services::streaming::capture_deferred_error(
+            &Some(error_session.clone()),
+            Some(response),
+            &event,
+        )
+        .await
+        .unwrap();
+        crate::services::streaming::finish_capture(&Some(error_session.clone()))
+            .await
+            .unwrap();
+        drop(error_session);
+        let recorded_error = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &spool.join(format!("{}.capture", error_identity.capture)),
+            &keys,
+            16384,
+        )
+        .unwrap();
+        assert!(recorded_error.complete);
+        let mut provider_error = Vec::new();
+        let mut client_error = Vec::new();
+        for (position, (leg, sequence, sealed)) in recorded_error.blocks.iter().enumerate() {
+            if matches!(
+                leg,
+                crate::capture_crypto::CaptureLeg::ProviderResponse
+                    | crate::capture_crypto::CaptureLeg::ClientResponse
+            ) {
+                let bytes = recorded_error
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        recorded_error.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap();
+                match leg {
+                    crate::capture_crypto::CaptureLeg::ProviderResponse => {
+                        provider_error.extend(bytes)
+                    }
+                    _ => client_error.extend(bytes),
+                }
+            }
+        }
+        assert_eq!(provider_error, WIRE.as_bytes());
+        assert_eq!(client_error, event);
+        state.ledger.wait_for_idle().await;
+        server.abort();
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn full_capture_records_actual_nonstream_request_and_reply(pool: PgPool) {
+        use std::os::unix::fs::PermissionsExt;
+        let tenant = Uuid::new_v4();
+        let base = std::path::Path::new("/tmp").join(format!("capture-entry-{}", Uuid::new_v4()));
+        let spool = base.join("spool");
+        let keys = base.join("keys");
+        let anchors = base.join("anchors");
+        for path in [&base, &spool, &keys, &anchors] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        crate::capture_keyring::rotate(&keys, &anchors, &spool).unwrap();
+        let user = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'fixture')")
+            .bind(user)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let received_upstream = received.clone();
+        let anthropic_received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let anthropic_upstream = anthropic_received.clone();
+        const OPENAI_WIRE: &str = concat!(
+            "data: {\"id\":\"chat_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chat_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chat_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        const ANTHROPIC_WIRE: &str = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let upstream = Router::new().route("/v1/chat/completions", post(move |body: Bytes| {
+            let received = received_upstream.clone();
+            async move {
+                *received.lock().unwrap() = body.to_vec();
+                if body.windows(b"bad-usage".len()).any(|part| part == b"bad-usage") {
+                    ([ ("content-type", "application/json") ], r#"{"id":"chat-bad","usage":"invalid"}"#).into_response()
+                } else if serde_json::from_slice::<serde_json::Value>(&body).unwrap().get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+                    ([("content-type", "text/event-stream")], OPENAI_WIRE).into_response()
+                } else {
+                    Json(json!({"id":"chatcmpl-fixture","object":"chat.completion","model":"company-default","choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})).into_response()
+                }
+            }
+        })).route("/v1/messages", post(move |body: Bytes| {
+            let received = anthropic_upstream.clone();
+            async move {
+                *received.lock().unwrap() = body.to_vec();
+                if serde_json::from_slice::<serde_json::Value>(&body).unwrap().get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+                    ([("content-type", "text/event-stream")], ANTHROPIC_WIRE).into_response()
+                } else {
+                    Json(json!({"id":"msg-fixture","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})).into_response()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        sqlx::query(
+            r#"WITH provider AS (
+                INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state)
+                VALUES (gen_random_uuid(), $1, 'openai-test', 'capture test', 'openai', $2, 'env://OPENAI_API_KEY', ARRAY['openai_chat_completions'], 'active') RETURNING id
+            ) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, supports_streaming, lifecycle_state)
+              SELECT gen_random_uuid(), $1, id, 'company-default', 'company-default', 'capture test', ARRAY['openai_chat_completions'], true, 'active' FROM provider"#,
+        ).bind(tenant).bind(format!("http://{address}")).execute(&pool).await.unwrap();
+        sqlx::query(
+            r#"WITH provider AS (
+                INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state)
+                VALUES (gen_random_uuid(), $1, 'anthropic-test', 'capture test', 'anthropic', $2, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active') RETURNING id
+            ) INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, supports_streaming, lifecycle_state)
+              SELECT gen_random_uuid(), $1, id, 'claude-test', 'claude-test', 'capture test', ARRAY['anthropic_messages'], true, 'active' FROM provider"#,
+        ).bind(tenant).bind(format!("http://{address}")).execute(&pool).await.unwrap();
+        let mut config = test_config();
+        config.content_capture_enabled = true;
+        config.content_capture_spool_dir = spool.clone();
+        config.content_capture_key_dir = keys.clone();
+        config.content_capture_anchor_dir = anchors;
+        config.admin_bootstrap_token = Some("synthetic-bootstrap-token-32-chars".to_owned());
+        config.admin_bootstrap_tenant_id = Some(tenant);
+        config.openai_base_url = format!("http://{address}");
+        config.anthropic_base_url = format!("http://{address}");
+        config.allowed_models.push("claude-test".to_owned());
+        config.provider_allowed_tenant_ids = vec![tenant];
+        let mut state = AppState::new(config, pool).unwrap();
+        state.capture_test_enabled = true;
+        let erasure = crate::capture_erasure::TestErasure::new();
+        state.capture_erasure = Some(erasure.active.clone());
+        let state = Arc::new(state);
+        let mut caller = principal(tenant);
+        caller.user_id = Some(user);
+        let input = Bytes::from_static(
+            br#"{"model":"company-default","messages":[{"role":"user","content":"capture-private-prompt-sentinel"}]}"#,
+        );
+        let reply = openai::execute(
+            &state,
+            RequestContext {
+                principal: caller.clone(),
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: input.clone(),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.status, StatusCode::OK);
+        let output = to_bytes(reply.body, 16384).await.unwrap();
+        let path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|value| value == "capture"))
+            .unwrap();
+        let recorded =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&path, &keys, 16384).unwrap();
+        assert!(recorded.complete);
+        let mut parts = Vec::new();
+        for (position, (leg, sequence, sealed)) in recorded.blocks.iter().take(4).enumerate() {
+            parts.push(
+                recorded
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        recorded.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(parts[0], input);
+        assert_eq!(parts[1], *received.lock().unwrap());
+        assert_eq!(parts[2], output);
+        assert_eq!(parts[3], output);
+        assert!(
+            crate::capture_archive::recover_and_import_keyring(
+                &state.pool,
+                &path,
+                &keys,
+                16384,
+                Arc::new(tokio::sync::Semaphore::new(1))
+            )
+            .await
+            .unwrap()
+        );
+        let ip = "127.0.0.1".parse().unwrap();
+        let account = state
+            .admin
+            .bootstrap(
+                "synthetic-bootstrap-token-32-chars",
+                crate::admin::BootstrapInput {
+                    display_name: "admin".to_owned(),
+                    credential_name: "fixture".to_owned(),
+                },
+                ip,
+                ip,
+                "bootstrap",
+            )
+            .await
+            .unwrap();
+        let admin_session = state
+            .admin
+            .login(&account.login_token, ip, ip, "login")
+            .await
+            .unwrap();
+        let uri = format!(
+            "/admin/v1/request-captures/{}/content?leg=client_request",
+            recorded.cipher.identity().capture
+        );
+        let app = router(state.clone());
+        let unauthenticated = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let logs = logging::capture::Buffer::default();
+        let (subscriber, _provider) = logging::test_subscriber(logs.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(to_bytes(response.into_body(), 16384).await.unwrap(), input);
+        let lines = logs.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line["event"]["name"] == "http.access")
+        );
+        let logged = serde_json::to_string(&lines).unwrap();
+        for secret in [
+            "capture-private-prompt-sentinel",
+            &admin_session.access_token,
+        ] {
+            assert!(!logged.contains(secret));
+            assert!(format!("{logged}{secret}").contains(secret));
+        }
+        for (direction, expected) in [
+            ("provider_request", parts[1].as_slice()),
+            ("provider_response", parts[2].as_slice()),
+            ("client_response", parts[3].as_slice()),
+        ] {
+            let url = format!(
+                "/admin/v1/request-captures/{}/content?leg={direction}",
+                recorded.cipher.identity().capture
+            );
+            let result = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(url)
+                        .header(
+                            "authorization",
+                            format!("Bearer {}", admin_session.access_token),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+            assert_eq!(to_bytes(result.into_body(), 16384).await.unwrap(), expected);
+        }
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/v1/request-captures/{}/content?leg=manifest",
+                        recorded.cipher.identity().capture
+                    ))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let foreign = Uuid::new_v4();
+        let foreign_user = Uuid::new_v4();
+        let foreign_capture = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'other')")
+            .bind(foreign_user)
+            .bind(foreign)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO capture_records (tenant_id, capture_id, user_id, key_fingerprint, wrapped_key, expires_at, state) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days', 'complete')")
+            .bind(foreign).bind(foreign_capture).bind(foreign_user).bind(vec![1u8; 32]).bind(vec![2u8; 60]).execute(&state.pool).await.unwrap();
+        let foreign_result = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/v1/request-captures/{foreign_capture}/content?leg=client_request"
+                    ))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(foreign_result.status(), StatusCode::OK);
+        let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND target_id = $2 AND action = 'capture.content.read'")
+            .bind(tenant).bind(recorded.cipher.identity().capture).fetch_one(&state.pool).await.unwrap();
+        assert_eq!(audit_count, 4);
+        sqlx::query("CREATE FUNCTION reject_download_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'capture.content.read' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END $$")
+            .execute(&state.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_download_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_download_audit()")
+            .execute(&state.pool).await.unwrap();
+        let failed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        sqlx::query("DROP TRIGGER reject_download_audit ON audit_logs")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE capture_blocks SET sealed = set_byte(sealed, 12, get_byte(sealed, 12) # 1) WHERE tenant_id = $1 AND capture_id = $2 AND position = 0")
+            .bind(tenant).bind(recorded.cipher.identity().capture).execute(&state.pool).await.unwrap();
+        let corrupted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(corrupted.status(), StatusCode::SERVICE_UNAVAILABLE);
+        sqlx::query("UPDATE capture_blocks SET sealed = set_byte(sealed, 12, get_byte(sealed, 12) # 1) WHERE tenant_id = $1 AND capture_id = $2 AND position = 0")
+            .bind(tenant).bind(recorded.cipher.identity().capture).execute(&state.pool).await.unwrap();
+        let anthropic_input = Bytes::from_static(br#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":32}"#);
+        let anthropic_reply = super::messages::proxy(
+            state.clone(),
+            caller.clone(),
+            Utc::now(),
+            "/v1/messages",
+            HeaderMap::new(),
+            anthropic_input.clone(),
+            super::messages::Operation::Messages,
+        )
+        .await
+        .unwrap();
+        assert_eq!(anthropic_reply.status(), StatusCode::OK);
+        let anthropic_output = to_bytes(anthropic_reply.into_body(), 16384).await.unwrap();
+        let anthropic_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let anthropic_recorded =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&anthropic_path, &keys, 16384)
+                .unwrap();
+        assert!(anthropic_recorded.complete);
+        let mut anthropic_parts = Vec::new();
+        for (position, (leg, sequence, sealed)) in
+            anthropic_recorded.blocks.iter().take(4).enumerate()
+        {
+            anthropic_parts.push(
+                anthropic_recorded
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        anthropic_recorded.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(anthropic_parts[0], anthropic_input);
+        assert_eq!(anthropic_parts[1], *anthropic_received.lock().unwrap());
+        assert_eq!(anthropic_parts[2], anthropic_output);
+        assert_eq!(anthropic_parts[3], anthropic_output);
+        let stream_input = Bytes::from_static(br#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stream":true}"#);
+        let stream_reply = super::messages::proxy(
+            state.clone(),
+            caller.clone(),
+            Utc::now(),
+            "/v1/messages",
+            HeaderMap::new(),
+            stream_input.clone(),
+            super::messages::Operation::Messages,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stream_reply.status(), StatusCode::OK);
+        let stream_output = to_bytes(stream_reply.into_body(), 16384).await.unwrap();
+        assert_eq!(stream_output, ANTHROPIC_WIRE);
+        let stream_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path
+                    && entry != &anthropic_path
+                    && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let stream_record =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&stream_path, &keys, 16384)
+                .unwrap();
+        assert!(stream_record.complete);
+        let mut legs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for (position, (leg, sequence, sealed)) in stream_record.blocks.iter().enumerate() {
+            let index = match leg {
+                crate::capture_crypto::CaptureLeg::ClientRequest => 0,
+                crate::capture_crypto::CaptureLeg::ProviderRequest => 1,
+                crate::capture_crypto::CaptureLeg::ProviderResponse => 2,
+                crate::capture_crypto::CaptureLeg::ClientResponse => 3,
+                _ => continue,
+            };
+            legs[index].extend(
+                stream_record
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        stream_record.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(legs[0], stream_input);
+        assert_eq!(legs[1], *anthropic_received.lock().unwrap());
+        assert_eq!(legs[2], ANTHROPIC_WIRE.as_bytes());
+        assert_eq!(legs[3], stream_output);
+        let openai_input = Bytes::from_static(br#"{"model":"company-default","messages":[{"role":"user","content":"hello"}],"stream":true}"#);
+        let openai_reply = openai::execute(
+            &state,
+            RequestContext {
+                principal: caller.clone(),
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: openai_input.clone(),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await
+        .unwrap();
+        let openai_output = to_bytes(openai_reply.body, 16384).await.unwrap();
+        assert_eq!(openai_output, OPENAI_WIRE);
+        let openai_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path
+                    && entry != &anthropic_path
+                    && entry != &stream_path
+                    && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let openai_record =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&openai_path, &keys, 16384)
+                .unwrap();
+        assert!(openai_record.complete);
+        let mut openai_legs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for (position, (leg, sequence, sealed)) in openai_record.blocks.iter().enumerate() {
+            let index = match leg {
+                crate::capture_crypto::CaptureLeg::ClientRequest => 0,
+                crate::capture_crypto::CaptureLeg::ProviderRequest => 1,
+                crate::capture_crypto::CaptureLeg::ProviderResponse => 2,
+                crate::capture_crypto::CaptureLeg::ClientResponse => 3,
+                _ => continue,
+            };
+            openai_legs[index].extend(
+                openai_record
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        openai_record.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(openai_legs[0], openai_input);
+        assert_eq!(openai_legs[1], *received.lock().unwrap());
+        assert_eq!(openai_legs[2], OPENAI_WIRE.as_bytes());
+        assert_eq!(openai_legs[3], openai_output);
+        let cross_input = Bytes::from_static(
+            br#"{"model":"claude-test","input":"hello","max_output_tokens":32}"#,
+        );
+        let cross_reply = openai::execute(
+            &state,
+            RequestContext {
+                principal: caller.clone(),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: cross_input.clone(),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await
+        .unwrap();
+        let cross_output = to_bytes(cross_reply.body, 16384).await.unwrap();
+        let cross_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path
+                    && entry != &anthropic_path
+                    && entry != &stream_path
+                    && entry != &openai_path
+                    && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let cross_record =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&cross_path, &keys, 16384)
+                .unwrap();
+        assert!(cross_record.complete);
+        let mut cross_parts = Vec::new();
+        for (position, (leg, sequence, sealed)) in cross_record.blocks.iter().take(4).enumerate() {
+            cross_parts.push(
+                cross_record
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        cross_record.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(cross_parts[0], cross_input);
+        assert_eq!(cross_parts[1], *anthropic_received.lock().unwrap());
+        assert_ne!(cross_parts[0], cross_parts[1]);
+        assert_eq!(cross_parts[2], anthropic_output);
+        assert_eq!(cross_parts[3], cross_output);
+        assert_ne!(cross_parts[2], cross_parts[3]);
+        let cross_stream_input = Bytes::from_static(
+            br#"{"model":"claude-test","input":"hello","max_output_tokens":32,"stream":true}"#,
+        );
+        let cross_stream_reply = openai::execute(
+            &state,
+            RequestContext {
+                principal: caller.clone(),
+                received_at: Utc::now(),
+                path_and_query: "/v1/responses".to_owned(),
+                headers: HeaderMap::new(),
+                body: cross_stream_input.clone(),
+                operation: OpenAiOperation::Responses,
+            },
+        )
+        .await
+        .unwrap();
+        let cross_stream_output = to_bytes(cross_stream_reply.body, 65536).await.unwrap();
+        assert!(String::from_utf8_lossy(&cross_stream_output).contains("response.completed"));
+        let cross_stream_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path
+                    && entry != &anthropic_path
+                    && entry != &stream_path
+                    && entry != &openai_path
+                    && entry != &cross_path
+                    && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let cross_stream_record = crate::capture_spool::CaptureSpool::recover_with_keyring(
+            &cross_stream_path,
+            &keys,
+            65536,
+        )
+        .unwrap();
+        assert!(cross_stream_record.complete);
+        let mut cross_stream_legs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for (position, (leg, sequence, sealed)) in cross_stream_record.blocks.iter().enumerate() {
+            let index = match leg {
+                crate::capture_crypto::CaptureLeg::ClientRequest => 0,
+                crate::capture_crypto::CaptureLeg::ProviderRequest => 1,
+                crate::capture_crypto::CaptureLeg::ProviderResponse => 2,
+                crate::capture_crypto::CaptureLeg::ClientResponse => 3,
+                _ => continue,
+            };
+            cross_stream_legs[index].extend(
+                cross_stream_record
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        cross_stream_record.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(cross_stream_legs[0], cross_stream_input);
+        assert_eq!(cross_stream_legs[1], *anthropic_received.lock().unwrap());
+        assert_eq!(cross_stream_legs[2], ANTHROPIC_WIRE.as_bytes());
+        assert_eq!(cross_stream_legs[3], cross_stream_output);
+        assert_ne!(cross_stream_legs[0], cross_stream_legs[1]);
+        assert_ne!(cross_stream_legs[2], cross_stream_legs[3]);
+        let bad_input = Bytes::from_static(
+            br#"{"model":"company-default","messages":[{"role":"user","content":"bad-usage"}]}"#,
+        );
+        let error = match openai::execute(
+            &state,
+            RequestContext {
+                principal: caller.clone(),
+                received_at: Utc::now(),
+                path_and_query: "/v1/chat/completions".to_owned(),
+                headers: HeaderMap::new(),
+                body: bad_input.clone(),
+                operation: OpenAiOperation::ChatCompletions,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("expected invalid upstream usage to fail"),
+            Err(error) => error,
+        };
+        let error_output = to_bytes(error.into_response().into_body(), 16384)
+            .await
+            .unwrap();
+        let bad_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry != &path
+                    && entry != &anthropic_path
+                    && entry != &stream_path
+                    && entry != &openai_path
+                    && entry != &cross_path
+                    && entry != &cross_stream_path
+                    && entry.extension().is_some_and(|value| value == "capture")
+            })
+            .unwrap();
+        let bad_record =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&bad_path, &keys, 16384)
+                .unwrap();
+        assert!(bad_record.complete);
+        let mut bad_parts = Vec::new();
+        for (position, (leg, sequence, sealed)) in bad_record.blocks.iter().take(4).enumerate() {
+            bad_parts.push(
+                bad_record
+                    .cipher
+                    .unseal_timed(
+                        *leg,
+                        *sequence,
+                        position as u64,
+                        bad_record.elapsed_ns[position],
+                        sealed,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(bad_parts[0], bad_input);
+        assert_eq!(bad_parts[1], *received.lock().unwrap());
+        assert_eq!(bad_parts[2], br#"{"id":"chat-bad","usage":"invalid"}"#);
+        assert_eq!(bad_parts[3], error_output);
+        let ids = state
+            .credentials
+            .create_principal(crate::identity::NewPrincipal {
+                tenant_id: tenant,
+                user_name: "log-fixture",
+                device_name: "log-fixture",
+                client_name: "log-fixture",
+                agent_name: "log-fixture",
+            })
+            .await
+            .unwrap();
+        let owner = ids.user_id;
+        let gateway_key = state
+            .credentials
+            .create(crate::identity::NewCredential {
+                tenant_id: tenant,
+                display_name: "log-fixture",
+                principal: ids,
+                expires_at: None,
+            })
+            .await
+            .unwrap()
+            .plaintext;
+        let request_logs = logging::capture::Buffer::default();
+        let captures_before = std::fs::read_dir(&spool).unwrap().count();
+        for streaming in [false, true] {
+            let (subscriber, _provider) = logging::test_subscriber(request_logs.clone());
+            let body = json!({
+                "model": "company-default",
+                "messages": [{"role": "user", "content": "capture-log-request-sentinel"}],
+                "stream": streaming,
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("authorization", format!("Bearer {gateway_key}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (subscriber, _provider) = logging::test_subscriber(request_logs.clone());
+            let body = to_bytes(response.into_body(), 16384)
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+            assert!(body.windows(if streaming { 2 } else { 6 }).any(|part| part
+                == if streaming {
+                    b"ok".as_slice()
+                } else {
+                    b"answer".as_slice()
+                }));
+        }
+        assert_eq!(
+            std::fs::read_dir(&spool).unwrap().count(),
+            captures_before + 2
+        );
+        let request_lines = request_logs.lines();
+        assert_eq!(
+            request_lines
+                .iter()
+                .filter(|line| line["event"]["name"] == "http.access")
+                .count(),
+            2
+        );
+        let serialized = serde_json::to_string(&request_lines).unwrap();
+        for secret in ["capture-log-request-sentinel", gateway_key.as_str()] {
+            assert!(!serialized.contains(secret));
+        }
+        let owned_path = std::fs::read_dir(&spool)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                crate::capture_spool::CaptureSpool::recover_with_keyring(entry, &keys, 16384)
+                    .is_ok_and(|record| record.cipher.identity().user == owner)
+            })
+            .unwrap();
+        let owned_record =
+            crate::capture_spool::CaptureSpool::recover_with_keyring(&owned_path, &keys, 16384)
+                .unwrap();
+        let owned_capture = owned_record.cipher.identity().capture;
+        assert!(
+            crate::capture_archive::recover_and_import_keyring(
+                &state.pool,
+                &owned_path,
+                &keys,
+                16384,
+                state.capture_slots.clone(),
+            )
+            .await
+            .unwrap()
+        );
+        let other_ids = state
+            .credentials
+            .create_principal(crate::identity::NewPrincipal {
+                tenant_id: tenant,
+                user_name: "other-log-fixture",
+                device_name: "other-log-fixture",
+                client_name: "other-log-fixture",
+                agent_name: "other-log-fixture",
+            })
+            .await
+            .unwrap();
+        let other_key = state
+            .credentials
+            .create(crate::identity::NewCredential {
+                tenant_id: tenant,
+                display_name: "other-log-fixture",
+                principal: other_ids,
+                expires_at: None,
+            })
+            .await
+            .unwrap()
+            .plaintext;
+        let delete_uri = format!("/v1/request-captures/{owned_capture}");
+        for (key, expected) in [
+            (&other_key, StatusCode::NOT_FOUND),
+            (&gateway_key, StatusCode::ACCEPTED),
+        ] {
+            let result = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&delete_uri)
+                        .header("authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.status(), expected);
+        }
+        assert!(owned_path.exists());
+        let busy_request_slots = state
+            .capture_slots
+            .clone()
+            .acquire_many_owned(16)
+            .await
+            .unwrap();
+        let maintenance = crate::capture_maintenance::CaptureMaintenance::new(
+            spool.clone(),
+            keys.clone(),
+            crate::capture_spool::CaptureLimits::default(),
+            erasure.active.clone(),
+            0,
+        );
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let worker_pool = state.pool.clone();
+        let worker = tokio::spawn(async move {
+            maintenance
+                .run(&worker_pool, Duration::from_millis(50), receiver)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while owned_path.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(busy_request_slots);
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let result = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&delete_uri)
+                    .header("authorization", format!("Bearer {gateway_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::NO_CONTENT);
+        assert!(!owned_path.exists());
+        let deleted_content = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/v1/request-captures/{owned_capture}/content?leg=client_request"
+                    ))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(deleted_content.status(), StatusCode::OK);
+        let previous_upstream = received.lock().unwrap().clone();
+        let held_spool = base.join("spool-held");
+        std::fs::rename(&spool, &held_spool).unwrap();
+        let denied = openai::execute(&state, RequestContext {
+            principal: caller, received_at: Utc::now(), path_and_query: "/v1/chat/completions".to_owned(),
+            headers: HeaderMap::new(), body: Bytes::from_static(br#"{"model":"company-default","messages":[{"role":"user","content":"must-not-send"}]}"#),
+            operation: OpenAiOperation::ChatCompletions,
+        }).await;
+        std::fs::rename(&held_spool, &spool).unwrap();
+        assert!(matches!(
+            denied,
+            Err(crate::error::GatewayError::CaptureUnavailable)
+        ));
+        assert_eq!(*received.lock().unwrap(), previous_upstream);
+        let large_id = crate::capture_crypto::CaptureIdentity {
+            tenant,
+            capture: Uuid::new_v4(),
+            user,
+            created_ms: Utc::now().timestamp_millis(),
+            retention_days: 30,
+        };
+        let large_session = crate::capture_session::AsyncCaptureSession::create_from_keyring(
+            &state.pool,
+            crate::capture_session::CapturePaths {
+                spool: &spool,
+                anchors: &state.config.content_capture_anchor_dir,
+            },
+            &keys,
+            large_id,
+            &[],
+            crate::capture_spool::CaptureLimits::default(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        )
+        .await
+        .unwrap();
+        large_session
+            .save_requests(vec![b'x'; 8 * 1024 * 1024], b"provider".to_vec())
+            .await
+            .unwrap();
+        large_session
+            .save_response(
+                crate::capture_crypto::CaptureLeg::ProviderResponse,
+                b"response".to_vec(),
+            )
+            .await
+            .unwrap();
+        large_session
+            .save_response(
+                crate::capture_crypto::CaptureLeg::ClientResponse,
+                b"response".to_vec(),
+            )
+            .await
+            .unwrap();
+        large_session.finish().await.unwrap();
+        drop(large_session);
+        let large_path = spool.join(format!("{}.capture", large_id.capture));
+        assert!(
+            crate::capture_archive::recover_and_import_keyring(
+                &state.pool,
+                &large_path,
+                &keys,
+                16 * 1024 * 1024,
+                Arc::new(tokio::sync::Semaphore::new(1))
+            )
+            .await
+            .unwrap()
+        );
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/v1/request-captures/{}/content?leg=client_request",
+                        large_id.capture
+                    ))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", admin_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let mut chunks = cancelled.into_body().into_data_stream();
+        assert!(!chunks.next().await.unwrap().unwrap().is_empty());
+        drop(chunks);
+        let all_permits = tokio::time::timeout(
+            Duration::from_secs(5),
+            state.capture_slots.clone().acquire_many_owned(16),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(all_permits);
+        let network_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let network_address = network_listener.local_addr().unwrap();
+        let network_server = tokio::spawn(async move {
+            axum::serve(
+                network_listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{network_address}/admin/v1/request-captures/{}/content?leg=client_request",
+                large_id.capture
+            ))
+            .bearer_auth(&admin_session.access_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut network_chunks = response.bytes_stream();
+        let first_chunk = network_chunks.next().await.unwrap().unwrap();
+        assert!(!first_chunk.is_empty() && first_chunk.len() < 8 * 1024 * 1024);
+        drop(network_chunks);
+        let all_permits = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.capture_slots.clone().acquire_many_owned(16),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(all_permits);
+        let held_transactions: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction'")
+            .fetch_one(&state.pool).await.unwrap();
+        assert_eq!(held_transactions, 0);
+        network_server.abort();
+        let read_attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND target_id = $2 AND action = 'capture.content.read'")
+            .bind(tenant).bind(large_id.capture).fetch_one(&state.pool).await.unwrap();
+        assert_eq!(read_attempts, 2);
+        state.ledger.wait_for_idle().await;
+        server.abort();
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn capture_report_requires_admin_and_same_tenant(pool: PgPool) {
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let capture = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'fixture')")
+            .bind(user)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO capture_records (tenant_id, capture_id, user_id, key_fingerprint, wrapped_key, expires_at, state) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days', 'complete')")
+            .bind(tenant).bind(capture).bind(user).bind(vec![1u8; 32]).bind(vec![2u8; 60]).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO capture_blocks (tenant_id, capture_id, leg, sequence, position, elapsed_ns, sealed) VALUES ($1, $2, 0, 0, 0, 0, $3), ($1, $2, 0, 1, 1, 1, $3), ($1, $2, 2, 0, 2, 2, $3)")
+            .bind(tenant).bind(capture).bind(vec![1u8; 28]).execute(&pool).await.unwrap();
+        let mut config = test_config();
+        config.admin_bootstrap_token = Some("synthetic-bootstrap-token-32-chars".to_owned());
+        config.admin_bootstrap_tenant_id = Some(tenant);
+        let state = AppState::new(config, pool).unwrap();
+        let ip = "127.0.0.1".parse().unwrap();
+        let account = state
+            .admin
+            .bootstrap(
+                "synthetic-bootstrap-token-32-chars",
+                crate::admin::BootstrapInput {
+                    display_name: "admin".to_owned(),
+                    credential_name: "fixture".to_owned(),
+                },
+                ip,
+                ip,
+                "bootstrap",
+            )
+            .await
+            .unwrap();
+        let session = state
+            .admin
+            .login(&account.login_token, ip, ip, "login")
+            .await
+            .unwrap();
+        let context = state
+            .admin
+            .resolve_session(&session.access_token)
+            .await
+            .unwrap();
+        let report = state.admin.capture_report(&context, capture).await.unwrap();
+        assert_eq!(report["id"], capture.to_string());
+        assert_eq!(report["user_id"], user.to_string());
+        assert_eq!(report["state"], "complete");
+        assert_eq!(
+            report["blocks"],
+            json!({"client_request":2,"provider_request":0,"provider_response":1,"client_response":0})
+        );
+        assert!(report.get("wrapped_key").is_none() && report.get("key_fingerprint").is_none());
+        let mut denied = context.clone();
+        denied.tenant_id = Uuid::new_v4();
+        assert!(matches!(
+            state.admin.capture_report(&denied, capture).await,
+            Err(crate::admin::AdminError::Unauthorized)
+        ));
+        denied.tenant_id = tenant;
+        denied.role = crate::admin::AdminRole::Viewer;
+        assert!(matches!(
+            state.admin.capture_report(&denied, capture).await,
+            Err(crate::admin::AdminError::Forbidden)
+        ));
+        assert!(
+            crate::admin::authorize("GET", "/admin/v1/request-captures/{id}", denied.role)
+                .is_none()
+        );
+        assert!(
+            crate::admin::authorize("GET", "/admin/v1/request-captures/{id}", context.role)
+                .is_some()
+        );
+        let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND actor_admin_id = $2 AND target_id = $3 AND action = 'capture.metadata.read'")
+            .bind(tenant).bind(context.account_id).bind(capture).fetch_one(&state.pool).await.unwrap();
+        assert_eq!(audits, 1);
+        sqlx::query("CREATE FUNCTION reject_capture_metadata_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'capture.metadata.read' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END $$")
+            .execute(&state.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_capture_metadata_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_capture_metadata_audit()")
+            .execute(&state.pool).await.unwrap();
+        assert!(matches!(
+            state.admin.capture_report(&context, capture).await,
+            Err(crate::admin::AdminError::Database(_))
+        ));
+        sqlx::query("UPDATE admin_sessions SET revoked_at = now() WHERE id = $1")
+            .bind(context.session_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state.admin.capture_report(&context, capture).await,
+            Err(crate::admin::AdminError::Unauthorized)
+        ));
+        std::fs::remove_dir_all(&state.config.ledger_spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
     async fn unavailable_content_capture_stops_before_provider(pool: PgPool) {
         let called = Arc::new(AtomicUsize::new(0));
         let upstream_calls = called.clone();
@@ -1562,6 +3542,14 @@ mod tests {
     async fn admin_login_and_http_task_filter_keep_tenants_separate(pool: PgPool) {
         let tenant = Uuid::new_v4();
         let other = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let foreign_owner = Uuid::new_v4();
+        let own_capture = Uuid::new_v4();
+        let foreign_capture = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'mine'), ($3, $4, 'other')")
+            .bind(owner).bind(tenant).bind(foreign_owner).bind(other).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO capture_records (tenant_id, capture_id, user_id, key_fingerprint, wrapped_key, expires_at, state) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days', 'complete'), ($6, $7, $8, $4, $5, now() + interval '30 days', 'complete')")
+            .bind(tenant).bind(own_capture).bind(owner).bind(vec![1u8; 32]).bind(vec![2u8; 60]).bind(other).bind(foreign_capture).bind(foreign_owner).execute(&pool).await.unwrap();
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
         sqlx::query("INSERT INTO gateway_requests (id, tenant_id, request_id, status, created_at, completed_at) VALUES ($1, $2, 'mine', 'completed', now(), now()), ($3, $4, 'other', 'completed', now(), now())")
@@ -1630,6 +3618,122 @@ mod tests {
         assert_eq!(page["items"][0]["task_id"], "same-task");
         assert!(page["items"][0]["completed_at"].is_string());
         let token = format!("Bearer {}", session["access_token"].as_str().unwrap());
+        let capture_uri = format!("/admin/v1/request-captures/{own_capture}");
+        let owner_context = state
+            .admin
+            .resolve_session(session["access_token"].as_str().unwrap())
+            .await
+            .unwrap();
+        for role in [
+            crate::admin::AdminRole::Viewer,
+            crate::admin::AdminRole::Operator,
+        ] {
+            let account = state
+                .admin
+                .create_admin_account(
+                    &owner_context,
+                    crate::admin::AdminAccountCreate {
+                        display_name: role.as_str().to_owned(),
+                        credential_name: "fixture".to_owned(),
+                        role,
+                    },
+                    peer.ip(),
+                    peer.ip(),
+                    "create-restricted-account",
+                )
+                .await
+                .unwrap();
+            let restricted = state
+                .admin
+                .login(
+                    &account.login_token,
+                    peer.ip(),
+                    peer.ip(),
+                    "restricted-login",
+                )
+                .await
+                .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&capture_uri)
+                        .header(
+                            "authorization",
+                            format!("Bearer {}", restricted.access_token),
+                        )
+                        .extension(axum::extract::ConnectInfo(peer))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let content = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/admin/v1/request-captures/{own_capture}/content?leg=client_request"
+                        ))
+                        .header(
+                            "authorization",
+                            format!("Bearer {}", restricted.access_token),
+                        )
+                        .extension(axum::extract::ConnectInfo(peer))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(content.status(), StatusCode::FORBIDDEN);
+        }
+        let denials: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'admin.authorization.denied' AND target_type = 'admin_route'")
+            .bind(tenant).fetch_one(&state.pool).await.unwrap();
+        assert_eq!(denials, 4);
+        let no_session = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&capture_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        let own_capture_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&capture_uri)
+                    .header("authorization", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(own_capture_response.status(), StatusCode::OK);
+        let capture_report: serde_json::Value = serde_json::from_slice(
+            &to_bytes(own_capture_response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(capture_report["user_id"], owner.to_string());
+        assert!(capture_report.get("wrapped_key").is_none());
+        let foreign_capture_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/admin/v1/request-captures/{foreign_capture}"))
+                    .header("authorization", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign_capture_response.status(), StatusCode::NOT_FOUND);
         let own = app
             .clone()
             .oneshot(
@@ -3074,6 +5178,7 @@ mod tests {
         assert!(!spooled.contains("sentinel-prompt"));
         assert!(!spooled.contains("sentinel-response"));
 
+        drop(unavailable_state);
         let recovered =
             Ledger::open(pool.clone(), spool_dir.clone(), 1024 * 1024, 32 * 1024).unwrap();
         assert_eq!(recovered.flush_startup().await.unwrap(), 1);
@@ -5651,12 +7756,9 @@ mod tests {
                 ledger.wait_for_finalizations().await;
                 ledger.wait_for_idle().await;
                 let finalized = std::fs::read_dir(directory).unwrap().all(|entry| {
-                    entry
-                        .unwrap()
-                        .path()
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        == Some("ready")
+                    let path = entry.unwrap().path();
+                    path.file_name().and_then(|value| value.to_str()) == Some(".ledger-spool.lock")
+                        || path.extension().and_then(|value| value.to_str()) == Some("ready")
                 });
                 if finalized {
                     return;

@@ -53,6 +53,7 @@ impl AsyncCaptureSession {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn create(
         pool: &PgPool,
         paths: CapturePaths<'_>,
@@ -242,6 +243,7 @@ impl AsyncCaptureSession {
 }
 
 impl CaptureSession {
+    #[cfg(test)]
     pub(crate) async fn create(
         pool: &PgPool,
         root: &Path,

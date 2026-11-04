@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE NOT success) AS \"clean!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "clean!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d0e8e015495ef1f626c52f1db44596e0a2c1d4a779b7d04e4c0375dcf32f61c4"
+}

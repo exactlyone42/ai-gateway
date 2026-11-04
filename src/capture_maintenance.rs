@@ -1,4 +1,4 @@
-use crate::capture_archive::{CaptureArchiveError, expire_batch};
+use crate::capture_archive::{CaptureArchiveError, expire_batch, replay_erasure};
 use crate::capture_backup_barrier::try_shared;
 use crate::capture_recovery::RecoveryScanner;
 use crate::capture_spool::CaptureLimits;
@@ -16,6 +16,8 @@ pub(crate) struct CaptureMaintenance {
     limits: CaptureLimits,
     capacity: Arc<Semaphore>,
     scanner: Mutex<Option<RecoveryScanner>>,
+    erasure: Arc<crate::capture_erasure::ActiveErasure>,
+    replayed: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,6 +28,7 @@ pub(crate) enum MaintenanceResult {
         imported: usize,
         failed: usize,
         expiration_batches: usize,
+        recovery_complete: bool,
     },
 }
 
@@ -34,14 +37,17 @@ impl CaptureMaintenance {
         spool: PathBuf,
         keys: PathBuf,
         limits: CaptureLimits,
-        capacity: Arc<Semaphore>,
+        erasure: Arc<crate::capture_erasure::ActiveErasure>,
+        replayed: usize,
     ) -> Self {
         Self {
             spool,
             keys,
             limits,
-            capacity,
+            capacity: Arc::new(Semaphore::new(1)),
             scanner: Mutex::new(None),
+            erasure,
+            replayed: std::sync::atomic::AtomicUsize::new(replayed),
         }
     }
 
@@ -76,6 +82,18 @@ impl CaptureMaintenance {
         if !locked {
             return Ok(MaintenanceResult::Busy);
         }
+        let start = self.replayed.load(std::sync::atomic::Ordering::Acquire);
+        let replayed = replay_erasure(
+            pool,
+            self.erasure.clone(),
+            &self.spool,
+            &self.keys,
+            self.limits,
+            start,
+        )
+        .await?;
+        self.replayed
+            .store(replayed, std::sync::atomic::Ordering::Release);
         if scanner.is_none() {
             *scanner = Some(RecoveryScanner::open(&self.spool, self.capacity.clone()).await?);
         }
@@ -91,7 +109,7 @@ impl CaptureMaintenance {
             *scanner = None;
         }
         let mut expiration_batches = 0;
-        while expiration_batches < 32 && expire_batch(pool).await? {
+        while expiration_batches < 32 && expire_batch(pool, self.erasure.clone()).await? {
             expiration_batches += 1;
         }
         tx.commit().await.map_err(|_| CaptureArchiveError)?;
@@ -101,7 +119,48 @@ impl CaptureMaintenance {
             imported: report.imported,
             failed: report.failed,
             expiration_batches,
+            recovery_complete: report.finished,
         })
+    }
+
+    pub(crate) async fn prepare(&self, pool: &PgPool) -> Result<(), CaptureArchiveError> {
+        let mut last_report = std::time::Instant::now();
+        let mut rescan_after_expiration = false;
+        let mut reported_waiting = false;
+        loop {
+            if let MaintenanceResult::Completed {
+                failed,
+                recovery_complete,
+                expiration_batches,
+                ..
+            } = self.run_once(pool).await?
+            {
+                if failed > 0 {
+                    return Err(CaptureArchiveError);
+                }
+                rescan_after_expiration |= expiration_batches > 0;
+                if recovery_complete
+                    && !sqlx::query_file_scalar!("queries/capture_expire_pending.sql")
+                        .fetch_one(pool)
+                        .await
+                        .map_err(|_| CaptureArchiveError)?
+                {
+                    if !rescan_after_expiration {
+                        return Ok(());
+                    }
+                    rescan_after_expiration = false;
+                }
+            }
+            if !reported_waiting || last_report.elapsed() >= Duration::from_secs(30) {
+                tracing::info!(
+                    event.name = "capture_startup_cleanup_waiting",
+                    "waiting for capture cleanup"
+                );
+                last_report = std::time::Instant::now();
+                reported_waiting = true;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     pub(crate) async fn run(
@@ -139,11 +198,60 @@ mod tests {
     use sqlx::PgPool;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::{Semaphore, watch};
+    use tokio::sync::watch;
     use uuid::Uuid;
 
     #[sqlx::test]
+    async fn occupied_connection_stalls_maintenance_in_two_connection_pool(pool: PgPool) {
+        let erasure = crate::capture_erasure::TestErasure::new();
+        let base = std::env::temp_dir().join(format!("capture-pool-{}", Uuid::new_v4()));
+        std::fs::create_dir(&base).unwrap();
+        let limited = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let held = limited.acquire().await.unwrap();
+        let maintenance = CaptureMaintenance::new(
+            base.clone(),
+            base.clone(),
+            CaptureLimits::for_test(4096),
+            erasure.active.clone(),
+            0,
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), maintenance.run_once(&limited))
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), maintenance.run_once(&limited))
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        limited.close().await;
+        let larger = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let held = larger.acquire().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), maintenance.run_once(&larger))
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        drop(held);
+        larger.close().await;
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[sqlx::test]
     async fn maintenance_uses_one_database_lock_and_stops_on_request(pool: PgPool) {
+        let erasure = crate::capture_erasure::TestErasure::new();
         let base = std::env::temp_dir().join(format!("capture-maintenance-{}", Uuid::new_v4()));
         std::fs::create_dir(&base).unwrap();
         let spool = base.join("spool");
@@ -183,7 +291,8 @@ mod tests {
             spool.clone(),
             keys,
             CaptureLimits::for_test(4096),
-            Arc::new(Semaphore::new(1)),
+            erasure.active.clone(),
+            0,
         ));
         let single = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -214,7 +323,8 @@ mod tests {
                 examined: 3,
                 imported: 1,
                 failed: 0,
-                expiration_batches: 0
+                expiration_batches: 0,
+                recovery_complete: true,
             }
         );
         let count: i64 = sqlx::query_scalar(
@@ -267,6 +377,37 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state, "deleted");
+        let expired_before_start = CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..expired
+        };
+        let permit = reserve_anchored(&pool, &anchors, &master).await.unwrap();
+        let mut unfinished = CaptureSpool::create_with_permit(
+            &spool,
+            expired_before_start,
+            &master,
+            &[],
+            permit,
+            CaptureLimits::for_test(4096),
+        )
+        .unwrap();
+        unfinished
+            .append(CaptureLeg::ClientRequest, 0, b"expired-before-start")
+            .unwrap();
+        let unfinished_path = unfinished.path().to_owned();
+        drop(unfinished);
+        maintenance.prepare(&pool).await.unwrap();
+        assert!(!unfinished_path.exists());
+        assert!(
+            sqlx::query_file_scalar!(
+                "queries/test_capture_deleted.sql",
+                expired_before_start.tenant,
+                expired_before_start.capture
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
         let second = CaptureIdentity {
             capture: Uuid::new_v4(),
             ..identity

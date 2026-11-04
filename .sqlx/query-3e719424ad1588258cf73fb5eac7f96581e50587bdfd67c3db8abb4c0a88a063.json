@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n    SELECT 1 FROM capture_records\n    WHERE tenant_id = $1 AND user_id = $2 AND capture_id = $3\n) AS \"exists!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3e719424ad1588258cf73fb5eac7f96581e50587bdfd67c3db8abb4c0a88a063"
+}

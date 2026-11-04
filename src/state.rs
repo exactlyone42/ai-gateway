@@ -46,6 +46,10 @@ pub struct AppState {
     pub(crate) lifecycle: ProcessLifecycle,
     /// Bounds concurrent shadow decompositions; a busy gateway skips rather than queues.
     pub(crate) shadow_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) capture_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) capture_erasure: Option<Arc<crate::capture_erasure::ActiveErasure>>,
+    #[cfg(test)]
+    pub(crate) capture_test_enabled: bool,
     pub(crate) held_token: Option<crate::held_token::HeldToken>,
     pub(crate) personal_tokens: Option<crate::held_token::PersonalTokens>,
 }
@@ -317,11 +321,14 @@ impl AppState {
         .with_provider_profiles(profiles.clone())
         .with_policy_engine(policies.clone())
         .with_scheduler(scheduler.clone());
-        let ledger = Ledger::open(
+        let ledger = Ledger::open_coordinated(
             pool.clone(),
             config.ledger_spool_dir.clone(),
             config.ledger_spool_max_bytes,
             config.ledger_spool_entry_max_bytes,
+            config
+                .content_capture_enabled
+                .then(|| config.ledger_spool_dir.clone()),
         )?;
         let models = ModelRegistry::new(pool.clone(), profiles, config.allowed_models.clone());
         let client = Client::builder()
@@ -352,6 +359,10 @@ impl AppState {
             ledger,
             lifecycle: ProcessLifecycle::default(),
             shadow_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            capture_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+            capture_erasure: None,
+            #[cfg(test)]
+            capture_test_enabled: false,
             held_token,
             personal_tokens,
         })

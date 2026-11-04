@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM capture_records) + (SELECT count(*) FROM capture_master_key_usage) + (SELECT count(*) FROM capture_erasure_marks) AS \"count!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "767822a0e8186dfe1aec418602ff06ae8aaa064626c9eddd8ef2c19961f12b90"
+}

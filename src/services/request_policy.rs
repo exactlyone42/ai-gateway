@@ -80,7 +80,17 @@ pub async fn prepare(
         .await?;
         return Err(GatewayError::ModelForbidden);
     }
-    if policy.content_capture == crate::policy::ContentCaptureMode::Full {
+    let capture_ready = {
+        #[cfg(test)]
+        {
+            state.capture_test_enabled
+        }
+        #[cfg(not(test))]
+        {
+            state.config.credential_environment == "dev"
+        }
+    };
+    if policy.content_capture == crate::policy::ContentCaptureMode::Full && !capture_ready {
         record(
             state,
             &rejection,

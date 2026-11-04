@@ -1,0 +1,2 @@
+CREATE DATABASE witness_owned OWNER gateway_witness_database_owner;
+GRANT CREATE ON DATABASE witness_owned TO gateway_witness_dirty_owner;

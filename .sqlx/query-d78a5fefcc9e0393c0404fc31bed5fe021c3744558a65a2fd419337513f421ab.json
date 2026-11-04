@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH owner AS (\n    INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'replay-test') RETURNING id, tenant_id\n), record AS (\n    INSERT INTO capture_records (tenant_id, capture_id, user_id, key_fingerprint, wrapped_key, created_at, expires_at, state)\n    SELECT tenant_id, $3, id, decode(repeat('01', 32), 'hex'), decode(repeat('02', 60), 'hex'), now(), now() + interval '1 day', 'complete'\n    FROM owner RETURNING tenant_id, capture_id\n)\nINSERT INTO capture_blocks (tenant_id, capture_id, leg, sequence, position, elapsed_ns, sealed)\nSELECT tenant_id, capture_id, 0, n, n, n, decode(repeat('03', 28), 'hex')\nFROM record CROSS JOIN generate_series(0, 69) AS n\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d78a5fefcc9e0393c0404fc31bed5fe021c3744558a65a2fd419337513f421ab"
+}

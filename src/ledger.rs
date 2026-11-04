@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{Seek as _, SeekFrom, Write as _},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
@@ -12,7 +13,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Pool, Postgres, types::Json};
+use sqlx::{Pool, Postgres};
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +27,13 @@ use crate::{
 };
 
 const SCHEMA_VERSION: u8 = 1;
+const FLUSH_BATCH_SIZE: usize = 32;
 pub const MIN_ENTRY_MAX_BYTES: u64 = 32 * 1024;
+
+struct FlushBatch {
+    flushed: usize,
+    more: bool,
+}
 
 #[derive(Debug, Error)]
 pub enum LedgerError {
@@ -34,6 +41,8 @@ pub enum LedgerError {
     InvalidCapacity,
     #[error("ledger spool is full")]
     SpoolFull,
+    #[error("ledger spool is already in use")]
+    SpoolBusy,
     #[error("ledger record exceeds the reserved entry size")]
     RecordTooLarge,
     #[error("ledger spool is unavailable")]
@@ -44,6 +53,12 @@ pub enum LedgerError {
     Worker(#[source] tokio::task::JoinError),
     #[error("ledger flush gate is closed")]
     FlushGateClosed,
+    #[error("ledger checkpoint is already active")]
+    CheckpointBusy,
+    #[error("ledger backup coordination busy")]
+    BackupBusy,
+    #[error("ledger backup coordination unavailable")]
+    BackupUnavailable,
     #[error("usage database is unavailable")]
     Database(#[source] sqlx::Error),
 }
@@ -53,9 +68,38 @@ pub struct Ledger {
     inner: Arc<LedgerInner>,
 }
 
+struct PendingFinalization {
+    ledger: Ledger,
+}
+
+impl PendingFinalization {
+    fn new(ledger: Ledger) -> Self {
+        ledger
+            .inner
+            .finalizations_pending
+            .fetch_add(1, Ordering::AcqRel);
+        Self { ledger }
+    }
+}
+
+impl Drop for PendingFinalization {
+    fn drop(&mut self) {
+        if self
+            .ledger
+            .inner
+            .finalizations_pending
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.ledger.inner.finalizations_idle.notify_waiters();
+        }
+    }
+}
+
 struct LedgerInner {
     pool: Pool<Postgres>,
     spool: Arc<Spool>,
+    capture_backup_root: Option<PathBuf>,
     database_writes_enabled: AtomicBool,
     flush_pending: AtomicBool,
     flush_worker_scheduled: AtomicBool,
@@ -199,11 +243,13 @@ pub struct TokenUsage {
 
 pub struct Reservation {
     ledger: Ledger,
+    backup_guard: Option<Arc<crate::capture_backup_barrier::CaptureBarrierLease>>,
     id: Option<Uuid>,
     envelope: RequestEnvelope,
     _scheduler_lease: Option<SchedulerLease>,
     routing_lease: Option<RoutingLease>,
     force_token: Option<CancellationToken>,
+    capture: Option<Arc<crate::capture_session::AsyncCaptureSession>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -396,10 +442,12 @@ struct UsageRecord {
 
 struct Spool {
     directory: PathBuf,
+    _instance_lock: File,
     entry_max_bytes: u64,
     state: Mutex<SpoolState>,
     checkpointing: Mutex<HashSet<Uuid>>,
     checkpoint_idle: Condvar,
+    checkpoint_async_idle: Notify,
 }
 
 struct SpoolState {
@@ -414,11 +462,36 @@ impl Ledger {
         max_bytes: u64,
         entry_max_bytes: u64,
     ) -> Result<Self, LedgerError> {
+        Self::open_coordinated(pool, directory, max_bytes, entry_max_bytes, None)
+    }
+
+    pub(crate) fn open_coordinated(
+        pool: Pool<Postgres>,
+        directory: PathBuf,
+        max_bytes: u64,
+        entry_max_bytes: u64,
+        capture_backup_root: Option<PathBuf>,
+    ) -> Result<Self, LedgerError> {
+        fs::create_dir_all(&directory).map_err(LedgerError::Io)?;
+        let _backup_guard = capture_backup_root
+            .as_ref()
+            .map(|root| {
+                crate::capture_backup_barrier::try_shared(root).map_err(|error| match error {
+                    crate::capture_backup_barrier::CaptureBarrierError::Busy => {
+                        LedgerError::BackupBusy
+                    }
+                    crate::capture_backup_barrier::CaptureBarrierError::Unavailable => {
+                        LedgerError::BackupUnavailable
+                    }
+                })
+            })
+            .transpose()?;
         let spool = Arc::new(Spool::open(directory, max_bytes, entry_max_bytes)?);
         Ok(Self {
             inner: Arc::new(LedgerInner {
                 pool,
                 spool,
+                capture_backup_root,
                 database_writes_enabled: AtomicBool::new(true),
                 flush_pending: AtomicBool::new(false),
                 flush_worker_scheduled: AtomicBool::new(false),
@@ -441,22 +514,50 @@ impl Ledger {
         quota: Option<RequestQuotaSnapshot>,
         attribution: Option<&RequestAttribution>,
     ) -> Result<Reservation, LedgerError> {
+        let backup_guard = if let Some(root) = self.inner.capture_backup_root.clone() {
+            Some(Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    crate::capture_backup_barrier::try_shared(&root).map_err(|error| match error {
+                        crate::capture_backup_barrier::CaptureBarrierError::Busy => {
+                            LedgerError::BackupBusy
+                        }
+                        crate::capture_backup_barrier::CaptureBarrierError::Unavailable => {
+                            LedgerError::BackupUnavailable
+                        }
+                    })
+                })
+                .await
+                .map_err(LedgerError::Worker)??,
+            ))
+        } else {
+            None
+        };
         let mut envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
         envelope.request.attribution = attribution.cloned();
         let id = envelope.request.id;
         let spool = Arc::clone(&self.inner.spool);
-        let stored = envelope.clone();
-        tokio::task::spawn_blocking(move || spool.reserve(id, &stored))
-            .await
-            .map_err(LedgerError::Worker)??;
-        Ok(Reservation {
-            ledger: self.clone(),
-            id: Some(id),
-            envelope,
-            _scheduler_lease: None,
-            routing_lease: None,
-            force_token: None,
+        let ledger = self.clone();
+        let pending = PendingFinalization::new(self.clone());
+        let (reservation, pending) = tokio::task::spawn_blocking(move || {
+            spool.reserve(id, &envelope)?;
+            Ok((
+                Reservation {
+                    ledger,
+                    backup_guard,
+                    id: Some(id),
+                    envelope,
+                    _scheduler_lease: None,
+                    routing_lease: None,
+                    force_token: None,
+                    capture: None,
+                },
+                pending,
+            ))
         })
+        .await
+        .map_err(LedgerError::Worker)??;
+        drop(pending);
+        Ok(reservation)
     }
 
     pub(crate) async fn reject(
@@ -507,13 +608,24 @@ impl Ledger {
             .acquire_owned()
             .await
             .map_err(|_| LedgerError::FlushGateClosed)?;
-        self.flush_once().await
+        let mut total = 0;
+        loop {
+            let batch = self.flush_once().await?;
+            total += batch.flushed;
+            if !batch.more {
+                return Ok(total);
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     pub(crate) async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.flush_idle.notified();
-            if !self.inner.flush_worker_scheduled.load(Ordering::Acquire) {
+            if !self.inner.flush_worker_scheduled.load(Ordering::Acquire)
+                && (!self.inner.flush_pending.load(Ordering::Acquire)
+                    || !self.inner.database_writes_enabled.load(Ordering::Acquire))
+            {
                 return;
             }
             notified.await;
@@ -534,32 +646,142 @@ impl Ledger {
         self.inner.finalizations_pending.load(Ordering::Acquire)
     }
 
-    async fn flush_once(&self) -> Result<usize, LedgerError> {
+    async fn flush_once(&self) -> Result<FlushBatch, LedgerError> {
+        let backup_guard = if let Some(root) = self.inner.capture_backup_root.clone() {
+            Some(Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    crate::capture_backup_barrier::try_shared(&root).map_err(|error| match error {
+                        crate::capture_backup_barrier::CaptureBarrierError::Busy => {
+                            LedgerError::BackupBusy
+                        }
+                        crate::capture_backup_barrier::CaptureBarrierError::Unavailable => {
+                            LedgerError::BackupUnavailable
+                        }
+                    })
+                })
+                .await
+                .map_err(LedgerError::Worker)??,
+            ))
+        } else {
+            None
+        };
         let spool = Arc::clone(&self.inner.spool);
-        let ready = tokio::task::spawn_blocking(move || spool.ready())
-            .await
-            .map_err(LedgerError::Worker)??;
+        let ready_guard = backup_guard.clone();
+        let (mut ready, retained_reservations) = tokio::task::spawn_blocking(move || {
+            let _guard = ready_guard;
+            let ready = spool.ready()?;
+            let retained = if ready.is_empty() {
+                HashSet::new()
+            } else {
+                spool.conflict_reservations()?
+            };
+            Ok::<_, LedgerError>((ready, retained))
+        })
+        .await
+        .map_err(LedgerError::Worker)??;
         if ready.is_empty() {
-            return Ok(0);
+            return Ok(FlushBatch {
+                flushed: 0,
+                more: false,
+            });
         }
-
-        let paths = ready
-            .iter()
-            .map(|entry| entry.0.clone())
-            .collect::<Vec<_>>();
-        let envelopes = ready.into_iter().map(|entry| entry.1).collect::<Vec<_>>();
-        sqlx::query("SELECT ingest_usage_envelopes($1)")
-            .bind(Json(envelopes))
-            .execute(&self.inner.pool)
-            .await
-            .map_err(LedgerError::Database)?;
-
-        let flushed = paths.len();
-        let spool = Arc::clone(&self.inner.spool);
-        tokio::task::spawn_blocking(move || spool.remove(&paths))
+        let mut reservations = HashMap::new();
+        for (_, envelope) in &ready {
+            if let Some(reservation) = envelope.request.quota_reservation_id {
+                *reservations
+                    .entry((envelope.request.tenant_id, reservation))
+                    .or_insert(0usize) += 1;
+            }
+        }
+        let mut ambiguous = Vec::new();
+        ready.retain(|(path, envelope)| {
+            let duplicate = envelope
+                .request
+                .quota_reservation_id
+                .is_some_and(|reservation| {
+                    reservations
+                        .get(&(envelope.request.tenant_id, reservation))
+                        .copied()
+                        .unwrap_or(0)
+                        > 1
+                        || retained_reservations
+                            .contains(&(envelope.request.tenant_id, reservation))
+                });
+            if duplicate {
+                ambiguous.push(path.clone());
+            }
+            !duplicate
+        });
+        if !ambiguous.is_empty() {
+            let spool = Arc::clone(&self.inner.spool);
+            let guard = backup_guard.clone();
+            tokio::task::spawn_blocking(move || {
+                let _guard = guard;
+                for path in &ambiguous {
+                    spool.quarantine(path)?;
+                }
+                Ok::<_, LedgerError>(())
+            })
             .await
             .map_err(LedgerError::Worker)??;
-        Ok(flushed)
+            tracing::error!(error.type = "ledger_conflicting_reservation", "conflicting usage records retained for review");
+        }
+        let more = ready.len() > FLUSH_BATCH_SIZE;
+        ready.truncate(FLUSH_BATCH_SIZE);
+        let mut pending = vec![ready];
+        let mut flushed = 0;
+        while let Some(batch) = pending.pop() {
+            if batch.is_empty() {
+                continue;
+            }
+            let payload =
+                serde_json::to_value(batch.iter().map(|entry| &entry.1).collect::<Vec<_>>())
+                    .map_err(LedgerError::Json)?;
+            match sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
+                .execute(&self.inner.pool)
+                .await
+            {
+                Ok(_) => {
+                    flushed += batch.len();
+                    let paths = batch.into_iter().map(|entry| entry.0).collect::<Vec<_>>();
+                    let spool = Arc::clone(&self.inner.spool);
+                    let guard = backup_guard.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _guard = guard;
+                        spool.remove(&paths)
+                    })
+                    .await
+                    .map_err(LedgerError::Worker)??;
+                }
+                Err(error)
+                    if error
+                        .as_database_error()
+                        .and_then(|value| value.code())
+                        .as_deref()
+                        == Some("GW409") =>
+                {
+                    if batch.len() > 1 {
+                        let mut first = batch;
+                        let second = first.split_off(first.len() / 2);
+                        pending.push(second);
+                        pending.push(first);
+                    } else {
+                        let path = batch[0].0.clone();
+                        let spool = Arc::clone(&self.inner.spool);
+                        let guard = backup_guard.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _guard = guard;
+                            spool.quarantine(&path)
+                        })
+                        .await
+                        .map_err(LedgerError::Worker)??;
+                        tracing::error!(error.type = "ledger_conflicting_record", "conflicting usage record retained for review");
+                    }
+                }
+                Err(error) => return Err(LedgerError::Database(error)),
+            }
+        }
+        Ok(FlushBatch { flushed, more })
     }
 
     fn schedule_flush(&self, runtime: &tokio::runtime::Handle) {
@@ -567,6 +789,7 @@ impl Ledger {
             return;
         }
         self.inner.flush_pending.store(true, Ordering::Release);
+        std::sync::atomic::fence(Ordering::SeqCst);
         if self
             .inner
             .flush_worker_scheduled
@@ -579,20 +802,31 @@ impl Ledger {
         let runtime = runtime.clone();
         let task_runtime = runtime.clone();
         runtime.spawn(async move {
+            let mut deferred = false;
             let permit = Arc::clone(&ledger.inner.flush_gate).acquire_owned().await;
             if let Ok(permit) = permit {
                 let should_flush = ledger.inner.flush_pending.swap(false, Ordering::AcqRel)
                     && ledger.inner.database_writes_enabled.load(Ordering::Acquire);
-                if should_flush && let Err(error) = ledger.flush_once().await {
-                    ledger
-                        .inner
-                        .database_writes_enabled
-                        .store(false, Ordering::Release);
-                    tracing::error!(
-                        error.type = "ledger_flush_failed",
-                        exception.message = %error,
-                        "usage remains in the durable spool; restart after database recovery"
-                    );
+                if should_flush {
+                    match ledger.flush_once().await {
+                    Ok(batch) if batch.more => { ledger.inner.flush_pending.store(true, Ordering::Release); }
+                    Ok(_) => {}
+                    Err(LedgerError::BackupBusy) => {
+                        ledger.inner.flush_pending.store(true, Ordering::Release);
+                        deferred = true;
+                    }
+                    Err(error) => {
+                        ledger
+                            .inner
+                            .database_writes_enabled
+                            .store(false, Ordering::Release);
+                        tracing::error!(
+                            error.type = "ledger_flush_failed",
+                            exception.message = %error,
+                            "usage remains in the durable spool; resolve the reported error before restart"
+                        );
+                    }
+                    }
                 }
                 drop(permit);
             } else {
@@ -602,10 +836,15 @@ impl Ledger {
                 );
             }
 
+            if deferred {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+
             ledger
                 .inner
                 .flush_worker_scheduled
                 .store(false, Ordering::Release);
+            std::sync::atomic::fence(Ordering::SeqCst);
             ledger.inner.flush_idle.notify_waiters();
             if ledger.inner.flush_pending.load(Ordering::Acquire)
                 && ledger.inner.database_writes_enabled.load(Ordering::Acquire)
@@ -617,6 +856,16 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub(crate) fn attach_capture(
+        &mut self,
+        capture: Arc<crate::capture_session::AsyncCaptureSession>,
+    ) {
+        self.capture = Some(capture);
+    }
+
+    pub(crate) fn capture(&self) -> Option<Arc<crate::capture_session::AsyncCaptureSession>> {
+        self.capture.clone()
+    }
     pub fn annotate_parameters(&mut self, requested: Value, provider: Value) {
         self.envelope.request.requested_parameters = Some(requested);
         self.envelope.request.provider_parameters = Some(provider);
@@ -729,13 +978,13 @@ impl Reservation {
     async fn checkpoint_current(&self) -> Result<(), LedgerError> {
         let id = self.id.ok_or(LedgerError::InvalidCapacity)?;
         let spool = Arc::clone(&self.ledger.inner.spool);
-        spool.begin_checkpoint(id)?;
+        spool.wait_for_checkpoint_async(id).await?;
+        let checkpoint = CheckpointGuard::begin(Arc::clone(&spool), id)?;
         let envelope = self.envelope.clone();
+        let backup_guard = self.backup_guard.clone();
         tokio::task::spawn_blocking(move || {
-            let _checkpoint = CheckpointGuard {
-                spool: Arc::clone(&spool),
-                id,
-            };
+            let _guard = backup_guard;
+            let _checkpoint = checkpoint;
             spool.checkpoint(id, &envelope)
         })
         .await
@@ -772,11 +1021,24 @@ impl Reservation {
         let id = self.id.take().ok_or(LedgerError::InvalidCapacity)?;
         let spool = Arc::clone(&self.ledger.inner.spool);
         let ledger = self.ledger.clone();
+        let backup_guard = self.backup_guard.clone();
         let runtime = tokio::runtime::Handle::current();
+        let pending = PendingFinalization::new(ledger.clone());
         tokio::task::spawn_blocking(move || {
+            let _pending = pending;
+            let _guard = backup_guard;
             let result = spool.publish(id);
-            if result.is_ok() {
-                ledger.schedule_flush(&runtime);
+            match &result {
+                Ok(()) => ledger.schedule_flush(&runtime),
+                Err(error) => tracing::error!(
+                    error.type = "ledger_publish_failed",
+                    exception.message = %error,
+                    exception.os_error = ?match error {
+                        LedgerError::Io(source) => source.raw_os_error(),
+                        _ => None,
+                    },
+                    "ledger publish failed; inspect the durable spool"
+                ),
             }
             result
         })
@@ -799,15 +1061,29 @@ impl Drop for Reservation {
             .cancel(Utc::now(), forced.then_some("shutdown_timeout"));
         let envelope = self.envelope.clone();
         let ledger = self.ledger.clone();
+        let backup_guard = self.backup_guard.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let flush_handle = handle.clone();
-                ledger
-                    .inner
-                    .finalizations_pending
-                    .fetch_add(1, Ordering::AcqRel);
-                handle.spawn_blocking(move || {
-                    match ledger.inner.spool.finish(id, &envelope) {
+                let pending = Arc::new(PendingFinalization::new(ledger.clone()));
+                handle.spawn(async move {
+                    let result = match ledger.inner.spool.wait_for_checkpoint_async(id).await {
+                        Ok(()) => {
+                            let spool = ledger.inner.spool.clone();
+                            let worker_pending = pending.clone();
+                            let worker_guard = backup_guard.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let _pending = worker_pending;
+                                let _guard = worker_guard;
+                                spool.finish(id, &envelope)
+                            })
+                            .await
+                            .map_err(LedgerError::Worker)
+                            .and_then(|result| result)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
                         Ok(()) => {
                             ledger.schedule_flush(&flush_handle);
                         }
@@ -816,14 +1092,6 @@ impl Drop for Reservation {
                             exception.message = %error,
                             "an interrupted request remains reserved in the spool"
                         ),
-                    }
-                    if ledger
-                        .inner
-                        .finalizations_pending
-                        .fetch_sub(1, Ordering::AcqRel)
-                        == 1
-                    {
-                        ledger.inner.finalizations_idle.notify_waiters();
                     }
                 });
             }
@@ -1276,13 +1544,40 @@ impl Spool {
             return Err(LedgerError::InvalidCapacity);
         }
         fs::create_dir_all(&directory).map_err(LedgerError::Io)?;
+        let lock_path = directory.join(".ledger-spool.lock");
+        let instance_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&lock_path)
+            .map_err(LedgerError::Io)?;
+        let metadata = instance_lock.metadata().map_err(LedgerError::Io)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(LedgerError::InvalidCapacity);
+        }
+        instance_lock.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => LedgerError::SpoolBusy,
+            std::fs::TryLockError::Error(error) => LedgerError::Io(error),
+        })?;
+        let current = fs::symlink_metadata(&lock_path).map_err(LedgerError::Io)?;
+        if !current.is_file()
+            || metadata.nlink() != 1
+            || current.dev() != metadata.dev()
+            || current.ino() != metadata.ino()
+        {
+            return Err(LedgerError::InvalidCapacity);
+        }
         let mut states: HashMap<String, HashSet<String>> = HashMap::new();
         for entry in fs::read_dir(&directory).map_err(LedgerError::Io)? {
             let path = entry.map_err(LedgerError::Io)?.path();
             let extension = path.extension().and_then(|value| value.to_str());
             match extension {
                 Some("tmp") => fs::remove_file(path).map_err(LedgerError::Io)?,
-                Some(extension @ ("reserved" | "working" | "next" | "ready")) => {
+                Some(extension @ ("reserved" | "working" | "next" | "ready" | "conflict")) => {
+                    read_bounded(&path, entry_max_bytes)?;
                     let stem = path
                         .file_stem()
                         .and_then(|value| value.to_str())
@@ -1298,6 +1593,13 @@ impl Spool {
 
         let mut ids = HashSet::new();
         for (stem, extensions) in states {
+            if extensions.contains("conflict") {
+                if extensions.len() != 1 {
+                    return Err(LedgerError::InvalidCapacity);
+                }
+                ids.insert(stem);
+                continue;
+            }
             let ready = directory.join(format!("{stem}.ready"));
             let reserved = directory.join(format!("{stem}.reserved"));
             let working = directory.join(format!("{stem}.working"));
@@ -1309,7 +1611,9 @@ impl Spool {
                 remove_if_present(&next)?;
                 ids.insert(stem);
             } else if extensions.contains("reserved") {
-                if extensions.contains("working") && self_contained_envelope(&working)? {
+                if extensions.contains("working")
+                    && self_contained_envelope(&working, entry_max_bytes)?
+                {
                     fs::rename(&working, &ready).map_err(LedgerError::Io)?;
                     remove_if_present(&reserved)?;
                 } else {
@@ -1349,6 +1653,7 @@ impl Spool {
         }
         Ok(Self {
             directory,
+            _instance_lock: instance_lock,
             entry_max_bytes,
             state: Mutex::new(SpoolState {
                 slots_used: ids.len(),
@@ -1356,21 +1661,43 @@ impl Spool {
             }),
             checkpointing: Mutex::new(HashSet::new()),
             checkpoint_idle: Condvar::new(),
+            checkpoint_async_idle: Notify::new(),
         })
     }
 
     fn begin_checkpoint(&self, id: Uuid) -> Result<(), LedgerError> {
-        self.checkpointing
+        let inserted = self
+            .checkpointing
             .lock()
             .map_err(|_| LedgerError::InvalidCapacity)?
             .insert(id);
-        Ok(())
+        if inserted {
+            Ok(())
+        } else {
+            Err(LedgerError::CheckpointBusy)
+        }
     }
 
     fn end_checkpoint(&self, id: Uuid) {
         if let Ok(mut active) = self.checkpointing.lock() {
             active.remove(&id);
-            self.checkpoint_idle.notify_all();
+        }
+        self.checkpoint_idle.notify_all();
+        self.checkpoint_async_idle.notify_waiters();
+    }
+
+    async fn wait_for_checkpoint_async(&self, id: Uuid) -> Result<(), LedgerError> {
+        loop {
+            let notified = self.checkpoint_async_idle.notified();
+            let active = self
+                .checkpointing
+                .lock()
+                .map_err(|_| LedgerError::InvalidCapacity)?
+                .contains(&id);
+            if !active {
+                return Ok(());
+            }
+            notified.await;
         }
     }
 
@@ -1393,6 +1720,11 @@ impl Spool {
             .state
             .lock()
             .map_err(|_| LedgerError::InvalidCapacity)?;
+        match fs::symlink_metadata(self.path(id, "conflict")) {
+            Ok(_) => return Err(LedgerError::InvalidCapacity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(LedgerError::Io(error)),
+        }
         if state.slots_used >= state.slots_max {
             return Err(LedgerError::SpoolFull);
         }
@@ -1472,19 +1804,41 @@ impl Spool {
         paths
             .into_iter()
             .map(|path| {
-                let bytes = fs::read(&path).map_err(LedgerError::Io)?;
-                let end = bytes
-                    .iter()
-                    .rposition(|byte| *byte != 0)
-                    .map_or(0, |index| index + 1);
-                let envelope: RequestEnvelope =
-                    serde_json::from_slice(&bytes[..end]).map_err(LedgerError::Json)?;
-                if envelope.schema_version != SCHEMA_VERSION {
-                    return Err(LedgerError::InvalidCapacity);
-                }
+                let envelope = self.read_envelope(&path, "ready")?;
                 Ok((path, envelope))
             })
             .collect()
+    }
+
+    fn conflict_reservations(&self) -> Result<HashSet<(Uuid, Uuid)>, LedgerError> {
+        let mut reservations = HashSet::new();
+        for entry in fs::read_dir(&self.directory).map_err(LedgerError::Io)? {
+            let path = entry.map_err(LedgerError::Io)?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("conflict") {
+                continue;
+            }
+            let envelope = self.read_envelope(&path, "conflict")?;
+            if let Some(reservation) = envelope.request.quota_reservation_id {
+                reservations.insert((envelope.request.tenant_id, reservation));
+            }
+        }
+        Ok(reservations)
+    }
+
+    fn read_envelope(&self, path: &Path, extension: &str) -> Result<RequestEnvelope, LedgerError> {
+        let bytes = read_bounded(path, self.entry_max_bytes)?;
+        let end = bytes
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .map_or(0, |index| index + 1);
+        let envelope: RequestEnvelope =
+            serde_json::from_slice(&bytes[..end]).map_err(LedgerError::Json)?;
+        if envelope.schema_version != SCHEMA_VERSION
+            || path != self.path(envelope.request.id, extension)
+        {
+            return Err(LedgerError::InvalidCapacity);
+        }
+        Ok(envelope)
     }
 
     fn remove(&self, paths: &[PathBuf]) -> Result<(), LedgerError> {
@@ -1495,6 +1849,31 @@ impl Spool {
         for path in paths {
             fs::remove_file(path).map_err(LedgerError::Io)?;
             state.slots_used = state.slots_used.saturating_sub(1);
+        }
+        self.sync_directory()
+    }
+
+    fn quarantine(&self, path: &Path) -> Result<(), LedgerError> {
+        let _state = self
+            .state
+            .lock()
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        let target = path.with_extension("conflict");
+        let from = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        let to = std::ffi::CString::new(target.as_os_str().as_encoded_bytes())
+            .map_err(|_| LedgerError::InvalidCapacity)?;
+        if unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } != 0
+        {
+            return Err(LedgerError::Io(std::io::Error::last_os_error()));
         }
         self.sync_directory()
     }
@@ -1559,14 +1938,41 @@ struct CheckpointGuard {
     id: Uuid,
 }
 
+impl CheckpointGuard {
+    fn begin(spool: Arc<Spool>, id: Uuid) -> Result<Self, LedgerError> {
+        spool.begin_checkpoint(id)?;
+        Ok(Self { spool, id })
+    }
+}
+
 impl Drop for CheckpointGuard {
     fn drop(&mut self) {
         self.spool.end_checkpoint(self.id);
     }
 }
 
-fn self_contained_envelope(path: &Path) -> Result<bool, LedgerError> {
-    let bytes = fs::read(path).map_err(LedgerError::Io)?;
+fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, LedgerError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(LedgerError::Io)?;
+    let metadata = file.metadata().map_err(LedgerError::Io)?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(LedgerError::InvalidCapacity);
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(LedgerError::Io)?;
+    if u64::try_from(bytes.len()).map_or(true, |size| size > max_bytes) {
+        return Err(LedgerError::RecordTooLarge);
+    }
+    Ok(bytes)
+}
+
+fn self_contained_envelope(path: &Path, entry_max_bytes: u64) -> Result<bool, LedgerError> {
+    let bytes = read_bounded(path, entry_max_bytes)?;
     let end = bytes
         .iter()
         .rposition(|byte| *byte != 0)
@@ -1574,19 +1980,32 @@ fn self_contained_envelope(path: &Path) -> Result<bool, LedgerError> {
     if end == 0 {
         return Ok(false);
     }
-    Ok(serde_json::from_slice::<RequestEnvelope>(&bytes[..end])
-        .is_ok_and(|envelope| envelope.schema_version == SCHEMA_VERSION))
+    let Ok(envelope) = serde_json::from_slice::<RequestEnvelope>(&bytes[..end]) else {
+        return Ok(false);
+    };
+    if envelope.schema_version != SCHEMA_VERSION {
+        return Ok(false);
+    }
+    if path.file_stem().and_then(|value| value.to_str())
+        != Some(envelope.request.id.simple().to_string().as_str())
+    {
+        return Err(LedgerError::InvalidCapacity);
+    }
+    Ok(true)
 }
 
 fn finalize_recovered_envelope(path: &Path, entry_max_bytes: u64) -> Result<(), LedgerError> {
-    let bytes = fs::read(path).map_err(LedgerError::Io)?;
+    let bytes = read_bounded(path, entry_max_bytes)?;
     let end = bytes
         .iter()
         .rposition(|byte| *byte != 0)
         .map_or(0, |index| index + 1);
     let mut envelope: RequestEnvelope =
         serde_json::from_slice(&bytes[..end]).map_err(LedgerError::Json)?;
-    if envelope.schema_version != SCHEMA_VERSION {
+    if envelope.schema_version != SCHEMA_VERSION
+        || path.file_stem().and_then(|value| value.to_str())
+            != Some(envelope.request.id.simple().to_string().as_str())
+    {
         return Err(LedgerError::InvalidCapacity);
     }
     let needs_finalization = match envelope.finalized {
@@ -1759,6 +2178,797 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn capture_backup_lock_defers_ledger_flush_until_release(pool: Pool<Postgres>) {
+        let directory = test_directory("backup-ledger-race");
+        let capture_directory = test_directory("backup-capture-lock");
+        std::fs::create_dir_all(&capture_directory).unwrap();
+        let ledger = Ledger::open_coordinated(
+            pool.clone(),
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(capture_directory.clone()),
+        )
+        .unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("backup-ledger-race"));
+        let id = envelope.request.id;
+        ledger.inner.spool.reserve(id, &envelope).unwrap();
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![],
+            completed_at: Utc::now(),
+        });
+        ledger.inner.spool.finish(id, &envelope).unwrap();
+        assert_eq!(ready_count(&directory), 1);
+        let backup = crate::capture_backup_barrier::try_exclusive(&capture_directory).unwrap();
+        assert!(matches!(
+            ledger.flush_startup().await,
+            Err(LedgerError::BackupBusy)
+        ));
+        ledger.schedule_flush(&tokio::runtime::Handle::current());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(ledger.inner.database_writes_enabled.load(Ordering::Acquire));
+        assert_eq!(ready_count(&directory), 1);
+        drop(backup);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        assert_eq!(ready_count(&directory), 0);
+        let failed_directory = test_directory("backup-ledger-unavailable");
+        let unavailable = Ledger::open_coordinated(
+            pool,
+            failed_directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(capture_directory.clone()),
+        )
+        .unwrap();
+        std::fs::remove_file(capture_directory.join(".capture-backup.lock")).unwrap();
+        std::fs::create_dir(capture_directory.join(".capture-backup.lock")).unwrap();
+        let mut failed = RequestEnvelope::started(request_start("backup-ledger-unavailable"));
+        let failed_id = failed.request.id;
+        unavailable.inner.spool.reserve(failed_id, &failed).unwrap();
+        failed.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![],
+            completed_at: Utc::now(),
+        });
+        unavailable.inner.spool.finish(failed_id, &failed).unwrap();
+        unavailable.schedule_flush(&tokio::runtime::Handle::current());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            unavailable.wait_for_idle(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !unavailable
+                .inner
+                .database_writes_enabled
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(ready_count(&failed_directory), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_waits_for_backup_lock_before_touching_spool() {
+        let directory = test_directory("backup-startup-lock");
+        std::fs::create_dir_all(&directory).unwrap();
+        let leftover = directory.join("fixture.tmp");
+        std::fs::write(&leftover, b"unfinished").unwrap();
+        let backup = crate::capture_backup_barrier::try_exclusive(&directory).unwrap();
+        let pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 2).unwrap();
+        let start = Ledger::open_coordinated(
+            pool.clone(),
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(directory.clone()),
+        );
+        assert!(matches!(start, Err(LedgerError::BackupBusy)));
+        assert_eq!(std::fs::read(&leftover).unwrap(), b"unfinished");
+        drop(backup);
+        Ledger::open_coordinated(
+            pool,
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(directory),
+        )
+        .unwrap();
+        assert!(!leftover.exists());
+    }
+
+    #[tokio::test]
+    async fn idle_wait_includes_flush_pending_between_workers() {
+        let directory = test_directory("flush-pending-idle");
+        let pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 2).unwrap();
+        let ledger = Ledger::open(pool, directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+        ledger.inner.flush_pending.store(true, Ordering::Release);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                ledger.wait_for_idle()
+            )
+            .await
+            .is_err()
+        );
+        ledger.schedule_flush(&tokio::runtime::Handle::current());
+        tokio::time::timeout(std::time::Duration::from_secs(3), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        assert!(!ledger.inner.flush_pending.load(Ordering::Acquire));
+        ledger
+            .inner
+            .database_writes_enabled
+            .store(false, Ordering::Release);
+        ledger.inner.flush_pending.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(1), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        drop(ledger);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn cancelled_finish_waits_for_queued_publish(pool: Pool<Postgres>) {
+        let options = (*pool.connect_options()).clone();
+        std::thread::spawn(move || {
+            let directory = test_directory("cancelled-finish-publish");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(1)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect_lazy_with(options);
+                let ledger =
+                    Ledger::open(pool.clone(), directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+                let start = request_start("cancelled-finish-publish");
+                let tenant = start.principal.tenant_id;
+                let reservation = ledger.reserve(start).await.unwrap();
+                let id = reservation.id.unwrap();
+                let (started, started_rx) = tokio::sync::oneshot::channel();
+                let (release, release_rx) = std::sync::mpsc::channel();
+                let first = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+                started_rx.await.unwrap();
+                let mut finish = Box::pin(reservation.finish(RequestCompletion {
+                    status: "completed".to_owned(),
+                    selected_model: None,
+                    selected_provider: None,
+                    attempts: vec![],
+                    completed_at: Utc::now(),
+                }));
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(finish.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                release.send(()).unwrap();
+                first.await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while ledger
+                        .inner
+                        .spool
+                        .checkpointing
+                        .lock()
+                        .unwrap()
+                        .contains(&id)
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let (started, started_rx) = tokio::sync::oneshot::channel();
+                let (release, release_rx) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+                started_rx.await.unwrap();
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(finish.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                drop(finish);
+                assert!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        ledger.wait_for_finalizations()
+                    )
+                    .await
+                    .is_err()
+                );
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    ledger.wait_for_finalizations(),
+                )
+                .await
+                .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+                    .await
+                    .unwrap();
+                let status = sqlx::query_file_scalar!(
+                    "queries/test_cancelled_ledger_status.sql",
+                    tenant,
+                    "cancelled-finish-publish"
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(status, "completed");
+                assert_eq!(ready_count(&directory), 0);
+                pool.close().await;
+                drop(ledger);
+                std::fs::remove_dir_all(&directory).unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cancelled_publish_failure_is_logged() {
+        if std::env::var_os("GATEWAY_TEST_PUBLISH_LOG_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ledger::tests::cancelled_publish_failure_is_logged",
+                    "--nocapture",
+                ])
+                .env("GATEWAY_TEST_PUBLISH_LOG_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        let buffer = crate::logging::capture::Buffer::default();
+        let (subscriber, _provider) = crate::logging::test_subscriber(buffer.clone());
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+        let directory = test_directory("cancelled-publish-failure");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 2).unwrap();
+            let ledger = Ledger::open(pool, directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+            let reservation = ledger
+                .reserve(request_start("publish-failure"))
+                .await
+                .unwrap();
+            let id = reservation.id.unwrap();
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let first = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+            let mut finish = Box::pin(reservation.finish(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: vec![],
+                completed_at: Utc::now(),
+            }));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(finish.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release.send(()).unwrap();
+            first.await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while ledger
+                    .inner
+                    .spool
+                    .checkpointing
+                    .lock()
+                    .unwrap()
+                    .contains(&id)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(finish.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(finish);
+            std::fs::rename(
+                ledger.inner.spool.path(id, "working"),
+                ledger.inner.spool.path(id, "held"),
+            )
+            .unwrap();
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                ledger.wait_for_finalizations(),
+            )
+            .await
+            .unwrap();
+            let lines = buffer.lines();
+            let errors = lines
+                .iter()
+                .filter(|line| line.to_string().contains("ledger_publish_failed"))
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1);
+            assert!(
+                !errors[0]
+                    .to_string()
+                    .contains(&directory.to_string_lossy().to_string())
+            );
+            drop(ledger);
+            std::fs::remove_dir_all(&directory).unwrap();
+        });
+    }
+
+    #[test]
+    fn cancelled_queued_checkpoint_releases_its_registration() {
+        let directory = test_directory("cancelled-queued-checkpoint");
+        let spool = Arc::new(Spool::open(directory.clone(), 192 * 1024, 32 * 1024).unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let blocker = runtime.spawn_blocking(move || {
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let id = Uuid::new_v4();
+        let checkpoint = CheckpointGuard::begin(spool.clone(), id).unwrap();
+        let queued = runtime.spawn_blocking(move || drop(checkpoint));
+        queued.abort();
+        release_tx.send(()).unwrap();
+        runtime.block_on(async {
+            blocker.await.unwrap();
+            assert!(matches!(queued.await, Err(error) if error.is_cancelled()));
+        });
+        assert!(!spool.checkpointing.lock().unwrap().contains(&id));
+        drop(spool);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlapping_checkpoints_wait_for_every_writer() {
+        let directory = test_directory("overlapping-checkpoints");
+        let spool = Arc::new(Spool::open(directory.clone(), 192 * 1024, 32 * 1024).unwrap());
+        let id = Uuid::new_v4();
+        let first = CheckpointGuard::begin(spool.clone(), id).unwrap();
+        assert!(matches!(
+            CheckpointGuard::begin(spool.clone(), id),
+            Err(LedgerError::CheckpointBusy)
+        ));
+        let waiting_spool = spool.clone();
+        let mut waiter =
+            tokio::spawn(async move { waiting_spool.wait_for_checkpoint_async(id).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiter)
+                .await
+                .is_err()
+        );
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let next = CheckpointGuard::begin(spool.clone(), id).unwrap();
+        drop(next);
+        drop(spool);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn later_checkpoint_waits_for_prior_cancelled_writer(pool: Pool<Postgres>) {
+        let directory = test_directory("later-checkpoint");
+        let ledger = Ledger::open_coordinated(
+            pool,
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(directory.clone()),
+        )
+        .unwrap();
+        let mut reservation = ledger
+            .reserve(request_start("later-checkpoint"))
+            .await
+            .unwrap();
+        let active =
+            CheckpointGuard::begin(ledger.inner.spool.clone(), reservation.id.unwrap()).unwrap();
+        let mut later = tokio::spawn(async move {
+            reservation
+                .checkpoint_queue_entered(Utc::now())
+                .await
+                .unwrap();
+            reservation
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut later)
+                .await
+                .is_err()
+        );
+        drop(active);
+        let reservation = tokio::time::timeout(std::time::Duration::from_secs(5), later)
+            .await
+            .unwrap()
+            .unwrap();
+        reservation
+            .finish(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: vec![],
+                completed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        assert_eq!(ready_count(&directory), 0);
+    }
+
+    #[sqlx::test]
+    async fn backup_excludes_active_and_cancelled_ledger_requests(pool: Pool<Postgres>) {
+        let directory = test_directory("backup-ledger-active");
+        let ledger = Ledger::open_coordinated(
+            pool,
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(directory.clone()),
+        )
+        .unwrap();
+        let backup = crate::capture_backup_barrier::try_exclusive(&directory).unwrap();
+        assert!(matches!(
+            ledger.reserve(request_start("backup-blocked")).await,
+            Err(LedgerError::BackupBusy)
+        ));
+        drop(backup);
+        let reservation = ledger
+            .reserve(request_start("backup-active"))
+            .await
+            .unwrap();
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_err());
+        drop(reservation);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ledger.wait_for_finalizations(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        let backup = crate::capture_backup_barrier::try_exclusive(&directory).unwrap();
+        drop(backup);
+        let finished = ledger
+            .reserve(request_start("backup-finished"))
+            .await
+            .unwrap();
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_err());
+        finished
+            .finish(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: vec![],
+                completed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+            .await
+            .unwrap();
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
+    }
+
+    #[sqlx::test]
+    async fn cancelled_reserve_is_finalized_after_background_write(pool: Pool<Postgres>) {
+        let directory = test_directory("cancelled-reserve");
+        let ledger = Ledger::open_coordinated(
+            pool.clone(),
+            directory.clone(),
+            192 * 1024,
+            32 * 1024,
+            Some(directory.clone()),
+        )
+        .unwrap();
+        let spool = ledger.inner.spool.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let holder = std::thread::spawn(move || {
+            let _lock = spool.state.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let start = request_start("cancelled-reserve-fixture");
+        let tenant = start.principal.tenant_id;
+        let worker = ledger.clone();
+        let request = tokio::spawn(async move { worker.reserve(start).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(&ledger.inner.spool) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_err());
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                ledger.wait_for_finalizations()
+            )
+            .await
+            .is_err()
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = sqlx::query_file_scalar!(
+                    "queries/test_cancelled_ledger_status.sql",
+                    tenant,
+                    "cancelled-reserve-fixture"
+                )
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status, "cancelled");
+        ledger.wait_for_idle().await;
+        assert_eq!(ready_count(&directory), 0);
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
+    }
+
+    #[sqlx::test]
+    async fn concurrent_cancelled_checkpoints_finish_with_two_blocking_threads(
+        pool: Pool<Postgres>,
+    ) {
+        let options = (*pool.connect_options()).clone();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(4)
+                        .connect_with(options)
+                        .await
+                        .unwrap();
+                    let directory = test_directory("concurrent-cancelled-checkpoints");
+                    let ledger = Ledger::open_coordinated(
+                        pool.clone(),
+                        directory.clone(),
+                        4 * 1024 * 1024,
+                        32 * 1024,
+                        Some(directory.clone()),
+                    )
+                    .unwrap();
+                    let mut reservations = Vec::new();
+                    for index in 0..16 {
+                        let request_id = format!("concurrent-cancel-{index}");
+                        let start = request_start(&request_id);
+                        let tenant = start.principal.tenant_id;
+                        reservations.push((
+                            tenant,
+                            request_id,
+                            ledger.reserve(start).await.unwrap(),
+                        ));
+                    }
+                    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(2);
+                    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+                    let releases = Arc::new(std::sync::Mutex::new(release_rx));
+                    let mut blockers = Vec::new();
+                    for _ in 0..2 {
+                        let ready = ready_tx.clone();
+                        let release = releases.clone();
+                        blockers.push(tokio::task::spawn_blocking(move || {
+                            ready.send(()).unwrap();
+                            release.lock().unwrap().recv().unwrap();
+                        }));
+                    }
+                    ready_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    ready_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    let mut ids = Vec::new();
+                    let mut requests = Vec::new();
+                    for (tenant, request_id, mut reservation) in reservations {
+                        ids.push((tenant, request_id));
+                        requests.push(tokio::spawn(async move {
+                            reservation.checkpoint_queue_entered(Utc::now()).await
+                        }));
+                    }
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            if ledger.inner.spool.checkpointing.lock().unwrap().len() == 16 {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    for request in &requests {
+                        request.abort();
+                    }
+                    for request in requests {
+                        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+                    }
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            ledger.wait_for_finalizations()
+                        )
+                        .await
+                        .is_err()
+                    );
+                    release_tx.send(()).unwrap();
+                    release_tx.send(()).unwrap();
+                    for blocker in blockers {
+                        blocker.await.unwrap();
+                    }
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        ledger.wait_for_finalizations(),
+                    )
+                    .await
+                    .unwrap();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        ledger.wait_for_idle(),
+                    )
+                    .await
+                    .unwrap();
+                    for (tenant, request_id) in ids {
+                        let status = sqlx::query_file_scalar!(
+                            "queries/test_cancelled_ledger_status.sql",
+                            tenant,
+                            request_id
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        assert_eq!(status, "cancelled");
+                    }
+                    assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
+                    pool.close().await;
+                    drop(ledger);
+                    std::fs::remove_dir_all(directory).unwrap();
+                })
+            }));
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+            outcome.unwrap();
+        });
+        worker.join().unwrap();
+    }
+
+    #[sqlx::test]
+    async fn pending_checkpoints_do_not_block_all_finalization_threads(pool: Pool<Postgres>) {
+        let options = (*pool.connect_options()).clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(4)
+                        .connect_with(options)
+                        .await
+                        .unwrap();
+                    let directory = test_directory("checkpoint-pool-starvation");
+                    let ledger = Ledger::open_coordinated(
+                        pool.clone(),
+                        directory.clone(),
+                        1024 * 1024,
+                        32 * 1024,
+                        Some(directory.clone()),
+                    )
+                    .unwrap();
+                    let first = ledger
+                        .reserve(request_start("checkpoint-wait-1"))
+                        .await
+                        .unwrap();
+                    let second = ledger
+                        .reserve(request_start("checkpoint-wait-2"))
+                        .await
+                        .unwrap();
+                    let first_checkpoint =
+                        CheckpointGuard::begin(ledger.inner.spool.clone(), first.id.unwrap())
+                            .unwrap();
+                    let second_checkpoint =
+                        CheckpointGuard::begin(ledger.inner.spool.clone(), second.id.unwrap())
+                            .unwrap();
+                    drop(first);
+                    drop(second);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let probe = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        tokio::task::spawn_blocking(|| ()),
+                    )
+                    .await;
+                    drop(first_checkpoint);
+                    drop(second_checkpoint);
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        ledger.wait_for_finalizations(),
+                    )
+                    .await
+                    .unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
+                        .await
+                        .unwrap();
+                    pool.close().await;
+                    drop(ledger);
+                    std::fs::remove_dir_all(directory).unwrap();
+                    assert!(probe.is_ok());
+                })
+            }));
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+            outcome.unwrap();
+        })
+        .join()
+        .unwrap();
     }
 
     #[sqlx::test]
@@ -2434,6 +3644,7 @@ mod tests {
         spool.finish(request_id, &envelope).unwrap();
         let ready = fs::read_to_string(spool.path(request_id, "ready")).unwrap();
         assert!(!ready.contains("sentinel-prompt"));
+        drop(spool);
 
         let dead_pool = db::pool("postgres://gateway@127.0.0.1:1/gateway", 1).unwrap();
         let unavailable =
@@ -2469,6 +3680,7 @@ mod tests {
                 .load(Ordering::Acquire)
         );
 
+        drop(unavailable);
         let recovered =
             Ledger::open(pool.clone(), directory.clone(), 192 * 1024, 32 * 1024).unwrap();
         assert_eq!(recovered.flush_startup().await.unwrap(), 2);
@@ -2515,6 +3727,648 @@ mod tests {
             1,
             "replaying the same envelope duplicated usage"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn cancelling_blocked_startup_flush_preserves_usage_for_replay(pool: Pool<Postgres>) {
+        let directory = test_directory("cancelled-startup-flush");
+        let ledger = Ledger::open(pool.clone(), directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+        let mut envelope = RequestEnvelope::started(request_start("cancelled-startup-flush"));
+        let request_id = envelope.request.id;
+        let tenant = envelope.request.tenant_id;
+        let now = Utc::now();
+        ledger.inner.spool.reserve(request_id, &envelope).unwrap();
+        envelope.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![ProviderAttempt::completed(
+                CompletedAttempt {
+                    provider: "test-provider".to_owned(),
+                    model: "test-model".to_owned(),
+                    provider_request_id: None,
+                    provider_response_id: None,
+                    started_at: now,
+                    completed_at: now,
+                    status: "completed".to_owned(),
+                    error_type: None,
+                },
+                br#"{"usage":{"prompt_tokens":10,"completion_tokens":3}}"#,
+            )],
+            completed_at: now,
+        });
+        ledger.inner.spool.finish(request_id, &envelope).unwrap();
+        let mut lock = pool.begin().await.unwrap();
+        let locked = sqlx::query_file!("queries/test_lock_usage_tenant.sql", tenant)
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        let flushing = ledger.clone();
+        let task = tokio::spawn(async move { flushing.flush_startup().await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_file_scalar!("queries/test_waiting_usage_ingest.sql", locked.pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(ready_count(&directory), 1);
+        let before = sqlx::query_file!("queries/test_usage_replay_counts.sql", request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((before.requests, before.attempts, before.usage), (0, 0, 0));
+        lock.rollback().await.unwrap();
+        assert_eq!(ledger.flush_startup().await.unwrap(), 1);
+        assert_eq!(ready_count(&directory), 0);
+        let after = sqlx::query_file!("queries/test_usage_replay_counts.sql", request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((after.requests, after.attempts, after.usage), (1, 1, 1));
+        ledger.inner.spool.reserve(request_id, &envelope).unwrap();
+        ledger.inner.spool.finish(request_id, &envelope).unwrap();
+        assert_eq!(ledger.flush_startup().await.unwrap(), 1);
+        let replayed = sqlx::query_file!("queries/test_usage_replay_counts.sql", request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (replayed.requests, replayed.attempts, replayed.usage),
+            (1, 1, 1)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn conflict_record_counts_toward_capacity_after_restart() {
+        let directory = test_directory("conflict-capacity");
+        fs::create_dir_all(&directory).unwrap();
+        let conflict = directory.join(format!("{}.conflict", Uuid::new_v4()));
+        fs::write(&conflict, b"retained conflict").unwrap();
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let envelope = RequestEnvelope::started(request_start("capacity-check"));
+        assert!(matches!(
+            spool.reserve(envelope.request.id, &envelope),
+            Err(LedgerError::SpoolFull)
+        ));
+        drop(spool);
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        assert!(matches!(
+            reopened.reserve(envelope.request.id, &envelope),
+            Err(LedgerError::SpoolFull)
+        ));
+        assert_eq!(fs::read(&conflict).unwrap(), b"retained conflict");
+        drop(reopened);
+        let ready = conflict.with_extension("ready");
+        fs::write(&ready, b"other record").unwrap();
+        assert!(matches!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            ),
+            Err(LedgerError::InvalidCapacity)
+        ));
+        assert_eq!(fs::read(&conflict).unwrap(), b"retained conflict");
+        assert_eq!(fs::read(&ready).unwrap(), b"other record");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn quarantining_never_overwrites_an_existing_conflict() {
+        let directory = test_directory("conflict-no-overwrite");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 6,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let id = Uuid::new_v4();
+        let ready = spool.path(id, "ready");
+        let conflict = spool.path(id, "conflict");
+        fs::write(&ready, b"new record").unwrap();
+        fs::write(&conflict, b"old record").unwrap();
+        assert!(spool.quarantine(&ready).is_err());
+        assert_eq!(fs::read(&ready).unwrap(), b"new record");
+        assert_eq!(fs::read(&conflict).unwrap(), b"old record");
+        drop(spool);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn conflict_scan_rejects_links_and_oversized_files_without_removing_them() {
+        let directory = test_directory("unsafe-conflict");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 9,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let target = directory.join("target");
+        fs::write(&target, b"preserved").unwrap();
+        let link = spool.path(Uuid::new_v4(), "conflict");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            spool.conflict_reservations(),
+            Err(LedgerError::Io(_))
+        ));
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"preserved");
+        fs::remove_file(&link).unwrap();
+        let oversized = spool.path(Uuid::new_v4(), "conflict");
+        fs::write(&oversized, vec![1; MIN_ENTRY_MAX_BYTES as usize + 1]).unwrap();
+        assert!(matches!(
+            spool.conflict_reservations(),
+            Err(LedgerError::InvalidCapacity)
+        ));
+        assert_eq!(
+            fs::metadata(&oversized).unwrap().len(),
+            MIN_ENTRY_MAX_BYTES + 1
+        );
+        drop(spool);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_rejects_ready_symlink_and_preserves_target() {
+        let directory = test_directory("recovery-link");
+        fs::create_dir_all(&directory).unwrap();
+        let envelope = RequestEnvelope::started(request_start("recovery-link"));
+        let data = serde_json::to_vec(&envelope).unwrap();
+        let target = directory.join("original");
+        fs::write(&target, &data).unwrap();
+        let link = directory.join(format!("{}.ready", envelope.request.id.simple()));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), data);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn second_spool_cannot_recover_an_active_request() {
+        let directory = test_directory("single-writer");
+        let first = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let envelope = RequestEnvelope::started(request_start("single-writer"));
+        first.reserve(envelope.request.id, &envelope).unwrap();
+        assert_eq!(
+            std::process::Command::new("flock")
+                .args([
+                    "-n",
+                    directory.join(".ledger-spool.lock").to_str().unwrap(),
+                    "true"
+                ])
+                .status()
+                .unwrap()
+                .code(),
+            Some(1)
+        );
+        let reserved = first.path(envelope.request.id, "reserved");
+        let original = fs::read(&reserved).unwrap();
+        assert!(matches!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            ),
+            Err(LedgerError::SpoolBusy)
+        ));
+        assert_eq!(fs::read(&reserved).unwrap(), original);
+        assert!(!first.path(envelope.request.id, "ready").exists());
+        drop(first);
+        assert!(
+            std::process::Command::new("flock")
+                .args([
+                    "-n",
+                    directory.join(".ledger-spool.lock").to_str().unwrap(),
+                    "true"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(reopened.ready().unwrap().len(), 1);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn spool_rejects_unsafe_lock_files_without_modifying_them() {
+        for kind in ["symlink", "permissions", "hardlink"] {
+            let directory = test_directory("unsafe-instance-lock");
+            fs::create_dir_all(&directory).unwrap();
+            let original = directory.join("original");
+            fs::write(&original, b"preserved").unwrap();
+            fs::set_permissions(&original, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let lock = directory.join(".ledger-spool.lock");
+            match kind {
+                "symlink" => std::os::unix::fs::symlink(&original, &lock).unwrap(),
+                "hardlink" => fs::hard_link(&original, &lock).unwrap(),
+                _ => {
+                    fs::write(&lock, b"preserved").unwrap();
+                    fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+                }
+            }
+            assert!(
+                Spool::open(
+                    directory.clone(),
+                    MIN_ENTRY_MAX_BYTES * 3,
+                    MIN_ENTRY_MAX_BYTES
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&original).unwrap(), b"preserved");
+            assert_eq!(fs::read(&lock).unwrap(), b"preserved");
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn startup_rejects_unsafe_pending_files_without_changing_them() {
+        for extension in ["reserved", "working", "ready"] {
+            let directory = test_directory("recovery-unsafe");
+            fs::create_dir_all(&directory).unwrap();
+            let id = Uuid::new_v4();
+            let path = directory.join(format!("{}.{}", id.simple(), extension));
+            let target = directory.join("original");
+            fs::write(&target, b"preserved").unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(
+                Spool::open(
+                    directory.clone(),
+                    MIN_ENTRY_MAX_BYTES * 3,
+                    MIN_ENTRY_MAX_BYTES
+                )
+                .is_err()
+            );
+            assert!(
+                fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"preserved");
+            fs::remove_dir_all(directory).unwrap();
+        }
+        let directory = test_directory("recovery-oversize");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{}.ready", Uuid::new_v4().simple()));
+        fs::write(&path, vec![1; MIN_ENTRY_MAX_BYTES as usize + 1]).unwrap();
+        assert!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            )
+            .is_err()
+        );
+        assert_eq!(fs::metadata(&path).unwrap().len(), MIN_ENTRY_MAX_BYTES + 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_rejects_named_pipe_and_mismatched_request_id() {
+        let directory = test_directory("recovery-fifo");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{}.ready", Uuid::new_v4().simple()));
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            )
+            .is_err()
+        );
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(
+            &fs::symlink_metadata(&path).unwrap().file_type()
+        ));
+        fs::remove_dir_all(directory).unwrap();
+        let directory = test_directory("recovery-id");
+        fs::create_dir_all(&directory).unwrap();
+        let envelope = RequestEnvelope::started(request_start("recovery-id"));
+        let path = directory.join(format!("{}.ready", Uuid::new_v4().simple()));
+        let data = serde_json::to_vec(&envelope).unwrap();
+        fs::write(&path, &data).unwrap();
+        assert!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), data);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn conflicting_usage_is_preserved_and_other_records_are_ingested(pool: Pool<Postgres>) {
+        let directory = test_directory("conflict-batch");
+        let ledger = Ledger::open(pool.clone(), directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(60);
+        let mut original = RequestEnvelope::started(request_start("conflict-original"));
+        let original_id = original.request.id;
+        original.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: now,
+        });
+        ledger.inner.spool.reserve(original_id, &original).unwrap();
+        ledger.inner.spool.finish(original_id, &original).unwrap();
+        assert_eq!(ledger.flush_startup().await.unwrap(), 1);
+        let mut conflict = original.clone();
+        conflict.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![ProviderAttempt::completed(
+                CompletedAttempt {
+                    provider: "test-provider".to_owned(),
+                    model: "test-model".to_owned(),
+                    provider_request_id: None,
+                    provider_response_id: None,
+                    started_at: now,
+                    completed_at: now,
+                    status: "completed".to_owned(),
+                    error_type: None,
+                },
+                br#"{"usage":{"prompt_tokens":10,"completion_tokens":3}}"#,
+            )],
+            completed_at: now,
+        });
+        ledger.inner.spool.reserve(original_id, &conflict).unwrap();
+        ledger.inner.spool.finish(original_id, &conflict).unwrap();
+        let mut healthy = RequestEnvelope::started(request_start("conflict-healthy"));
+        let healthy_id = healthy.request.id;
+        healthy.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: now,
+        });
+        ledger.inner.spool.reserve(healthy_id, &healthy).unwrap();
+        ledger.inner.spool.finish(healthy_id, &healthy).unwrap();
+        let conflict_path = ledger.inner.spool.path(original_id, "ready");
+        let healthy_path = ledger.inner.spool.path(healthy_id, "ready");
+        let conflict_bytes = fs::read(&conflict_path).unwrap();
+        assert_eq!(ledger.flush_startup().await.unwrap(), 1);
+        let quarantined = conflict_path.with_extension("conflict");
+        assert_eq!(fs::read(&quarantined).unwrap(), conflict_bytes);
+        assert!(!conflict_path.exists());
+        assert!(!healthy_path.exists());
+        assert_eq!(ready_count(&directory), 0);
+        let original_counts =
+            sqlx::query_file!("queries/test_usage_replay_counts.sql", original_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (
+                original_counts.requests,
+                original_counts.attempts,
+                original_counts.usage
+            ),
+            (1, 0, 0)
+        );
+        let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", healthy_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((counts.requests, counts.attempts, counts.usage), (1, 0, 0));
+        drop(ledger);
+        let reopened = Ledger::open(pool, directory.clone(), 192 * 1024, 32 * 1024).unwrap();
+        assert_eq!(reopened.flush_startup().await.unwrap(), 0);
+        assert_eq!(fs::read(quarantined).unwrap(), conflict_bytes);
+        assert_eq!(reopened.inner.spool.state.lock().unwrap().slots_used, 1);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn ambiguous_reservation_records_are_preserved_together(pool: Pool<Postgres>) {
+        let directory = test_directory("ambiguous-reservation");
+        let ledger = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 9,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let reservation = Uuid::new_v4();
+        let now = Utc::now() + chrono::Duration::seconds(60);
+        let mut ids = Vec::new();
+        for name in ["ambiguous-first", "ambiguous-second"] {
+            let mut envelope = RequestEnvelope::started(request_start(name));
+            envelope.request.quota_reservation_id = Some(reservation);
+            let id = envelope.request.id;
+            envelope.complete(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: Vec::new(),
+                completed_at: now,
+            });
+            ledger.inner.spool.reserve(id, &envelope).unwrap();
+            ledger.inner.spool.finish(id, &envelope).unwrap();
+            ids.push(id);
+        }
+        let mut healthy = RequestEnvelope::started(request_start("ambiguous-healthy"));
+        let healthy_id = healthy.request.id;
+        healthy.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: now,
+        });
+        ledger.inner.spool.reserve(healthy_id, &healthy).unwrap();
+        ledger.inner.spool.finish(healthy_id, &healthy).unwrap();
+        assert_eq!(ledger.flush_startup().await.unwrap(), 1);
+        for id in ids {
+            assert!(ledger.inner.spool.path(id, "conflict").exists());
+            let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!((counts.requests, counts.attempts, counts.usage), (0, 0, 0));
+        }
+        let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", healthy_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(counts.requests, 1);
+        drop(ledger);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn partially_quarantined_reservation_stays_grouped_after_restart(pool: Pool<Postgres>) {
+        let directory = test_directory("partial-conflict-group");
+        let ledger = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 9,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let reservation = Uuid::new_v4();
+        let now = Utc::now() + chrono::Duration::seconds(60);
+        let mut ids = Vec::new();
+        for name in ["partial-first", "partial-second"] {
+            let mut envelope = RequestEnvelope::started(request_start(name));
+            envelope.request.quota_reservation_id = Some(reservation);
+            let id = envelope.request.id;
+            envelope.complete(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: Vec::new(),
+                completed_at: now,
+            });
+            ledger.inner.spool.reserve(id, &envelope).unwrap();
+            ledger.inner.spool.finish(id, &envelope).unwrap();
+            ids.push(id);
+        }
+        let tenant = request_start("partial-tenant").principal.tenant_id;
+        sqlx::query_file!(
+            "queries/test_insert_partial_conflict_reservation.sql",
+            reservation,
+            tenant,
+            ids[1]
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = ledger.inner.spool.path(ids[0], "ready");
+        let first_bytes = fs::read(&first).unwrap();
+        ledger.inner.spool.quarantine(&first).unwrap();
+        drop(ledger);
+        let reopened = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 9,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let mut healthy = RequestEnvelope::started(request_start("partial-healthy"));
+        let healthy_id = healthy.request.id;
+        healthy.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: now,
+        });
+        reopened.inner.spool.reserve(healthy_id, &healthy).unwrap();
+        reopened.inner.spool.finish(healthy_id, &healthy).unwrap();
+        assert_eq!(reopened.flush_startup().await.unwrap(), 1);
+        assert_eq!(
+            fs::read(reopened.inner.spool.path(ids[0], "conflict")).unwrap(),
+            first_bytes
+        );
+        for id in ids {
+            assert!(reopened.inner.spool.path(id, "conflict").exists());
+            let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(counts.requests, 0);
+        }
+        let healthy = sqlx::query_file!("queries/test_usage_replay_counts.sql", healthy_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(healthy.requests, 1);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn startup_flush_drains_multiple_bounded_batches(pool: Pool<Postgres>) {
+        let directory = test_directory("bounded-startup");
+        let ledger = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3 * 35,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(60);
+        for index in 0..35 {
+            let mut envelope = RequestEnvelope::started(request_start(&format!("bounded-{index}")));
+            let id = envelope.request.id;
+            envelope.complete(RequestCompletion {
+                status: "completed".to_owned(),
+                selected_model: None,
+                selected_provider: None,
+                attempts: Vec::new(),
+                completed_at: now,
+            });
+            ledger.inner.spool.reserve(id, &envelope).unwrap();
+            ledger.inner.spool.finish(id, &envelope).unwrap();
+        }
+        assert_eq!(ledger.flush_startup().await.unwrap(), 35);
+        assert_eq!(ready_count(&directory), 0);
+        drop(ledger);
         fs::remove_dir_all(directory).unwrap();
     }
 

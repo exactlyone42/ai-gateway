@@ -40,18 +40,23 @@ fi
 
 # A backup schedule that silently stopped looks exactly like one that works,
 # until the day it is needed.
-newest=$(find "$backup_root" -maxdepth 2 -name gateway.dump -printf '%T@\n' 2>/dev/null |
-  sort -n | tail -1)
-if [ -z "$newest" ]; then
-  "$alert" error backup_missing "no backup found under $backup_root"
-  failed=1
-else
-  age_hours=$(( ( $(date +%s) - ${newest%.*} ) / 3600 ))
-  if [ "$age_hours" -gt "$backup_max_age_hours" ]; then
-    "$alert" error backup_stale \
-      "the newest backup under $backup_root is ${age_hours}h old, over the ${backup_max_age_hours}h limit"
+project="${COMPOSE_PROJECT:-apg}"
+source_state=$(timeout 15s python3 ./scripts/capture_backup_source_state.py --gateway "${CAPTURE_BACKUP_GATEWAY:-${project}-gateway-1}" --postgres "${project}-postgres-1" 2>/dev/null) || source_state="unknown"
+read -r capture_schema gateway_id postgres_id database_system_id database_oid storage_id extra <<< "$source_state"
+if [[ ! "${gateway_id:-}" =~ ^[a-f0-9]{64}$ || ! "${postgres_id:-}" =~ ^[a-f0-9]{64}$ || ! "${database_system_id:-}" =~ ^-?[0-9]{1,20}$ || ! "${database_oid:-}" =~ ^[0-9]{1,10}$ || -n "${extra:-}" ]]; then
+  capture_schema="unknown"
+fi
+if [ "$capture_schema" = "t" ]; then
+  if ! python3 ./scripts/capture_backup_freshness.py "$backup_root" --signer "${CAPTURE_BACKUP_SIGNER:-}" --recipient "${CAPTURE_BACKUP_RECIPIENT:-}" --gateway-id "$gateway_id" --postgres-id "$postgres_id" --database-system-id "$database_system_id" --database-oid "$database_oid" --storage-id "${storage_id:-}" --max-age-hours "$backup_max_age_hours"; then
+    "$alert" error backup_missing "加密備份尚未完成、驗證或已過期"
     failed=1
   fi
+elif [ "$capture_schema" = "f" ]; then
+  "$alert" error backup_missing "舊版備份無法確認來源與完整性"
+  failed=1
+else
+  "$alert" error backup_missing "無法確認備份類型"
+  failed=1
 fi
 
 # A check that stopped running looks exactly like one that keeps passing: both
@@ -59,6 +64,6 @@ fi
 # stopped, which nothing else here can tell you.
 if [ "$failed" = 0 ]; then
   date -u +%Y-%m-%dT%H:%M:%SZ > "${HEALTHCHECK_STATUS_FILE:-$HOME/agent-pool-gateway-healthcheck.status}" 2>/dev/null || true
-  echo "ok: gateway answering, ready, and backed up recently"
+  echo "ok: gateway answering, ready, and backup freshness checked"
 fi
 exit "$failed"

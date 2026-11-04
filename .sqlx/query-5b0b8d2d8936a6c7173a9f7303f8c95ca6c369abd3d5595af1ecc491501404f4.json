@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_catalog.to_regclass('public.capture_erasure_floor') IS NOT NULL AS \"present!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "present!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5b0b8d2d8936a6c7173a9f7303f8c95ca6c369abd3d5595af1ecc491501404f4"
+}

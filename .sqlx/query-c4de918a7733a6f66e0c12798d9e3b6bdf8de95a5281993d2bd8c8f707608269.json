@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id, (extract(epoch FROM created_at) * 1000)::bigint AS \"created_ms!\", (extract(epoch FROM (expires_at - created_at)) / 86400)::integer AS \"days!\", key_fingerprint\nFROM capture_records\nWHERE tenant_id = $1 AND capture_id = $2 AND state IN ('complete', 'incomplete') AND expires_at > now()\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "created_ms!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "days!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "key_fingerprint",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "c4de918a7733a6f66e0c12798d9e3b6bdf8de95a5281993d2bd8c8f707608269"
+}

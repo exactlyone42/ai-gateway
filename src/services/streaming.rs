@@ -235,6 +235,7 @@ async fn relay_inner<O: StreamObserver>(
     mut protocol: RelayProtocol<O>,
     limits: RelayLimits,
 ) -> Result<Body, crate::ledger::LedgerError> {
+    let capture = reservation.capture();
     // The stream owns provider capacity until its final frame is yielded or the
     // client drops the body. Ledger completion can happen before that yield.
     let scheduler_lease = reservation.take_scheduler_lease();
@@ -282,8 +283,14 @@ async fn relay_inner<O: StreamObserver>(
             let item = tokio::select! {
                 item = upstream.next() => item,
                 _ = heartbeat.tick() => {
+                    let event = Bytes::from_static(b": keepalive\n\n");
+                    if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                        yield Err(error);
+                        return;
+                    }
                     mark_client_first_byte(&mut reservation, &mut first_client_byte);
-                    yield Ok::<Bytes, io::Error>(Bytes::from_static(b": keepalive\n\n"));
+                    yield Ok::<Bytes, io::Error>(event);
                     continue;
                 }
             };
@@ -296,6 +303,11 @@ async fn relay_inner<O: StreamObserver>(
                     return;
                 }
             };
+            if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ProviderResponse, &bytes).await {
+                finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                yield Err(error);
+                return;
+            }
             provider_bytes = provider_bytes.saturating_add(bytes.len());
             if provider_bytes > response_max_bytes {
                 finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
@@ -407,6 +419,11 @@ async fn relay_inner<O: StreamObserver>(
                 }
             }
             if let Some(outcome) = batch_terminal {
+                if let Err(error) = capture_terminal(&capture, ready.iter().chain(held.iter())).await {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                    yield Err(error);
+                    return;
+                }
                 if !ready.is_empty() || !held.is_empty() {
                     mark_client_first_byte(&mut reservation, &mut first_client_byte);
                 }
@@ -419,6 +436,9 @@ async fn relay_inner<O: StreamObserver>(
                 }
                 for terminal in held.drain(..) {
                     yield Ok::<Bytes, io::Error>(terminal);
+                }
+                if let Err(error) = finish_capture(&capture).await {
+                    yield Err(error);
                 }
                 return;
             }
@@ -438,6 +458,11 @@ async fn relay_inner<O: StreamObserver>(
                 return;
             }
             for event in ready {
+                if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                    yield Err(error);
+                    return;
+                }
                 yield Ok::<Bytes, io::Error>(event);
             }
         }
@@ -462,6 +487,11 @@ async fn relay_inner<O: StreamObserver>(
             yield Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider stream ended without a terminal event"));
             return;
         };
+        if let Err(error) = capture_terminal(&capture, secret_held.iter().chain(held.iter())).await {
+            finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+            yield Err(error);
+            return;
+        }
         mark_client_first_byte(&mut reservation, &mut first_client_byte);
         if let Err(error) = finish_terminal(&mut reservation, &mut attempt, &model, &provider, outcome).await {
             yield Err(io::Error::other(error));
@@ -473,9 +503,97 @@ async fn relay_inner<O: StreamObserver>(
         for terminal in held {
             yield Ok::<Bytes, io::Error>(terminal);
         }
+        if let Err(error) = finish_capture(&capture).await {
+            yield Err(error);
+        }
     };
 
     Ok(Body::from_stream(stream))
+}
+
+pub(crate) async fn capture_chunk(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    leg: crate::capture_crypto::CaptureLeg,
+    bytes: &[u8],
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        capture
+            .save_response(leg, bytes.to_vec())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn capture_deferred_error(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    response: Option<reqwest::Response>,
+    event: &Bytes,
+) -> Result<(), io::Error> {
+    if capture.is_none() {
+        return Ok(());
+    }
+    if let Some(mut response) = response {
+        let mut any = false;
+        while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+            capture_chunk(
+                capture,
+                crate::capture_crypto::CaptureLeg::ProviderResponse,
+                &chunk,
+            )
+            .await?;
+            any = true;
+        }
+        if !any {
+            capture_chunk(
+                capture,
+                crate::capture_crypto::CaptureLeg::ProviderResponse,
+                &[],
+            )
+            .await?;
+        }
+    } else {
+        capture_chunk(
+            capture,
+            crate::capture_crypto::CaptureLeg::ProviderResponse,
+            &[],
+        )
+        .await?;
+    }
+    capture_chunk(
+        capture,
+        crate::capture_crypto::CaptureLeg::ClientResponse,
+        event,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn capture_terminal<'a>(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    events: impl Iterator<Item = &'a Bytes>,
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        for event in events {
+            capture
+                .save_response(
+                    crate::capture_crypto::CaptureLeg::ClientResponse,
+                    event.to_vec(),
+                )
+                .await
+                .map_err(io::Error::other)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_capture(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        capture.finish().await.map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 fn mark_client_first_byte(reservation: &mut Option<Reservation>, first_client_byte: &mut bool) {

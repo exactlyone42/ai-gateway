@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM capture_records WHERE tenant_id = $1 AND capture_id = $2\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0cdb720be9acb95ac22da2dbc87057fd93f684037c370f039a105b96db69e2cb"
+}

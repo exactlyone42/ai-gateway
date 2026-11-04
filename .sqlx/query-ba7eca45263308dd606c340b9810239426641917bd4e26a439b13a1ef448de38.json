@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, capabilities, lifecycle_state)\nVALUES ('40000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000001', 'ollama-stop-test/second', 'second', 'second', ARRAY['openai_responses'], '[\"auto_discovered\"]', 'active')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ba7eca45263308dd606c340b9810239426641917bd4e26a439b13a1ef448de38"
+}

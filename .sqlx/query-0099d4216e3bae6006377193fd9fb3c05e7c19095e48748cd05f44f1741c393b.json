@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND backend_xid IS NOT NULL AND query LIKE '%INSERT INTO models%') AS \"waiting!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0099d4216e3bae6006377193fd9fb3c05e7c19095e48748cd05f44f1741c393b"
+}

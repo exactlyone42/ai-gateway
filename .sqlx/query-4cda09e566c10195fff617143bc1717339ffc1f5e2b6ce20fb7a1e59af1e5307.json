@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM capture_erasure_marks WHERE tenant_id = $1 AND capture_id = $2\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4cda09e566c10195fff617143bc1717339ffc1f5e2b6ce20fb7a1e59af1e5307"
+}

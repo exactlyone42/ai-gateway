@@ -1,0 +1,1 @@
+SELECT (SELECT count(*) FROM gateway_requests WHERE id = $1) AS "requests!", (SELECT count(*) FROM provider_attempts WHERE gateway_request_id = $1) AS "attempts!", (SELECT count(*) FROM usage_records WHERE gateway_request_id = $1) AS "usage!"

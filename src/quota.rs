@@ -1552,35 +1552,164 @@ mod tests {
             "attempts": [],
             "usage_records": []
         }]);
-        let mut transaction = pool.begin().await.unwrap();
-        sqlx::query("SELECT ingest_usage_envelopes($1) FROM (VALUES (1), (2)) AS replay(attempt)")
-            .bind(payload)
-            .execute(&mut *transaction)
-            .await
-            .unwrap();
-        let evidence: Value = sqlx::query_scalar(
-            r#"
-            SELECT jsonb_build_object(
-                'events', (SELECT count(*) FROM quota_reconciliation_events
-                    WHERE tenant_id = $1 AND reservation_id = $2),
-                'state', (SELECT state FROM quota_reservations
-                    WHERE tenant_id = $1 AND id = $2),
-                'actual_tokens', (SELECT actual_tokens FROM quota_reservations
-                    WHERE tenant_id = $1 AND id = $2),
-                'window_tokens', (SELECT reserved_tokens FROM quota_windows
-                    WHERE tenant_id = $1 AND limit_kind = 'tokens_per_hour')
-            )
-            "#,
+        let before = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
         )
-        .bind(tenant_id)
-        .bind(reservation_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&pool)
         .await
         .unwrap();
+        assert_eq!(before["events"], 0);
+        assert_eq!(before["window_tokens"], 20);
+        let mut isolated = pool.begin().await.unwrap();
+        sqlx::query_file!("queries/test_set_repeatable_read.sql")
+            .execute(&mut *isolated)
+            .await
+            .unwrap();
+        let isolation_error = sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
+            .execute(&mut *isolated)
+            .await
+            .expect_err("unsupported isolation must be rejected");
+        assert_eq!(
+            isolation_error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("GW410")
+        );
+        isolated.rollback().await.unwrap();
+        let mut omitted_reservation = payload.clone();
+        omitted_reservation[0]["request"]["quota_reservation_id"] = Value::Null;
+        omitted_reservation[0]["request"]["quota_actual_tokens"] = Value::Null;
+        omitted_reservation[0]["request"]["quota_actual_cost_microusd"] = Value::Null;
+        sqlx::query_file!("queries/test_ingest_usage_replay.sql", omitted_reservation)
+            .execute(&pool)
+            .await
+            .expect_err("a request with a reservation must identify it");
+        sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(first["events"], 1);
+        assert_eq!(first["window_tokens"], 3);
+        sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let evidence = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence, first);
         assert_eq!(evidence["events"], 1, "{evidence}");
         assert_eq!(evidence["state"], "reconciled");
         assert_eq!(evidence["actual_tokens"], 3);
         assert_eq!(evidence["window_tokens"], 3);
+        let mut foreign_request = payload.clone();
+        foreign_request[0]["request"]["id"] = json!(Uuid::new_v4());
+        foreign_request[0]["request"]["request_id"] = json!("foreign-quota-reservation");
+        sqlx::query_file!("queries/test_ingest_usage_replay.sql", foreign_request)
+            .execute(&pool)
+            .await
+            .expect_err("a request must not use another request's reservation");
+        let mut conflicting = payload.clone();
+        conflicting[0]["request"]["quota_actual_tokens"] = json!(50);
+        let attempt_id = Uuid::new_v4();
+        conflicting[0]["attempts"] = json!([{
+            "id": attempt_id, "tenant_id": tenant_id, "gateway_request_id": gateway_request_id,
+            "provider": "test", "model": "test", "attempt_number": 1,
+            "started_at": completed_at, "completed_at": completed_at,
+            "status": "completed", "estimated_usage": {}, "actual_usage": {}
+        }]);
+        conflicting[0]["usage_records"] = json!([{
+            "id": Uuid::new_v4(), "tenant_id": tenant_id, "gateway_request_id": gateway_request_id,
+            "provider_attempt_id": attempt_id, "source": "provider_reported",
+            "input_tokens": 50, "output_tokens": 0, "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0, "reasoning_tokens": 0, "recorded_at": completed_at
+        }]);
+        let conflict = sqlx::query_file!("queries/test_ingest_usage_replay.sql", conflicting)
+            .execute(&pool)
+            .await
+            .expect_err("conflicting usage must be rejected");
+        assert_eq!(
+            conflict
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("GW409")
+        );
+        conflicting[0]["request"]["quota_actual_tokens"] = json!(3);
+        let extra_usage = sqlx::query_file!("queries/test_ingest_usage_replay.sql", conflicting)
+            .execute(&pool)
+            .await
+            .expect_err("new usage on an existing request must be rejected");
+        assert_eq!(
+            extra_usage
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("GW409")
+        );
+        let after_conflict = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after_conflict, first);
+        let usage = sqlx::query_file_scalar!(
+            "queries/test_usage_total_for_request.sql",
+            gateway_request_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(usage, 0);
+        let batch_id = Uuid::new_v4();
+        let mut first_in_batch = payload[0].clone();
+        first_in_batch["request"]["id"] = json!(batch_id);
+        first_in_batch["request"]["request_id"] = json!("conflicting-batch");
+        first_in_batch["request"]["quota_reservation_id"] = Value::Null;
+        first_in_batch["request"]["quota_actual_tokens"] = Value::Null;
+        first_in_batch["request"]["quota_actual_cost_microusd"] = Value::Null;
+        let mut second_in_batch = first_in_batch.clone();
+        second_in_batch["attempts"] = conflicting[0]["attempts"].clone();
+        second_in_batch["attempts"][0]["gateway_request_id"] = json!(batch_id);
+        second_in_batch["usage_records"] = conflicting[0]["usage_records"].clone();
+        second_in_batch["usage_records"][0]["gateway_request_id"] = json!(batch_id);
+        let batch = json!([first_in_batch, second_in_batch]);
+        sqlx::query_file!("queries/test_ingest_usage_replay.sql", batch)
+            .execute(&pool)
+            .await
+            .expect_err("conflicting requests in one batch must be rejected");
+        let batch_counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", batch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                batch_counts.requests,
+                batch_counts.attempts,
+                batch_counts.usage
+            ),
+            (0, 0, 0)
+        );
+        let mut transaction = pool.begin().await.unwrap();
         sqlx::query("UPDATE quota_windows SET reserved_tokens = 99 WHERE tenant_id = $1")
             .bind(tenant_id)
             .execute(&mut *transaction)
@@ -1601,6 +1730,211 @@ mod tests {
         assert_eq!(rebuilt, 1);
         assert_eq!(recomputed, 3);
         transaction.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn expired_quota_reservation_accepts_late_usage_once(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        insert_global_quota(
+            &pool,
+            tenant_id,
+            json!({"mode": "hard", "limits": {"tokens_per_hour": 100}}),
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let admitted = QuotaEngine::new(pool.clone())
+            .admit(
+                request_id,
+                &principal(tenant_id),
+                vec![selection(
+                    tenant_id,
+                    "direct-model",
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                )],
+                QuotaEstimate {
+                    input_upper_bound: 10,
+                    requested_output_tokens: Some(10),
+                    output_multiplier: 1,
+                    billable: true,
+                    unbounded_input: false,
+                    requires_extended_pricing: false,
+                    unsupported_cost_features: false,
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let QuotaOutcome::Allowed(admission) = admitted else {
+            panic!("quota reservation rejected")
+        };
+        let snapshot = admission.snapshot.unwrap();
+        let reservation_id = snapshot.reservation_id.unwrap();
+        let before = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (before["state"].as_str(), before["window_tokens"].as_i64()),
+            (Some("active"), Some(20))
+        );
+        let expired = sqlx::query_file!(
+            "queries/test_expire_quota_reservation.sql",
+            tenant_id,
+            reservation_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(expired.rows_affected(), 1);
+        let completed_at = Utc::now();
+        let payload = json!([{
+            "request": {
+                "id": request_id, "tenant_id": tenant_id, "request_id": "late-quota-usage",
+                "status": "completed", "created_at": completed_at, "started_at": completed_at,
+                "completed_at": completed_at, "quota_reservation_id": reservation_id,
+                "quota_decision": snapshot.decision, "quota_actual_tokens": 7,
+                "quota_actual_cost_microusd": 0
+            },
+            "attempts": [], "usage_records": []
+        }]);
+        for _ in 0..2 {
+            sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let after = sqlx::query_file_scalar!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant_id,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                after["state"].as_str(),
+                after["window_tokens"].as_i64(),
+                after["events"].as_i64()
+            ),
+            (Some("reconciled"), Some(7), Some(1))
+        );
+    }
+
+    #[sqlx::test]
+    async fn late_usage_updates_original_window_after_real_expiration(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        insert_global_quota(
+            &pool,
+            tenant_id,
+            json!({"mode": "hard", "limits": {"tokens_per_hour": 100}}),
+        )
+        .await;
+        let engine = QuotaEngine::new(pool.clone());
+        let request_id = Uuid::new_v4();
+        let at = Utc::now();
+        let later = at + Duration::hours(25);
+        let estimate = || QuotaEstimate {
+            input_upper_bound: 10,
+            requested_output_tokens: Some(10),
+            output_multiplier: 1,
+            billable: true,
+            unbounded_input: false,
+            requires_extended_pricing: false,
+            unsupported_cost_features: false,
+        };
+        let candidates = || {
+            vec![selection(
+                tenant_id,
+                "direct-model",
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            )]
+        };
+        let first = engine
+            .admit(
+                request_id,
+                &principal(tenant_id),
+                candidates(),
+                estimate(),
+                at,
+            )
+            .await
+            .unwrap();
+        let QuotaOutcome::Allowed(first) = first else {
+            panic!("first reservation rejected")
+        };
+        let snapshot = first.snapshot.unwrap();
+        let reservation_id = snapshot.reservation_id.unwrap();
+        let second = engine
+            .admit(
+                Uuid::new_v4(),
+                &principal(tenant_id),
+                candidates(),
+                estimate(),
+                later,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(second, QuotaOutcome::Allowed(_)));
+        let before = sqlx::query_file_scalar!(
+            "queries/test_quota_expiration_windows.sql",
+            tenant_id,
+            reservation_id,
+            at,
+            later
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                before["state"].as_str(),
+                before["events"].as_i64(),
+                before["original"].as_i64(),
+                before["later"].as_i64()
+            ),
+            (Some("expired"), Some(0), Some(20), Some(20))
+        );
+        let payload = json!([{
+            "request": {
+                "id": request_id, "tenant_id": tenant_id, "request_id": "late-cross-window",
+                "status": "completed", "created_at": at, "started_at": at,
+                "completed_at": later, "quota_reservation_id": reservation_id,
+                "quota_decision": snapshot.decision, "quota_actual_tokens": 7,
+                "quota_actual_cost_microusd": 0
+            }, "attempts": [], "usage_records": []
+        }]);
+        for _ in 0..2 {
+            sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let after = sqlx::query_file_scalar!(
+            "queries/test_quota_expiration_windows.sql",
+            tenant_id,
+            reservation_id,
+            at,
+            later
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                after["state"].as_str(),
+                after["events"].as_i64(),
+                after["original"].as_i64(),
+                after["later"].as_i64()
+            ),
+            (Some("reconciled"), Some(1), Some(7), Some(20))
+        );
     }
 
     #[sqlx::test]

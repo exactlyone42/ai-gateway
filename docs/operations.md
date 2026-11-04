@@ -58,11 +58,9 @@ considered accounted for. The container mounts the directory from the
 This is a single-instance recovery mechanism, not a replicated ledger; back up
 the volume together with PostgreSQL before moving hosts.
 
-Each flush sends every currently ready envelope in one PostgreSQL function
-call. After the first database failure, the process leaves all envelopes on
-disk and makes no automatic retry loop. Restore PostgreSQL, then restart the
-gateway once; startup applies migrations and performs one batched recovery
-before accepting traffic.
+用量暫存每批最多處理 32 筆；啟動時會處理完待入帳的批次才開放服務。遇到資料衝突時，程式會有界地拆批，將確認衝突的原檔改名為 `.conflict` 保留，其他正常資料繼續入帳。同一配額預留若被多份暫存引用，這些檔案會一起保留供檢查，不依檔名猜測哪一份正確。
+
+`.conflict` 仍占用暫存容量，程式會記錄錯誤；管理者須先保留備份並查明衝突來源，再決定如何處理。容量滿時新請求會被拒絕。若資料庫連線或設定失敗，程式保留尚未入帳的檔案並停止自動寫入；排除原因後重啟。隔離容器已驗證真實 Gateway 產生的衝突檔可備份還原，還原後 Gateway 可保留原檔並繼續記錄正常用量；正式環境與原 Client 仍待驗收。
 
 ## 部署：新版驗收成功才切換
 
@@ -74,7 +72,7 @@ before accepting traffic.
 
 候選容器沿用目前容器的登入與資料庫設定，獨立保存待寫入記帳資料；不更換舊容器、不共用可被候選版覆寫的設定檔。先驗就緒與版本，再以原 Claude Code 實送。通過後才載入 Caddy 設定，並再次核對公開版本與原 Client 實送；切換前先啟動原 Client 長回答，看到串流後才切換，最後確認同一個請求正常結束，且切換後仍收到文字；中斷後續傳、重送、被掛勾要求重寫，或只有最終成功訊息，都不算通過。驗收用可執行的程式資料範例，避免長篇說明觸發既有輸出長度限制；不關閉掛勾。公開驗收失敗即切回；候選版保留供查驗，不強殺可能尚未結束的請求。
 
-成功紀錄寫入 `accepted.json`，保留舊容器。舊版沒有請求計數時不自動停止；有計數時須連續確認請求數為零且沒有尚未關閉的 HTTP 連線，才停止舊容器；無法確認就保留。`/health` 的 `active_requests` 計算到回應本文釋放，查詢健康狀態本身不增加計數。固定等待時間不是下線證據。
+成功紀錄寫入 `accepted.json`，保留舊容器。舊版沒有請求計數時不自動停止；有計數時須連續確認請求數為零且沒有尚未關閉的 HTTP 連線，才停止舊容器。停止後還要確認容器正常退出，才記錄 `old_stopped=true`；若狀態不明或異常，`false` 不代表容器仍在運行，須自行檢查。`/health` 的 `active_requests` 計算到回應本文釋放，查詢健康狀態本身不增加計數。固定等待時間不是下線證據。
 
 Caddy 載入設定不代表所有長連線都安全：Claude 的 SSE 串流以 `python3 scripts/test_caddy_cutover.py` 在同版隔離 Caddy 驗證跨切換完整收到；此項不宣稱 WebSocket 支援。資料庫主機故障、外部供應商故障不屬部署成功保證。
 
@@ -82,39 +80,88 @@ Caddy 載入設定不代表所有長連線都安全：Claude 的 SSE 串流以 `
 
 ## Backup and restore
 
-加密全文保存的備份與還原尚未完成：現有工具沒有一併保存加密暫存及處理還原後的主金鑰計數。只要目前資料庫已有全文保存結構，工具會在備份或停止服務前拒絕操作；若備份檔本身包含全文保存結構，也會拒絕還原。這是暫時的資料保護，不能把它當成全文保存已有備份。手動使用其他工具還原也尚未安全驗證。
+加密全文保存的正式備份與還原尚未完成。工作樹中的 `backup.sh create` 在指定 Gateway 容器與加密、簽署金鑰指紋後，可建立加密備份並立即驗證；`backup.sh restore-capture` 接受隔離還原工具的參數，僅允許空白隔離目標。舊的 `restore` 仍拒絕加密資料。監控及備份尚未在正式環境驗收，不能當成正式備份方案。
 
-`scripts/capture_backup.py`、`scripts/verify_capture_backup.py` 與 `scripts/restore_capture_backup.py` 是隔離測試用原型，尚未接入正式服務。備份在協調鎖下將資料庫、帳本暫存、加密內容暫存與金鑰目錄分別加密，再以指定的 GPG 金鑰簽署清單；驗證時必須從可信來源指定簽署者識別值。還原只接受空的隔離目標，並建立新金鑰。加密收件人的 GPG 私鑰必須另外安全保存，否則無法還原；簽署金鑰也需要妥善保管。備份副本的刪除政策及所有正式寫入路徑的協調尚未完成，不得當成正式備份方案。參考 [PostgreSQL 備份說明](https://www.postgresql.org/docs/current/app-pgdump.html) 與 [GnuPG 加密說明](https://gnupg.org/documentation/manuals/gnupg/Operational-GPG-Commands.html)。
+指定加密備份時，三項設定必須完整；程式依指定的 Gateway 核對實際資料庫與掛載，不以舊版固定資料庫決定備份方式。現行正式 Gateway 尚未具備加密備份所需的全部掛載，不能直接使用此流程。
 
-開發版提供 `agent-pool-gateway --initialize-content-capture`，只在三個保存目錄安全且空、資料庫無保存紀錄及其他用戶連線時建立首把隨機金鑰和獨立計數檔。已有金鑰或紀錄時會拒絕，不會覆蓋；若執行中斷，先檢查目錄，不要自行清空或重試。此指令及全文保存尚未部署，正式上線流程與備份仍須完成驗收。
+建立後的驗證會核對清單中的收件金鑰，並確認實際使用該金鑰或其子金鑰解密；這不代表密文沒有其他收件者。單獨執行驗證時，需指定 `--recipient` 才會檢查預期收件金鑰；未指定時保留舊版驗證行為。
 
-`./scripts/backup.sh create [directory]` takes the PostgreSQL dump and the
-ledger spool volume together, because a database restored without its spool
-loses the envelopes that had not reached it yet. `./scripts/backup.sh restore
-<directory>` puts both back: it stops the gateway first, so no process holds
-connections while the schema is dropped and recreated, and it restores the
-spool with the ownership the container needs.
+產生驗證紀錄時必須指定 `--recipient`，監控也必須設定 `CAPTURE_BACKUP_RECIPIENT`。舊版驗證紀錄沒有記下是否檢查收件金鑰，因此監控會告警；須建立並驗證新備份，或先保留原紀錄後重新完成驗證。監控仍不會重新讀取密文檢查內容。
 
-Restore replaces every row in the target database. A restore is only finished
-when the service answers again: `/ready` returns `200` and an admin login token
-issued before the backup still creates a session. Verified on 2026-09-12 by
-deleting both volumes and restoring: the login token returned `401` against the
-empty stack and `201` after the restore.
+建立新備份時會忽略 GPG 設定檔中自動加入的收件者；原先依靠該設定取得備份的人不會自動取得新備份。這項設定不驗證既有備份是否含有其他收件者。
 
-`create` keeps the newest `BACKUP_KEEP` dated directories (default 14) and
-removes older ones, so a scheduled run neither fills the disk nor waits for
-someone to prune it. Only directories it named are removed; anything else in
-the backup root is left alone.
+隔離還原的參數可用 `./scripts/backup.sh restore-capture --help` 查看；必須明確指定備份、簽署金鑰、隔離資料庫及各個空磁碟卷。還原程式會重新驗簽、解密及檢查目標，不會以建立備份時的驗證結果取代還原前檢查。
 
-Run it daily from the host scheduler. On the current host that is 05:30
-Asia/Taipei, held by a lock file so a slow run cannot overlap the next one,
-with output appended to `backup.log`. Verified on 2026-09-12 by running the
-scheduled command in a stripped environment like the scheduler's own.
+工作樹中的健康檢查會確認最新加密備份的簽署時間、檔案大小，以及建立時完整驗證成功的簽章；排程須提供 `CAPTURE_BACKUP_SIGNER` 與能讀到該公鑰的 GPG 金鑰環。檔案大小可發現截斷，但不能發現等長的內容竄改；還原前仍須重新執行完整驗證，並需定期演練還原。舊版第 3 版備份仍可完整驗證和還原，但沒有簽署的大小，健康檢查會告警直到建立新版備份。資料庫狀態無法確認或最新加密備份不完整時，即使有舊版備份也會告警。
 
-A failed backup is currently visible only in that log. Nothing alerts on it
-yet; that belongs with the rest of the alerting work.
+健康檢查通過只表示找到符合來源及時間條件、曾驗證過的備份，不能證明資料庫和入帳檔來自同一時間點。備份協調鎖不能阻止未使用該鎖的其他資料庫連線寫入；在來源排他與完整還原驗收完成前，即使顯示通過，也不能當作正式資料可安全還原的證據。
+
+備份不需要停止 Gateway。備份程式取得協調鎖後，新請求會得到 503 並帶 `Retry-After`，用戶端依此重試；取鎖時若有請求進行中，最多等 10 秒（串流也等到收完），逾時才報錯，不會中斷請求。備份程式被強制終止時鎖隨之釋放，隔離演練中請求在 0.2 秒內恢復。資料庫由 `pg_dump` 自己取一致快照。隔離演練用 `--check-client-continuity`、`--check-lock-timeout`、`--check-stream-drain`、`--check-backup-kill` 驗證；超過 10 秒的串流與正式環境尚未驗證。
+
+隔離演練確認：還原後接回最新的同一份刪除紀錄，備份後的刪除會重新套用；接錯來源會拒絕啟動。但若刪除紀錄與見證同時回到舊版，已刪內容仍會復活。必須先完成獨立防回退與備份副本刪除政策，才能評估正式還原。參考 [歐洲資料保護委員會對備份刪除的說明](https://www.edpb.europa.eu/system/files/2026-02/edpb_cef-report_2025_right-to-erasure_en.pdf)。
+
+`scripts/capture_backup.py`、`scripts/verify_capture_backup.py` 與 `scripts/restore_capture_backup.py` 是隔離測試用原型，尚未接入正式服務。新版備份在協調鎖下加密資料並簽署刪除紀錄位置；舊版備份、撤銷或過期的簽署金鑰均會被拒絕。還原只接受空的隔離目標；完成資料、金鑰與位置寫入前，未完成標記會阻止新版 Gateway 啟動。刪除紀錄及見證不在備份包內，必須另外保留最新的原始資料。Python 還原工具透過 `psql` 讀取獨立 SQL 檔並使用具名變數；它無法直接使用 Rust 的 SQLx 巨集。加密收件人的 GPG 私鑰必須另外安全保存，否則無法還原；簽署金鑰也需要妥善保管。備份副本的刪除政策與防回退尚未完成，不得當成正式備份方案。參考 [PostgreSQL 備份說明](https://www.postgresql.org/docs/current/app-pgdump.html) 與 [GnuPG 簽章狀態說明](https://github.com/gpg/gnupg/blob/master/doc/DETAILS)。
+
+隔離備份要求 Gateway 明確設定五個保存路徑，並與容器掛載一致；資料庫網址須明確指定埠號。備份及還原工具會透過資料庫容器內的 `/var/run/postgresql` 本機 socket 操作，並移除會改變連線目標的環境變數；若資料庫改用其他 socket 路徑，這套原型會拒絕，尚不支援。這些檢查避免工具與 Gateway 實際讀取不同的位置。
+
+還原工具會先在隔離容器計算資料庫備份展開後的 SQL 大小，超過上限時在寫入目標之前拒絕；檢查後會再次驗證備份簽章。此限制不涵蓋索引與資料庫日誌等額外磁碟用量，也不能防止同一帳號在檢查後更換檔案；錯誤中斷後的續跑及舊版 Gateway 忽略未完成標記的風險仍需處理。
+
+要重跑隔離演練，可先編譯目前版本，再指定編譯結果：
+
+```sh
+SQLX_OFFLINE=true cargo build --bin agent-pool-gateway
+python3 scripts/test_capture_backup_gateway.py --gateway-bin target/debug/agent-pool-gateway
+```
+
+演練使用本機 Docker、測試用帳號與模擬上游，不連接正式資料。它會輸出使用的程式指紋，並檢查備份、竄改拒絕及還原後讀舊寫新；執行前須有 `python:3.13-slim`、`postgres:17-alpine` 映像及 GPG。指定其他程式檔時，指紋只能識別該檔，不能證明它來自目前原始碼。
+
+加上 `--check-deletion` 可檢查還原後是否保持刪除，再加 `--check-wrong-journal` 可檢查是否拒絕不同來源。`--check-deletion --check-rolled-back-journal` 檢查日誌與見證同時回退；目前此項會失敗，正式還原仍不可開放。
+
+`--check-deletion --check-independent-position` 會在測試程序保存刪除後的位置，將日誌與本機見證回退後，以 Gateway 的位置檢查核對：舊位置可通過，刪除後的位置必須拒絕。此演練沒有獨立見證服務，也沒有接入 Gateway 啟動路徑，不能取代正式防回退。
+
+獨立見證資料庫的結構位於 `deploy/erasure-witness/`，Gateway 已接入讀取及更新，但目前只供隔離測試，尚不能部署使用。啟用全文保存時必須設定 `CONTENT_CAPTURE_REMOTE_WITNESS_URL`，否則啟動會失敗；只有開發測試編譯可明確啟用本機替身。SQL 由管理者以 `psql` 建置與授權；目前只驗證 PostgreSQL 17，建置需要能切換至無登入擁有者的超級使用者。啟用 `RUN_ERASURE_WITNESS_DOCKER=1` 的完整檢查會執行本機容器權限、加密連線及主備測試。Gateway 會拒絕仍在備援狀態的資料庫，但無法辨識資料落後的備援已被升格。主機名稱不同不代表主機、儲存設備或管理權限真正獨立；非同步複寫切換也可能丟失已確認的位置。正式啟用前仍須驗證獨立主機、初始化、權限變更、同步複寫或避免自動切換，以及真實中斷與還原。
+
+隔離演練可用 `scripts/test_capture_backup_gateway.py --gateway-bin <程式路徑> --check-deletion --check-remote-witness`：Gateway 刪除測試資料後，演練還原較舊的資料庫與本機紀錄，確認最新見證會阻止啟動。另加 `--control-remote-rollback` 會在隔離容器中故意回退見證，確認舊資料會再出現；這是反向對照，也說明見證不能與原始資料一起回退。將 `--check-remote-witness` 換成 `--check-remote-replay` 則保留最新紀錄，檢查還原後是否重新執行刪除。演練使用測試帳號和測試內容，不代表跨主機驗收。
+
+另可單獨使用 `--check-expired-restore`，將測試用過期紀錄放進備份，再檢查還原後清理受鎖時不會開服、解鎖後會先清理及更新見證。過期紀錄被鎖住時，整個 Gateway 會等待，每 30 秒記錄狀態；可發送停止訊號，排除原因後重新啟動續做。損壞的暫存或資料庫錯誤也可能阻止啟動，需先保留原資料並查明原因。
+
+啟動期間若資料庫遷移收到停止訊號，Gateway 會以獨立連線嘗試取消同一個資料庫、角色、程序與啟動時間的遷移，再退出；隔離 PostgreSQL 測試涵蓋交易中斷、其他連線不受影響及重新啟動。若資料庫無法建立取消連線或拒絕取消，日誌會記錄取消未確認；資料庫端工作可能繼續，須確認其狀態後再啟動，不能假設 Gateway 退出即代表遷移停止。
+
+開發版提供 `agent-pool-gateway --initialize-content-capture`，在保存、金鑰、計數、刪除紀錄與見證目錄安全，且資料庫無保存紀錄及其他用戶連線時建立金鑰與紀錄。若初始化中斷或出錯，保留原檔並先檢查原因；此指令及全文保存尚未部署。
+
+啟用內容保存時，`DATABASE_MAX_CONNECTIONS` 減去 `ADMIN_DATABASE_MAX_CONNECTIONS` 至少要有 4 條連線；排程器使用直通模式時至少要 3 條。背景清理需要 2 條，一般請求也需要連線；非直通模式的排程器另占用 1 條。連線不足時服務拒絕啟動；這是最低數量，忙碌時仍可能需要更多。
+
+舊版 `./scripts/backup.sh create [directory]` 會一起保存資料庫和入帳暫存。工作樹會核對 Gateway 的入帳路徑、掛載與資料庫連線；舊版指令固定操作 `gateway` 資料庫及帳號，若 Gateway 使用其他資料庫或來源不一致，就會停止。這仍未涵蓋所有手動切換及還原失敗情境，不得將它視為完整的正式備份防護。
+
+工作樹中的備份、還原與 `deploy_gateway.py` 共用部署鎖，忙碌時直接停止；預設鎖檔在執行帳號的 `~/.local/state/gateway-deployment.lock`。若透過 `GATEWAY_DEPLOYMENT_LOCK` 指定其他絕對路徑，所有部署與備份程序必須使用相同路徑和可見的同一個檔案；不同帳號、遠端主機或沒有使用這把鎖的手動切換不受保護。
+
+舊版 `./scripts/backup.sh restore <directory>` 會覆寫目標資料庫及入帳暫存；工作樹要求備份有完成紀錄，先複製到私有暫存區並重封裝允許的入帳檔案，再檢查目標入帳目錄沒有待處理資料。既有沒有完成紀錄的備份會被拒絕，原檔保留待安全驗證。完成紀錄沒有保護檔案內容，備份期間資料庫與入帳檔也不保證同一時間點；暫存空間不足、資料庫與檔案還原不能一起回滾，以及舊版資料庫遷移相容性仍需處理，因此不可用於正式環境。加密備份應使用上方的隔離還原入口。
+
+入帳封存只接受指定格式的一般檔案與根目錄；連結、巢狀目錄、延伸標頭、重複名稱及損壞結尾會被拒絕。這種限制可能拒絕其他工具製作的舊封存，不會修改原檔；還原暫存需要額外磁碟空間，檢查程序記憶體上限為 128 MiB。
+
+備份不會自動刪除。管理者須監控剩餘空間，並在確認保留政策與需要保留的資料後，才處理舊備份。
+
+目前正式 Gateway 使用獨立的候選版入帳磁碟卷及 `gateway_jev_local` 資料庫，與舊版備份的預設卷及 `gateway` 資料庫不同。2026-11-03 核對使用者的 cron 與 systemd 使用者計時器，沒有發現 Gateway 備份排程；其他排程來源尚未完整核對，不能因此認定沒有備份。
+
+工作樹的健康檢查會以 `CAPTURE_BACKUP_GATEWAY` 指定執行中的 Gateway，核對它實際連接的資料庫；未指定時使用專案的預設 Gateway 容器。來源無法確認時告警。舊版未簽署的備份無法由此確認來源和完整性，即使檔案存在也會告警。
+
+加密備份的簽署清單必須記錄目前 Gateway 與 PostgreSQL 容器的識別值，監控才會判為相符。重新建立任一容器後，即使沿用資料，舊備份仍會告警，直到完成新備份及驗證。沒有資料庫容器識別值的舊備份仍可檢查與隔離還原，但不會通過新鮮度監控；此檢查尚不能排除資料或磁碟卷在同一容器中被替換。
+
+新版清單也記錄 PostgreSQL 叢集識別值與資料庫編號，備份前後會檢查兩者是否改變；監控會與當前資料庫比對。資料庫帳號若無權讀取這些資訊，備份和監控會失敗。從相同來源複製或回退資料可能保留識別值，因此這些檢查不能證明資料內容或磁碟卷沒有被替換。
+
+新版清單另保存五個儲存掛載的身分摘要，備份前後及監控時會比對；卷選項不納入摘要。此流程目前只接受 Docker 磁碟卷及 Unix socket 連線，刪除紀錄與見證不接受匿名卷；主機目錄掛載尚無可靠的來源核對，會拒絕備份並告警，後續須補上安全支援。Unix socket 不保證 Docker 與執行備份的程式在相同檔案系統命名空間，Docker Desktop 或轉接的遠端 socket 尚未驗證。卷內資料原地覆寫及回退仍無法靠掛載身分判斷。v3 至 v6 清單仍可驗證，但不會通過新版新鮮度監控；更舊的 v2 尚無安全還原途徑。
+
+Docker 磁碟卷的建立時間可能只有秒的精度；同名卷若在同一時間精度內重建，且其他辨識資料也相同，不能保證被發現。這些資訊只用於來源核對，不代表內容安全。
+
+v2 舊備份可用 `python3 scripts/verify_capture_backup.py <備份目錄> --signer <簽署金鑰指紋> --inspect-legacy-v2` 唯讀檢查簽章、檔案、解密及格式；可另加 `--recipient <收件金鑰指紋>`。v2 沒有刪除位置，檢查通過也不能直接還原，否則可能復活已刪資料；此檢查不建立驗證紀錄。
+
+目前正在建置現行服務的入帳資料加密備份。v8 入帳備份的唯讀格式檢查不產生驗證紀錄，也不能作為還原許可。工作樹有隔離還原程式原型，但尚未經完整實機演練及審查，不可用於正式還原；目前也沒有 v8 備份建立流程。既有加密保存還原入口會拒絕 v8。
+
+工作樹可用 `python3 scripts/ledger_backup_source.py --gateway <Gateway 容器> --postgres <資料庫容器>` 唯讀核對入帳來源；輸出不包含憑證。此檢查沒有建立備份。全文保存設定未明確關閉時預設拒絕；若僅需調查，可加 `--inspect-unconfirmed`，此時 `capture_setting` 為 `unconfirmed` 並以非零狀態結束。即使設定值寫明關閉，也必須確認執行中的版本確實採用該設定，不能僅憑此結果執行入帳備份。
 
 ## Process shutdown
+
+工作樹中的 Compose 預設給 Gateway 60 秒結束時間；若調高排空或收尾時間，須依下方公式透過 `GATEWAY_STOP_GRACE_PERIOD` 另行加長。部署程式會依容器的排空與收尾設定計算等待時間，最少 60 秒；新建候選容器及停止舊容器都使用該值。設定只在建立或操作容器時生效，既有正式容器不會自動更新。
 
 `SIGTERM` and Ctrl-C start the same bounded shutdown sequence:
 
@@ -169,7 +216,7 @@ them yet; each says what is missing.
 | --- | --- | --- | --- | --- |
 | `gateway_down` | `/health` does not answer | The process is gone or the port moved | Start the stack; if it will not start, the startup error names the setting | yes |
 | `gateway_not_ready` | `/health` answers, `/ready` does not | The database is unreachable, or the process is draining | Restore the database; a drain clears itself when the deployment finishes | yes |
-| `backup_stale` / `backup_missing` | Newest backup older than `BACKUP_MAX_AGE_HOURS` (30) | The daily backup stopped, so a restore would lose a day or more | Run `./scripts/backup.sh create` and fix the schedule | yes |
+| `backup_stale` / `backup_missing` | 備份過期、缺失或加密備份未完成驗證；預設上限 30 小時 | 備份可能中斷，無法確認最近的資料可還原 | 確認資料庫、簽署公鑰與備份排程，再檢查最新備份 | yes |
 | Provider authentication | Repeated 401/403 from one provider | The provider key is wrong, revoked or out of quota | Rotate the key from its approved source | no: needs a metrics or log reader |
 | Spend anomaly | Spend per hour far above the recent baseline | A runaway client, or a model priced differently than assumed | Suspend the credential, then read the ledger for the source | no: needs a baseline nobody has measured yet |
 | 5xx rate and p95 latency | Above the service level, once one is agreed | The gateway is failing or slow for everyone | Depends on the cause the traces show | no: needs a metrics backend and an agreed service level |

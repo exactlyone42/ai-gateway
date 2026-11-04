@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pid AS \"pid!\", backend_start AS \"started!\"\nFROM pg_catalog.pg_stat_activity\nWHERE pid = pg_catalog.pg_backend_pid();\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pid!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "started!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "d8e4355bc2bb69a8597681052d92dc59ce3cf1dcf6725fc80025fc5470db17cf"
+}

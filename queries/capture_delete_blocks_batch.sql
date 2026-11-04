@@ -1,0 +1,1 @@
+DELETE FROM capture_blocks WHERE (tenant_id, capture_id, leg, sequence) IN (SELECT tenant_id, capture_id, leg, sequence FROM capture_blocks WHERE tenant_id = $1 AND capture_id = $2 ORDER BY leg, sequence LIMIT 64)

@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT install, sequence, tip\nFROM erasure_witness.position\nWHERE singleton = true;\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "install",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "sequence",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "tip",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b57aa08d87498176c75dd482ba4ef7e1b299f320327c89997cc5627d09ba9b56"
+}

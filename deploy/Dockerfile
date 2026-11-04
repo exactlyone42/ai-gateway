@@ -11,6 +11,9 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY queries ./queries
+COPY .sqlx ./.sqlx
+ENV SQLX_OFFLINE=true
 # The migration runner reads this directory at compile time, so it has to be
 # present in the build context even while it is empty.
 COPY migrations ./migrations
@@ -33,9 +36,9 @@ RUN useradd --system --create-home --uid 10001 gateway
 # Create the spool mount point here, owned by that user. An empty named volume
 # inherits the image's ownership for its mount point; without this the volume
 # arrives owned by root and the gateway cannot write its usage ledger.
-RUN mkdir -p /var/lib/agent-pool-gateway/ledger-spool /var/lib/agent-pool-gateway/provider-secrets /var/lib/agent-pool-gateway/capture-spool /var/lib/agent-pool-gateway/capture-keys /var/lib/agent-pool-gateway/capture-anchors \
+RUN mkdir -p /var/lib/agent-pool-gateway/ledger-spool /var/lib/agent-pool-gateway/provider-secrets /var/lib/agent-pool-gateway/capture-spool /var/lib/agent-pool-gateway/capture-keys /var/lib/agent-pool-gateway/capture-anchors /var/lib/agent-pool-gateway/capture-erasure /var/lib/agent-pool-gateway/capture-witness \
     && chown -R gateway:gateway /var/lib/agent-pool-gateway \
-    && chmod 700 /var/lib/agent-pool-gateway/provider-secrets /var/lib/agent-pool-gateway/capture-spool /var/lib/agent-pool-gateway/capture-keys /var/lib/agent-pool-gateway/capture-anchors
+    && chmod 700 /var/lib/agent-pool-gateway/provider-secrets /var/lib/agent-pool-gateway/capture-spool /var/lib/agent-pool-gateway/capture-keys /var/lib/agent-pool-gateway/capture-anchors /var/lib/agent-pool-gateway/capture-erasure /var/lib/agent-pool-gateway/capture-witness
 USER gateway
 COPY --from=build /src/target/release/agent-pool-gateway /usr/local/bin/
 COPY --from=web-build /web/dist ./web/dist

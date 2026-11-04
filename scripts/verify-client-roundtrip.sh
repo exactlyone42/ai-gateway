@@ -72,7 +72,7 @@ cargo build --quiet --manifest-path "$root/Cargo.toml"
 env \
   LISTEN_ADDRESS="127.0.0.1:$gateway_port" \
   DATABASE_URL="$database_url" \
-  DATABASE_MAX_CONNECTIONS=3 \
+  DATABASE_MAX_CONNECTIONS=5 \
   ADMIN_DATABASE_MAX_CONNECTIONS=1 \
   OPENAI_BASE_URL="http://127.0.0.1:$mock_port" \
   OPENAI_API_KEY=fixture-provider-key \

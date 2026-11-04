@@ -396,6 +396,43 @@ impl AdminService {
         page_from_rows(rows, limit, "created_at", "id", "item")
     }
 
+    pub async fn capture_report(
+        &self,
+        context: &AdminContext,
+        id: Uuid,
+    ) -> Result<Value, AdminError> {
+        if context.role != super::AdminRole::Admin {
+            return Err(AdminError::Forbidden);
+        }
+        let mut tx = self.pool.begin().await?;
+        let authorized: Option<i32> = sqlx::query_scalar("SELECT 1 FROM admin_sessions s JOIN admin_accounts a ON (a.tenant_id, a.id) = (s.tenant_id, s.admin_account_id) AND a.version = s.account_version JOIN admin_login_credentials c ON (c.tenant_id, c.id, c.admin_account_id) = (s.tenant_id, s.login_credential_id, s.admin_account_id) AND c.version = s.login_credential_version WHERE s.tenant_id = $1 AND s.id = $2 AND a.id = $3 AND a.role = 'admin' AND a.status = 'active' AND s.revoked_at IS NULL AND s.expires_at > now() AND c.status = 'active' AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > now()) FOR SHARE OF s, a, c")
+            .bind(context.tenant_id).bind(context.session_id).bind(context.account_id)
+            .fetch_optional(&mut *tx).await?;
+        if authorized.is_none() {
+            return Err(AdminError::Unauthorized);
+        }
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM capture_records WHERE tenant_id = $1 AND capture_id = $2 FOR SHARE",
+        )
+        .bind(context.tenant_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_none() {
+            return Err(AdminError::NotFound);
+        }
+        let report = sqlx::query_scalar("SELECT jsonb_build_object('id', r.capture_id, 'user_id', r.user_id, 'state', r.state, 'created_at', r.created_at, 'expires_at', r.expires_at, 'blocks', jsonb_build_object('client_request', count(b.leg) FILTER (WHERE b.leg = 0), 'provider_request', count(b.leg) FILTER (WHERE b.leg = 1), 'provider_response', count(b.leg) FILTER (WHERE b.leg = 2), 'client_response', count(b.leg) FILTER (WHERE b.leg = 3))) FROM capture_records r LEFT JOIN capture_blocks b ON (b.tenant_id, b.capture_id) = (r.tenant_id, r.capture_id) WHERE r.tenant_id = $1 AND r.capture_id = $2 GROUP BY r.tenant_id, r.capture_id")
+            .bind(context.tenant_id)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AdminError::NotFound)?;
+        sqlx::query("INSERT INTO audit_logs (id, tenant_id, actor_admin_id, actor_role, action, target_type, target_id, occurred_at) VALUES ($1, $2, $3, 'admin', 'capture.metadata.read', 'capture', $4, now())")
+            .bind(Uuid::new_v4()).bind(context.tenant_id).bind(context.account_id).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(report)
+    }
+
     pub async fn request_report(
         &self,
         context: &AdminContext,

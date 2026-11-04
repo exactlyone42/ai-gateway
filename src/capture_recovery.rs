@@ -122,7 +122,22 @@ impl RecoveryScanner {
                         .await
                         .is_err()
                     {
-                        failed += 1;
+                        let permit = self
+                            .capacity
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| CaptureArchiveError)?;
+                        let truncated = tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            crate::capture_spool::CaptureSpool::is_truncated_for_cleanup(&path)
+                        })
+                        .await
+                        .map_err(|_| CaptureArchiveError)?;
+                        if matches!(truncated, Ok(true)) {
+                            tracing::warn!(error.type = "capture_truncated_spool_retained");
+                        } else {
+                            failed += 1;
+                        }
                     }
                 }
             }
@@ -262,7 +277,9 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let scanner = RecoveryScanner::open(&root, capacity).await.unwrap();
+        let scanner = RecoveryScanner::open(&root, capacity.clone())
+            .await
+            .unwrap();
         let batch = scanner
             .scan_batch(&pool, &keys, CaptureLimits::for_test(4096), 32)
             .await
@@ -278,5 +295,120 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 2);
+        let active = CaptureIdentity {
+            capture: Uuid::new_v4(),
+            ..identity
+        };
+        let permit = reserve_anchored(&pool, &anchors, &master).await.unwrap();
+        let mut active_spool = CaptureSpool::create_with_permit(
+            &root,
+            active,
+            &master,
+            &[],
+            permit,
+            CaptureLimits::for_test(4096),
+        )
+        .unwrap();
+        active_spool
+            .append(CaptureLeg::ClientRequest, 0, b"first")
+            .unwrap();
+        let active_path = active_spool.path().to_owned();
+        let scanner = RecoveryScanner::open(&root, capacity.clone())
+            .await
+            .unwrap();
+        let batch = scanner
+            .scan_batch(&pool, &keys, CaptureLimits::for_test(4096), 32)
+            .await
+            .unwrap();
+        assert_eq!((batch.imported, batch.failed), (0, 1));
+        assert!(active_path.exists());
+        assert!(
+            !crate::capture_archive::owned_capture_exists(
+                &pool,
+                active.tenant,
+                active.user,
+                active.capture
+            )
+            .await
+            .unwrap()
+        );
+        active_spool
+            .append(CaptureLeg::ProviderResponse, 0, b"second")
+            .unwrap();
+        active_spool.finish().unwrap();
+        use std::io::BufRead as _;
+        let mut holder = std::process::Command::new("flock")
+            .arg("-x")
+            .arg(&active_path)
+            .arg("sh")
+            .arg("-c")
+            .arg("printf 'ready\\n'; read line")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let scanner = RecoveryScanner::open(&root, capacity.clone())
+            .await
+            .unwrap();
+        let batch = scanner
+            .scan_batch(&pool, &keys, CaptureLimits::for_test(4096), 32)
+            .await
+            .unwrap();
+        assert_eq!((batch.imported, batch.failed), (0, 1));
+        assert!(active_path.exists());
+        assert!(
+            !crate::capture_archive::owned_capture_exists(
+                &pool,
+                active.tenant,
+                active.user,
+                active.capture
+            )
+            .await
+            .unwrap()
+        );
+        drop(holder.stdin.take());
+        assert!(!holder.wait().unwrap().success());
+        let verified = CaptureSpool::recover_with_keyring(&active_path, &keys, 4096).unwrap();
+        assert!(verified.complete);
+        assert_eq!(verified.blocks.len(), 3);
+        for (index, expected) in [b"first".as_slice(), b"second".as_slice()]
+            .iter()
+            .enumerate()
+        {
+            let (leg, sequence, sealed) = &verified.blocks[index];
+            let decoded = verified
+                .cipher
+                .unseal_timed(
+                    *leg,
+                    *sequence,
+                    index as u64,
+                    verified.elapsed_ns[index],
+                    sealed,
+                )
+                .unwrap();
+            assert_eq!(decoded, *expected);
+        }
+        let scanner = RecoveryScanner::open(&root, capacity).await.unwrap();
+        let batch = scanner
+            .scan_batch(&pool, &keys, CaptureLimits::for_test(4096), 32)
+            .await
+            .unwrap();
+        assert_eq!((batch.imported, batch.failed), (1, 0));
+        assert!(!active_path.exists());
+        assert!(
+            crate::capture_archive::owned_capture_exists(
+                &pool,
+                active.tenant,
+                active.user,
+                active.capture
+            )
+            .await
+            .unwrap()
+        );
     }
 }

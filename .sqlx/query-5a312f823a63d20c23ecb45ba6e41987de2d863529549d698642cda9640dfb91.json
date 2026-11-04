@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jsonb_build_object(\n    'state', (SELECT state FROM quota_reservations WHERE tenant_id = $1 AND id = $2),\n    'events', (SELECT count(*) FROM quota_reconciliation_events WHERE tenant_id = $1 AND reservation_id = $2),\n    'original', (SELECT reserved_tokens FROM quota_windows WHERE tenant_id = $1 AND limit_kind = 'tokens_per_hour' AND window_start <= $3 AND window_end > $3),\n    'later', (SELECT reserved_tokens FROM quota_windows WHERE tenant_id = $1 AND limit_kind = 'tokens_per_hour' AND window_start <= $4 AND window_end > $4)\n) AS \"evidence!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "evidence!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5a312f823a63d20c23ecb45ba6e41987de2d863529549d698642cda9640dfb91"
+}

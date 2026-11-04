@@ -299,7 +299,7 @@ deadfiles() {
     while IFS= read -r m; do
       cand="$dir/$m.rs"
       [ -f "$cand" ] && queue+=("$cand")
-    done < <(sed -nE 's/^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]*;.*/\2/p' "$f")
+    done < <(sed -nE 's/^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]*;.*/\3/p' "$f")
   done
 
   while IFS= read -r f; do
@@ -332,7 +332,8 @@ case "${1:-gate}" in
   all|pre-push)
     python3 scripts/check-migrations.py
     python3 -m unittest discover -s scripts -p "test_deploy*.py"
-    python3 -m unittest scripts/test_backup_capture.py scripts/test_capture_backup.py
+    python3 -m unittest scripts/test_backup_capture.py scripts/test_backup_docker_orphan.py scripts/test_capture_backup.py scripts/test_capture_backup_freshness.py scripts/test_capture_backup_source_state.py scripts/test_capture_storage_identity.py scripts/test_capture_storage_identity_live.py scripts/test_capture_database_identity_live.py scripts/test_ledger_backup_source.py scripts/test_ledger_backup_source_live.py scripts/test_ledger_watchdog.py scripts/test_legacy_archive_stage.py scripts/test_legacy_backup_source.py scripts/test_legacy_backup_live.py scripts/test_capture_restore.py scripts/test_restore_ledger_backup.py scripts/test_restore_ledger_live.py scripts/test_erasure_witness.py
+    if [[ "${RUN_ERASURE_WITNESS_DOCKER:-0}" == "1" ]]; then python3 scripts/test_remote_witness_tls.py; fi
     frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh

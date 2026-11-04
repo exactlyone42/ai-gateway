@@ -1,0 +1,1 @@
+LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE;

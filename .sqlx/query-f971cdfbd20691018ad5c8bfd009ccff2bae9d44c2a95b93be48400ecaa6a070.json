@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE capture_records, capture_master_key_usage, capture_erasure_marks IN ACCESS EXCLUSIVE MODE NOWAIT\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f971cdfbd20691018ad5c8bfd009ccff2bae9d44c2a95b93be48400ecaa6a070"
+}

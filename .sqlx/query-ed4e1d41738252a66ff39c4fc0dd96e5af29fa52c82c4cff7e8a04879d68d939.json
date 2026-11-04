@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM erasure_witness.position WHERE install = $1::uuid;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ed4e1d41738252a66ff39c4fc0dd96e5af29fa52c82c4cff7e8a04879d68d939"
+}

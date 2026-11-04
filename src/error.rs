@@ -197,6 +197,7 @@ impl IntoResponse for GatewayError {
                 | Self::SchedulerClosed
                 | Self::ProcessDraining
                 | Self::CaptureUnavailable
+                | Self::LedgerUnavailable(LedgerError::BackupBusy)
         ) {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
@@ -268,5 +269,25 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "unauthorized");
+    }
+
+    #[test]
+    fn backup_busy_tells_clients_to_retry_but_other_ledger_failures_do_not() {
+        let busy =
+            GatewayError::LedgerUnavailable(crate::ledger::LedgerError::BackupBusy).into_response();
+        assert_eq!(busy.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy.headers().get(axum::http::header::RETRY_AFTER).unwrap(),
+            "1"
+        );
+        let unavailable =
+            GatewayError::LedgerUnavailable(crate::ledger::LedgerError::BackupUnavailable)
+                .into_response();
+        assert!(
+            unavailable
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
     }
 }

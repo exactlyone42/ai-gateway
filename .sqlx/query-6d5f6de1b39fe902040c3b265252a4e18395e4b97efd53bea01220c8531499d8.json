@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state)\nVALUES ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'ollama-stop-test', 'test', 'local', $1, 'env://TEST', ARRAY['openai_responses'], 'active')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6d5f6de1b39fe902040c3b265252a4e18395e4b97efd53bea01220c8531499d8"
+}

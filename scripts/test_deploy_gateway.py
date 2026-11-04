@@ -147,6 +147,14 @@ class StreamCompletionTests(unittest.TestCase):
 
 
 class RetirementTests(unittest.TestCase):
+    def test_shutdown_wait_covers_custom_deadlines(self):
+        self.assertEqual(deploy_gateway.shutdown_wait({}), 60)
+        self.assertEqual(deploy_gateway.shutdown_wait({'DRAIN_TIMEOUT_MS': ' ', 'SHUTDOWN_FINALIZE_TIMEOUT_MS': ''}), 60)
+        self.assertEqual(deploy_gateway.shutdown_wait({'DRAIN_TIMEOUT_MS': '600000', 'SHUTDOWN_FINALIZE_TIMEOUT_MS': '60000'}), 795)
+        for env in ({'DRAIN_TIMEOUT_MS': '600001'}, {'SHUTDOWN_FINALIZE_TIMEOUT_MS': '0'}, {'DRAIN_TIMEOUT_MS': 'invalid'}):
+            with self.subTest(env=env), self.assertRaises(RuntimeError):
+                deploy_gateway.shutdown_wait(env)
+
     def test_active_or_unknown_count_keeps_old_service(self):
         for health in [{'active_requests': 1}, {}]:
             with self.subTest(health=health):
@@ -168,13 +176,21 @@ class RetirementTests(unittest.TestCase):
             events.append('health')
             return {'active_requests': 0}
 
-        def run(command):
+        def run(command, **kwargs):
+            if 'stop' in command:
+                self.assertEqual(command, ['docker', 'stop', '--time', '60', 'old'])
             events.append('stop' if 'stop' in command else 'tcp')
             return b''
 
-        with patch.object(deploy_gateway, 'fetch', side_effect=fetch), patch.object(deploy_gateway, 'run', side_effect=run), patch.object(deploy_gateway.time, 'sleep'):
+        with patch.object(deploy_gateway, 'fetch', side_effect=fetch), patch.object(deploy_gateway, 'run', side_effect=run), patch.object(deploy_gateway, 'inspect', return_value={'State': {'Status': 'exited', 'ExitCode': 0}}), patch.object(deploy_gateway.time, 'sleep'):
             self.assertTrue(deploy_gateway.retire_idle_source('old', '18080'))
         self.assertEqual(events, ['health', 'tcp'] * 3 + ['stop'])
+
+    def test_forced_or_unknown_exit_is_not_reported_as_clean(self):
+        for state in ({'Status': 'exited', 'ExitCode': 137}, {'Status': 'running', 'ExitCode': 0}, {'Status': 'exited'}):
+            with self.subTest(state=state), patch.object(deploy_gateway, 'fetch', return_value={'active_requests': 0}), patch.object(deploy_gateway, 'run', return_value=b''), patch.object(deploy_gateway, 'inspect', return_value={'State': state}), patch.object(deploy_gateway.time, 'sleep'):
+                with self.assertRaises(RuntimeError):
+                    deploy_gateway.retire_idle_source('old', '18080')
 
 
 class DeploymentTests(unittest.TestCase):
@@ -235,7 +251,7 @@ class DeploymentTests(unittest.TestCase):
         if self.failure == label:
             raise RuntimeError('client failed')
 
-    def mock_retire_idle_source(self, container, port):
+    def mock_retire_idle_source(self, container, port, wait_seconds):
         self.assertTrue((Path(self.args.evidence) / 'accepted.json').exists())
         self.events.append(('retire', container))
         return False

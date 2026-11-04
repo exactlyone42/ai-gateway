@@ -1,0 +1,3 @@
+BEGIN;
+LOCK TABLE gateway_requests IN ACCESS EXCLUSIVE MODE;
+SELECT 'locked';

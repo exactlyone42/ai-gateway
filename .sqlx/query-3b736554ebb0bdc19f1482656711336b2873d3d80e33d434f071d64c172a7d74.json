@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_catalog.pg_cancel_backend(pid) AS \"cancelled!\"\nFROM pg_catalog.pg_stat_activity\nWHERE pid = $1 AND backend_start = $2\n  AND datname = pg_catalog.current_database()\n  AND usename = current_user AND state = 'active';\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cancelled!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3b736554ebb0bdc19f1482656711336b2873d3d80e33d434f071d64c172a7d74"
+}

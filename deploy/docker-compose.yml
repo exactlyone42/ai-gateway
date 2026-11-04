@@ -38,6 +38,7 @@ services:
       args:
         BUILD_REVISION: ${BUILD_REVISION:-}
     restart: unless-stopped
+    stop_grace_period: ${GATEWAY_STOP_GRACE_PERIOD:-60s}
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,6 +101,9 @@ services:
       CONTENT_CAPTURE_SPOOL_DIR: /var/lib/agent-pool-gateway/capture-spool
       CONTENT_CAPTURE_KEY_DIR: /var/lib/agent-pool-gateway/capture-keys
       CONTENT_CAPTURE_ANCHOR_DIR: /var/lib/agent-pool-gateway/capture-anchors
+      CONTENT_CAPTURE_ERASURE_DIR: /var/lib/agent-pool-gateway/capture-erasure
+      CONTENT_CAPTURE_WITNESS_DIR: /var/lib/agent-pool-gateway/capture-witness
+      CONTENT_CAPTURE_REMOTE_WITNESS_URL: ${CONTENT_CAPTURE_REMOTE_WITNESS_URL:-}
       # Routing and admission are sized for the host, so a deployment must be
       # able to set them without forking this file.
       ROUTING_HEALTH_AWARE: ${ROUTING_HEALTH_AWARE:-}
@@ -141,6 +145,8 @@ services:
       - capture-spool:/var/lib/agent-pool-gateway/capture-spool
       - capture-keys:/var/lib/agent-pool-gateway/capture-keys
       - capture-anchors:/var/lib/agent-pool-gateway/capture-anchors
+      - capture-erasure:/var/lib/agent-pool-gateway/capture-erasure
+      - capture-witness:/var/lib/agent-pool-gateway/capture-witness
     healthcheck:
       # Readiness, not liveness: "the stack is up" should mean the gateway can
       # actually reach its database.
@@ -156,3 +162,5 @@ volumes:
   capture-spool:
   capture-keys:
   capture-anchors:
+  capture-erasure:
+  capture-witness:

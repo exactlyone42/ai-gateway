@@ -101,8 +101,7 @@ impl PreparedProviderRequest {
         ))
     }
 
-    #[cfg(test)]
-    pub fn body(&self) -> &Bytes {
+    pub(crate) fn body(&self) -> &Bytes {
         &self.body
     }
 

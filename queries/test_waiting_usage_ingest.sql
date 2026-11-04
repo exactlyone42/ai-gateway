@@ -1,0 +1,1 @@
+SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT ingest_usage_envelopes%') AS "waiting!"

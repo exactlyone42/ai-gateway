@@ -1,12 +1,11 @@
-#[cfg(test)]
 use crate::capture_key_usage::{WrapPermit, reserve_master_wrap};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
 use sqlx::PgPool;
 use std::io::Read;
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"APGANC01";
@@ -38,6 +37,10 @@ fn encode(fingerprint: &[u8; 32], count: i64, poisoned: bool) -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn initial_anchor(fingerprint: &[u8; 32]) -> Vec<u8> {
+    encode(fingerprint, 0, false)
+}
+
 fn write_anchor(
     file: &mut std::fs::File,
     fingerprint: &[u8; 32],
@@ -62,6 +65,7 @@ pub(crate) fn create_key(
     Ok(master)
 }
 
+#[cfg(test)]
 pub(crate) fn create_versioned_key(
     key_root: &Path,
     anchor_root: &Path,
@@ -74,6 +78,7 @@ pub(crate) fn create_versioned_key(
     Ok(master)
 }
 
+#[cfg(test)]
 fn persist_key(
     key_path: &Path,
     anchor_root: &Path,
@@ -157,7 +162,6 @@ pub(crate) fn check_current_anchor(
     Ok(())
 }
 
-#[cfg(test)]
 pub(crate) async fn reserve_anchored(
     pool: &PgPool,
     root: &Path,

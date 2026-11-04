@@ -1,0 +1,1 @@
+DROP SCHEMA capture_restore_incomplete

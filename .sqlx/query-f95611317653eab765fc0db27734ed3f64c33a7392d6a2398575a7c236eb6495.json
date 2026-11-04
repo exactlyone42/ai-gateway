@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_backend_pid() AS \"pid!\", pg_advisory_xact_lock(hashtextextended($1::uuid::text, 12012))\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pid!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "pg_advisory_xact_lock",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "f95611317653eab765fc0db27734ed3f64c33a7392d6a2398575a7c236eb6495"
+}

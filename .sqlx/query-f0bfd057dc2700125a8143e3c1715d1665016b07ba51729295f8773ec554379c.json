@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(sum(input_tokens + output_tokens), 0)::bigint AS \"tokens!\" FROM usage_records WHERE gateway_request_id = $1\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tokens!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f0bfd057dc2700125a8143e3c1715d1665016b07ba51729295f8773ec554379c"
+}

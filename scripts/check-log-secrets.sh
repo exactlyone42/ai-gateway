@@ -48,6 +48,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
 fi
 
 DATABASE_URL="$DATABASE_URL" \
+CONTENT_CAPTURE_ENABLED="false" \
 LISTEN_ADDRESS="127.0.0.1:$port" \
 OPENAI_BASE_URL="http://127.0.0.1:1/" \
 OPENAI_API_KEY="$openai_key" \

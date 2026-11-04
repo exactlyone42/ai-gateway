@@ -106,6 +106,10 @@ pub struct Config {
     pub content_capture_spool_dir: PathBuf,
     pub content_capture_key_dir: PathBuf,
     pub content_capture_anchor_dir: PathBuf,
+    pub content_capture_erasure_dir: PathBuf,
+    pub content_capture_witness_dir: PathBuf,
+    pub content_capture_remote_witness_url: Option<String>,
+    pub content_capture_test_allow_local_witness: bool,
     pub routing: RoutingConfig,
     pub jev: Option<crate::jev::JevConfig>,
     pub scheduler: SchedulerConfig,
@@ -540,7 +544,18 @@ impl Config {
             setting("CONTENT_CAPTURE_ANCHOR_DIR")
                 .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-anchors".to_owned()),
         );
+        let (content_capture_erasure_dir, content_capture_witness_dir) = capture_erasure_paths();
+        let content_capture_remote_witness_url = setting("CONTENT_CAPTURE_REMOTE_WITNESS_URL").ok();
+        let content_capture_test_allow_local_witness = cfg!(debug_assertions)
+            && credential_environment == "dev"
+            && setting("CONTENT_CAPTURE_TEST_ALLOW_LOCAL_WITNESS").as_deref() == Ok("1");
         let scheduler = scheduler_config()?;
+        validate_capture_pool_budget(
+            database_max_connections,
+            admin_database_max_connections,
+            content_capture_enabled,
+            scheduler.passthrough,
+        )?;
         let routing = routing_config()?;
 
         Ok(Self {
@@ -595,6 +610,10 @@ impl Config {
             content_capture_spool_dir,
             content_capture_key_dir,
             content_capture_anchor_dir,
+            content_capture_erasure_dir,
+            content_capture_witness_dir,
+            content_capture_remote_witness_url,
+            content_capture_test_allow_local_witness,
             jev: load_jev()?,
             routing,
             scheduler,
@@ -608,6 +627,19 @@ impl Config {
     pub fn transport_header_max_bytes(&self) -> usize {
         self.request_header_max_bytes.saturating_mul(2)
     }
+}
+
+pub(crate) fn capture_erasure_paths() -> (PathBuf, PathBuf) {
+    (
+        PathBuf::from(
+            setting("CONTENT_CAPTURE_ERASURE_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-erasure".to_owned()),
+        ),
+        PathBuf::from(
+            setting("CONTENT_CAPTURE_WITNESS_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-witness".to_owned()),
+        ),
+    )
 }
 
 fn parse_content_capture_enabled(value: Option<&str>) -> Result<bool, ConfigError> {
@@ -774,6 +806,21 @@ fn valid_origin(value: &str, environment: &str) -> bool {
         && uri.query().is_none()
         && !authority.as_str().contains('@')
         && (secure || development_loopback)
+}
+
+fn validate_capture_pool_budget(
+    total: u32,
+    admin: u32,
+    capture: bool,
+    passthrough: bool,
+) -> Result<(), ConfigError> {
+    let minimum = if passthrough { 3 } else { 4 };
+    if capture && total.saturating_sub(admin) < minimum {
+        return Err(ConfigError::InvalidAdminPoolSize(format!(
+            "content capture requires at least {minimum} data-plane connections"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_pool_budget(total: u32, admin: u32) -> Result<(), ConfigError> {
@@ -1094,6 +1141,16 @@ mod tests {
         assert!(!parse_content_capture_enabled(Some("false")).unwrap());
         assert!(parse_content_capture_enabled(Some("no")).is_err());
         assert!(parse_content_capture_enabled(Some("")).is_err());
+    }
+
+    #[test]
+    fn content_capture_pool_budget_reserves_scheduler_and_maintenance_connections() {
+        assert!(validate_capture_pool_budget(3, 1, true, false).is_err());
+        assert!(validate_capture_pool_budget(4, 1, true, false).is_err());
+        assert!(validate_capture_pool_budget(5, 1, true, false).is_ok());
+        assert!(validate_capture_pool_budget(3, 1, false, false).is_ok());
+        assert!(validate_capture_pool_budget(3, 1, true, true).is_err());
+        assert!(validate_capture_pool_budget(4, 1, true, true).is_ok());
     }
 
     #[test]

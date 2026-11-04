@@ -135,6 +135,18 @@ pub const RBAC_RULES: &[RbacRule] = &[
     },
     RbacRule {
         method: "GET",
+        route: "/admin/v1/request-captures/{id}",
+        action: AdminAction::ReadResource,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/request-captures/{id}/content",
+        action: AdminAction::ReadResource,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "GET",
         route: "/admin/v1/usage",
         action: AdminAction::ReadResource,
         roles: ALL_ROLES,

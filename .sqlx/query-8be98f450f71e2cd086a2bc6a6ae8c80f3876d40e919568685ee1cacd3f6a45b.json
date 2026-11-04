@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (\n    NOT EXISTS (\n        SELECT 1 FROM pg_catalog.pg_roles AS inherited\n        WHERE pg_catalog.pg_has_role(current_user, inherited.oid, 'MEMBER')\n          AND (\n              inherited.rolsuper\n              OR pg_catalog.left(inherited.rolname, 3) = 'pg_'\n              OR inherited.rolcreaterole\n              OR inherited.rolcreatedb\n              OR inherited.rolreplication\n              OR inherited.rolbypassrls\n              OR inherited.oid = (\n                  SELECT datdba FROM pg_catalog.pg_database\n                  WHERE datname = pg_catalog.current_database()\n              )\n              OR pg_catalog.has_schema_privilege(inherited.oid, 'erasure_witness', 'CREATE')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'INSERT')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'UPDATE')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'DELETE')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'TRUNCATE')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'REFERENCES')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'TRIGGER')\n              OR pg_catalog.has_table_privilege(inherited.oid, 'erasure_witness.position', 'MAINTAIN')\n              OR pg_catalog.has_any_column_privilege(inherited.oid, 'erasure_witness.position', 'INSERT')\n              OR pg_catalog.has_any_column_privilege(inherited.oid, 'erasure_witness.position', 'UPDATE')\n              OR pg_catalog.has_any_column_privilege(inherited.oid, 'erasure_witness.position', 'REFERENCES')\n          )\n    )\n    AND NOT EXISTS (\n        SELECT 1 FROM pg_catalog.pg_proc AS routine\n        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = routine.pronamespace\n        JOIN pg_catalog.pg_roles AS inherited\n          ON pg_catalog.pg_has_role(current_user, inherited.oid, 'MEMBER')\n        WHERE routine.prosecdef\n          AND routine.oid <> 'erasure_witness.advance(uuid,bigint,bytea,bytea)'::regprocedure\n          AND pg_catalog.has_schema_privilege(inherited.oid, namespace.oid, 'USAGE')\n          AND pg_catalog.has_function_privilege(inherited.oid, routine.oid, 'EXECUTE')\n    )\n) AS \"safe!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "safe!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8be98f450f71e2cd086a2bc6a6ae8c80f3876d40e919568685ee1cacd3f6a45b"
+}

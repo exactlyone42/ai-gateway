@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n    SELECT 1 FROM pg_catalog.pg_stat_activity\n    WHERE datname = pg_catalog.current_database()\n      AND pid <> pg_catalog.pg_backend_pid()\n      AND wait_event_type = 'Lock'\n      AND query LIKE '%INSERT INTO _sqlx_migrations%'\n) AS \"waiting!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "07c7ff22f3e706a84fdc05f6bea8d3735d12f82b5e570352cd4ea3a5a0278a15"
+}

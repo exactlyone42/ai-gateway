@@ -221,7 +221,20 @@ pub(super) async fn proxy(
         },
     )?;
     let provider_parameters = upstream_request.parameter_snapshot()?;
+    let mut capture = crate::services::capture_request::start(
+        &state,
+        policy,
+        &canonical,
+        &headers,
+        upstream_request.body(),
+        provider_secret.as_deref(),
+    )
+    .await?;
     let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
+    if is_stream && capture.is_some() && !cfg!(test) && state.config.credential_environment != "dev"
+    {
+        return Err(GatewayError::CaptureUnavailable);
+    }
     let mut reservation = state
         .ledger
         .reserve_with_quota(
@@ -253,6 +266,9 @@ pub(super) async fn proxy(
         )
         .await?;
     reservation.annotate_parameters(requested_parameters, provider_parameters);
+    if let Some(session) = capture.as_ref() {
+        reservation.attach_capture(session.clone());
+    }
     reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(
         operation.name(),
@@ -316,15 +332,26 @@ pub(super) async fn proxy(
         let heartbeat_interval = state.config.stream_heartbeat_interval;
         let event_max_bytes = state.config.stream_event_max_bytes;
         let deferred_secret = provider_secret.clone();
+        let deferred_capture = reservation.capture();
         let deferred = async_stream::stream! {
-            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n"));
+            let event = Bytes::from_static(b": keepalive\n\n");
+            if let Err(error) = streaming::capture_chunk(&deferred_capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                yield Err(error);
+                return;
+            }
+            yield Ok::<Bytes, std::io::Error>(event);
             let mut heartbeat = tokio::time::interval(heartbeat_interval);
             heartbeat.tick().await;
             let upstream = loop {
                 tokio::select! {
                     result = &mut send => break result,
                     _ = heartbeat.tick() => {
-                        yield Ok(Bytes::from_static(b": keepalive\n\n"));
+                        let event = Bytes::from_static(b": keepalive\n\n");
+                        if let Err(error) = streaming::capture_chunk(&deferred_capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                            yield Err(error);
+                            return;
+                        }
+                        yield Ok(event);
                     }
                 }
             };
@@ -357,19 +384,43 @@ pub(super) async fn proxy(
                 Ok(response) => {
                     let completed_at = Utc::now();
                     let status = response.status();
+                    let event = Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream rejected the request after streaming began\"}}\n\n");
+                    if let Err(error) = streaming::capture_deferred_error(&deferred_capture, Some(response), &event).await {
+                        yield Err(error);
+                        return;
+                    }
                     attempt.conclude("failed", Some(status.as_u16().to_string()), completed_at);
                     if let Err(error) = reservation.finish(completion(status, model, provider, attempt, completed_at)).await {
                         tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %error);
+                        if deferred_capture.is_some() {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
                     }
-                    yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream rejected the request after streaming began\"}}\n\n"));
+                    yield Ok(event);
+                    if let Err(error) = streaming::finish_capture(&deferred_capture).await {
+                        yield Err(error);
+                    }
                 }
                 Err(error) => {
                     let completed_at = Utc::now();
+                    let event = Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream request failed after streaming began\"}}\n\n");
+                    if let Err(error) = streaming::capture_deferred_error(&deferred_capture, None, &event).await {
+                        yield Err(error);
+                        return;
+                    }
                     attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
                     if let Err(finish_error) = reservation.finish(completion(StatusCode::BAD_GATEWAY, model, provider, attempt, completed_at)).await {
                         tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %finish_error);
+                        if deferred_capture.is_some() {
+                            yield Err(std::io::Error::other(finish_error));
+                            return;
+                        }
                     }
-                    yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream request failed after streaming began\"}}\n\n"));
+                    yield Ok(event);
+                    if let Err(error) = streaming::finish_capture(&deferred_capture).await {
+                        yield Err(error);
+                    }
                 }
             }
         };
@@ -384,6 +435,7 @@ pub(super) async fn proxy(
     let upstream = match upstream.ok_or(GatewayError::InvalidConfiguration)? {
         Ok(value) => value,
         Err(error) => {
+            crate::services::capture_request::save_error(&capture, &[], &error).await?;
             let completed_at = Utc::now();
             attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
             reservation
@@ -395,6 +447,7 @@ pub(super) async fn proxy(
                     completed_at,
                 })
                 .await?;
+            crate::services::capture_request::finish_session(capture.take()).await?;
             return Err(error);
         }
     };
@@ -422,6 +475,11 @@ pub(super) async fn proxy(
         .is_some_and(|value| value.starts_with("text/event-stream"));
 
     if status.is_success() && is_stream && translation.translated && !content_is_sse {
+        let error_body = serde_json::to_vec(&serde_json::json!({"error":{"code":GatewayError::UpstreamProtocol.kind(),"message":GatewayError::UpstreamProtocol.to_string()}}))
+            .map_err(|_| GatewayError::CaptureUnavailable)?;
+        streaming::capture_deferred_error(&capture, Some(upstream), &Bytes::from(error_body))
+            .await
+            .map_err(|_| GatewayError::CaptureUnavailable)?;
         let completed_at = Utc::now();
         let mut attempt = attempt;
         attempt.conclude(
@@ -438,6 +496,7 @@ pub(super) async fn proxy(
                 completed_at,
             ))
             .await?;
+        crate::services::capture_request::finish_session(capture.take()).await?;
         return Err(GatewayError::UpstreamProtocol);
     }
 
@@ -455,7 +514,13 @@ pub(super) async fn proxy(
         .await
         {
             Ok(bytes) => bytes,
-            Err(error) => {
+            Err((error, partial)) => {
+                crate::services::capture_request::finish_incomplete_error(
+                    capture.take(),
+                    &partial,
+                    &error,
+                )
+                .await?;
                 let failed_at = Utc::now();
                 attempt.conclude("failed", Some("upstream_body_error".to_owned()), failed_at);
                 reservation
@@ -490,6 +555,7 @@ pub(super) async fn proxy(
             let usage = match provider::usage_for(profile.kind, &bytes) {
                 Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
                 Err(error) => {
+                    crate::services::capture_request::save_error(&capture, &bytes, &error).await?;
                     attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
                     reservation.set_client_first_byte_at(completed_at);
                     reservation
@@ -501,6 +567,7 @@ pub(super) async fn proxy(
                             completed_at,
                         ))
                         .await?;
+                    crate::services::capture_request::finish_session(capture.take()).await?;
                     return Err(error);
                 }
             };
@@ -520,6 +587,8 @@ pub(super) async fn proxy(
                 ) {
                     Ok(value) => Some(value),
                     Err(error) => {
+                        crate::services::capture_request::save_error(&capture, &bytes, &error)
+                            .await?;
                         attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
                         reservation.set_client_first_byte_at(completed_at);
                         reservation
@@ -531,6 +600,7 @@ pub(super) async fn proxy(
                                 completed_at,
                             ))
                             .await?;
+                        crate::services::capture_request::finish_session(capture.take()).await?;
                         return Err(error);
                     }
                 }
@@ -551,6 +621,18 @@ pub(super) async fn proxy(
                 provider_secret.as_deref(),
             )
         });
+        if (contains_secret || client_response.is_none()) && capture.is_some() {
+            crate::services::capture_request::save_error(
+                &capture,
+                &bytes,
+                &GatewayError::UpstreamProtocol,
+            )
+            .await?;
+        }
+        if !contains_secret && let Some(response) = client_response.as_ref() {
+            crate::services::capture_request::save_buffered(&capture, &bytes, &response.body)
+                .await?;
+        }
         attempt.conclude(
             if incomplete || contains_secret {
                 "failed"
@@ -575,6 +657,7 @@ pub(super) async fn proxy(
             request_completion.status = "failed".to_owned();
         }
         reservation.finish(request_completion).await?;
+        crate::services::capture_request::finish_session(capture.take()).await?;
         if translation.translated && client_response.is_none() {
             return Err(GatewayError::UpstreamProtocol);
         }
@@ -664,19 +747,22 @@ async fn collect_body(
     response: reqwest::Response,
     attempt: &mut ProviderAttempt,
     response_max_bytes: usize,
-) -> Result<Bytes, GatewayError> {
+) -> Result<Bytes, (GatewayError, Bytes)> {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     let mut first = true;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(GatewayError::Upstream)?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return Err((GatewayError::Upstream(error), Bytes::from(body))),
+        };
         if first {
             first = false;
             attempt.observe_first_byte(Utc::now());
         }
         body.extend_from_slice(&chunk);
         if body.len() > response_max_bytes {
-            return Err(GatewayError::UpstreamProtocol);
+            return Err((GatewayError::UpstreamProtocol, Bytes::from(body)));
         }
     }
     Ok(Bytes::from(body))

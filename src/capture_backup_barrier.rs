@@ -2,8 +2,12 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
-#[error("capture backup coordination unavailable")]
-pub(crate) struct CaptureBarrierError;
+pub(crate) enum CaptureBarrierError {
+    #[error("capture backup coordination busy")]
+    Busy,
+    #[error("capture backup coordination unavailable")]
+    Unavailable,
+}
 
 pub(crate) struct CaptureBarrierLease {
     _file: std::fs::File,
@@ -18,30 +22,39 @@ fn open(root: &Path) -> Result<std::fs::File, CaptureBarrierError> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(root.join(".capture-backup.lock"))
-        .map_err(|_| CaptureBarrierError)?;
-    let meta = file.metadata().map_err(|_| CaptureBarrierError)?;
+        .map_err(|_| CaptureBarrierError::Unavailable)?;
+    let meta = file
+        .metadata()
+        .map_err(|_| CaptureBarrierError::Unavailable)?;
     if !meta.is_file() || meta.mode() & 0o077 != 0 {
-        return Err(CaptureBarrierError);
+        return Err(CaptureBarrierError::Unavailable);
     }
     Ok(file)
 }
 
 pub(crate) fn try_shared(root: &Path) -> Result<CaptureBarrierLease, CaptureBarrierError> {
     let file = open(root)?;
-    file.try_lock_shared().map_err(|_| CaptureBarrierError)?;
+    file.try_lock_shared().map_err(lock_error)?;
     Ok(CaptureBarrierLease { _file: file })
 }
 
 #[cfg(test)]
 pub(crate) fn try_exclusive(root: &Path) -> Result<CaptureBarrierLease, CaptureBarrierError> {
     let file = open(root)?;
-    file.try_lock().map_err(|_| CaptureBarrierError)?;
+    file.try_lock().map_err(lock_error)?;
     Ok(CaptureBarrierLease { _file: file })
+}
+
+fn lock_error(error: std::fs::TryLockError) -> CaptureBarrierError {
+    match error {
+        std::fs::TryLockError::WouldBlock => CaptureBarrierError::Busy,
+        std::fs::TryLockError::Error(_) => CaptureBarrierError::Unavailable,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::try_exclusive;
+    use super::{CaptureBarrierError, try_exclusive, try_shared};
     use crate::capture_archive::{delete_coordinated, recover_and_import_keyring};
     use crate::capture_crypto::{CaptureIdentity, CaptureLeg};
     use crate::capture_keyring::rotate;
@@ -87,6 +100,11 @@ mod tests {
         let limits = CaptureLimits::for_test(4096);
         let capacity = Arc::new(Semaphore::new(1));
         let backup = try_exclusive(&spool).unwrap();
+        assert!(matches!(try_shared(&spool), Err(CaptureBarrierError::Busy)));
+        assert!(matches!(
+            try_shared(&spool.join("missing")),
+            Err(CaptureBarrierError::Unavailable)
+        ));
         assert!(rotate(&keys, &anchors, &spool).is_err());
         assert!(
             crate::capture_keyring::current(&keys).unwrap().as_ref()
@@ -116,8 +134,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(uses, 0);
-        let maintenance =
-            CaptureMaintenance::new(spool.clone(), keys.clone(), limits, capacity.clone());
+        let erasure = crate::capture_erasure::TestErasure::new();
+        let maintenance = CaptureMaintenance::new(
+            spool.clone(),
+            keys.clone(),
+            limits,
+            erasure.active.clone(),
+            0,
+        );
         assert!(maintenance.run_once(&pool).await.is_err());
         drop(backup);
         let session = AsyncCaptureSession::create_from_keyring(
@@ -153,15 +177,29 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            delete_coordinated(&pool, &spool, identity, Uuid::new_v4(), capacity.clone())
-                .await
-                .is_err()
+            delete_coordinated(
+                &pool,
+                &spool,
+                identity,
+                Uuid::new_v4(),
+                erasure.active.clone(),
+                capacity.clone()
+            )
+            .await
+            .is_err()
         );
         let backup = try_exclusive(&spool).unwrap();
         assert!(
-            delete_coordinated(&pool, &spool, identity, credential, capacity.clone())
-                .await
-                .is_err()
+            delete_coordinated(
+                &pool,
+                &spool,
+                identity,
+                credential,
+                erasure.active.clone(),
+                capacity.clone()
+            )
+            .await
+            .is_err()
         );
         let state: String = sqlx::query_scalar(
             "SELECT state FROM capture_records WHERE tenant_id = $1 AND capture_id = $2",
@@ -174,9 +212,16 @@ mod tests {
         assert_eq!(state, "complete");
         drop(backup);
         assert!(
-            delete_coordinated(&pool, &spool, identity, credential, capacity)
-                .await
-                .unwrap()
+            delete_coordinated(
+                &pool,
+                &spool,
+                identity,
+                credential,
+                erasure.active.clone(),
+                capacity
+            )
+            .await
+            .unwrap()
         );
     }
 }

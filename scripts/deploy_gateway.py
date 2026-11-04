@@ -12,10 +12,23 @@ import uuid
 
 
 def run(args, **kwargs):
-    result = subprocess.run(args, capture_output=True, timeout=180, **kwargs)
+    kwargs.setdefault('timeout', 180)
+    result = subprocess.run(args, capture_output=True, **kwargs)
     if result.returncode:
         raise RuntimeError(f'{args[0]} 執行失敗，結束碼 {result.returncode}')
     return result.stdout
+
+
+def shutdown_wait(env):
+    values = []
+    for key, default, minimum, maximum in (('DRAIN_TIMEOUT_MS', '30000', 0, 600000), ('SHUTDOWN_FINALIZE_TIMEOUT_MS', '5000', 1, 60000)):
+        raw = env.get(key, default)
+        if not raw.strip():
+            raw = default
+        if not re.fullmatch(r'[0-9]+', raw) or not minimum <= int(raw) <= maximum:
+            raise RuntimeError('無法確認 Gateway 停機等待時間')
+        values.append(int(raw))
+    return max(60, (values[0] + 3 * values[1] + 999) // 1000 + 15)
 
 
 def inspect(name):
@@ -161,7 +174,7 @@ def finish_stream_probe(process, evidence, offset):
         raise RuntimeError('原 Client 跨切換串流未完整結束')
 
 
-def retire_idle_source(container, port):
+def retire_idle_source(container, port, wait_seconds=60):
     for _ in range(3):
         if fetch(f'http://127.0.0.1:{port}', '/health').get('active_requests') != 0:
             return False
@@ -171,7 +184,10 @@ def retire_idle_source(container, port):
             if len(fields) > 3 and fields[1].endswith(':1F90') and fields[3] == '01':
                 return False
         time.sleep(0.25)
-    run(['docker', 'stop', '--time', '30', container])
+    run(['docker', 'stop', '--time', str(wait_seconds), container], timeout=wait_seconds + 15)
+    state = inspect(container).get('State')
+    if not isinstance(state, dict) or state.get('Status') != 'exited' or type(state.get('ExitCode')) is not int or state['ExitCode'] != 0:
+        raise RuntimeError('舊版停止結果異常，需檢查實際狀態')
     return True
 
 
@@ -205,6 +221,7 @@ def deploy(args):
     replacement = replace_route(previous, old_port, args.port)
     (evidence / 'Caddyfile.before').write_text(previous)
     env = dict(item.split('=', 1) for item in source['Config']['Env'])
+    stop_wait = shutdown_wait(env)
     if env.get('SCHEDULER_PASSTHROUGH') != 'true':
         raise RuntimeError('目前安全切換只支援原本已啟用直接轉送的服務；排隊模式不可並行，也不會自動修改模式')
     from urllib.parse import urlsplit
@@ -233,7 +250,7 @@ def deploy(args):
     env_file.write_text('\n'.join(k + '=' + v for k, v in env.items()) + '\n')
     env_file.chmod(0o600)
     run(['docker', 'run', '-d', '--name', candidate, '--network', next(iter(source['NetworkSettings']['Networks'])),
-         '--cpus', '2', '--memory', '768m', '--restart', 'no', '--env-file', str(env_file),
+         '--cpus', '2', '--memory', '768m', '--restart', 'no', '--stop-timeout', str(stop_wait), '--env-file', str(env_file),
          '-p', f'127.0.0.1:{args.port}:8080', '-v', candidate + '-spool:/var/lib/agent-pool-gateway/ledger-spool', image['Id']])
     deadline = time.monotonic() + 45
     while True:
@@ -268,9 +285,9 @@ def deploy(args):
                'public_url': args.public_url, 'accepted': True, 'old_stopped': False}
     (evidence / 'accepted.json').write_text(json.dumps(receipt, indent=2))
     try:
-        receipt['old_stopped'] = retire_idle_source(args.source_container, old_port)
+        receipt['old_stopped'] = retire_idle_source(args.source_container, old_port, stop_wait)
     except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
-        print('無法確認舊版已無請求，保留舊版供檢查。')
+        print('無法確認舊版已正常停止，請檢查實際狀態。')
     (evidence / 'accepted.json').write_text(json.dumps(receipt, indent=2))
     print('新版已通過原 Client、公開入口與跨切換串流驗收；舊版停止：' + str(receipt['old_stopped']))
 
@@ -289,10 +306,15 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r'[a-f0-9]{12,40}', args.revision) or not 1024 <= args.port <= 65535:
         parser.error('版本須為 Git commit，PORT 須在 1024 到 65535')
-    lock_file = Path.home() / '.local/state/gateway-deployment.lock'
+    lock_file = Path(os.environ.get('GATEWAY_DEPLOYMENT_LOCK') or Path.home() / '.local/state/gateway-deployment.lock')
+    if not lock_file.is_absolute():
+        raise RuntimeError('部署鎖路徑必須是絕對路徑')
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with lock_file.open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError('部署、備份或還原正在執行，未開始操作') from error
         deploy(args)
 
 

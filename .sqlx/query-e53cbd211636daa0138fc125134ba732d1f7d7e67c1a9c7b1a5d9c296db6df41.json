@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT install, sequence, tip FROM capture_erasure_floor WHERE singleton = true\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "install",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "sequence",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "tip",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e53cbd211636daa0138fc125134ba732d1f7d7e67c1a9c7b1a5d9c296db6df41"
+}

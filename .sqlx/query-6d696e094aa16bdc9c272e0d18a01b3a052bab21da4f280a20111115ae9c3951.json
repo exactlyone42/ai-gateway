@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM erasure_witness.position;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6d696e094aa16bdc9c272e0d18a01b3a052bab21da4f280a20111115ae9c3951"
+}

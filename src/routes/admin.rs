@@ -37,6 +37,11 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/v1/identity-map", get(identity_map))
         .route("/admin/v1/requests", get(request_page))
         .route("/admin/v1/requests/{id}", get(request_report))
+        .route("/admin/v1/request-captures/{id}", get(capture_report))
+        .route(
+            "/admin/v1/request-captures/{id}/content",
+            get(capture_content),
+        )
         .route("/admin/v1/usage", get(usage_report))
         .route("/admin/v1/audit", get(audit_page))
         .route("/admin/v1/catalog", get(catalog_report))
@@ -230,6 +235,48 @@ async fn request_page(
     Query(query): Query<RequestListQuery>,
 ) -> Result<Json<CursorPage>, AdminError> {
     Ok(Json(state.admin.request_page(&context, query).await?))
+}
+
+async fn capture_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.capture_report(&context, id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct CaptureContentQuery {
+    leg: String,
+}
+
+async fn capture_content(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<CaptureContentQuery>,
+) -> Result<Response, AdminError> {
+    use crate::capture_crypto::CaptureLeg;
+    let leg = match query.leg.as_str() {
+        "client_request" => CaptureLeg::ClientRequest,
+        "provider_request" => CaptureLeg::ProviderRequest,
+        "provider_response" => CaptureLeg::ProviderResponse,
+        "client_response" => CaptureLeg::ClientResponse,
+        _ => return Err(AdminError::InvalidRequest),
+    };
+    let body = crate::capture_archive::admin_content(state, context, id, leg)
+        .await
+        .map_err(|error| match error {
+            crate::capture_archive::AdminCaptureError::NotFound => AdminError::NotFound,
+            crate::capture_archive::AdminCaptureError::Unavailable => AdminError::Unavailable,
+        })?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .body(body)
+        .map_err(|_| AdminError::Unavailable)
 }
 
 async fn request_report(

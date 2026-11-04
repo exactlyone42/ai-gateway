@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE _sqlx_migrations IN SHARE MODE;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "41411e5dbca0402cc4cc2d938632b02475b35f8d1a773179641dda7c208e9656"
+}
