@@ -2,6 +2,7 @@ mod adapters;
 mod admin;
 mod auth;
 pub mod canonical;
+mod codex_auth;
 mod config;
 mod db;
 mod error;

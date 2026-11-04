@@ -231,7 +231,7 @@ pub trait ProviderAdapter: Sync {
 
 fn prepare_request(
     adapter: &dyn ProviderAdapter,
-    plan: ProviderRequestPlan,
+    mut plan: ProviderRequestPlan,
     body: Bytes,
     profile: &ProviderProfile,
     input: ProviderRequestInput<'_>,
@@ -293,7 +293,22 @@ fn prepare_request(
         headers.insert(HeaderName::from_static("idempotency-key"), value);
     }
     logging::inject_context(&mut headers);
-    if profile.is_held_bearer() {
+    if let Some(credentials) = profile.codex_credentials()? {
+        if plan.operation != GatewayOperation::OpenAiResponses {
+            return Err(GatewayError::UnsupportedRequest);
+        }
+        let mut value = HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
+            .map_err(|_| GatewayError::ProviderUnavailable)?;
+        value.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, value);
+        let mut account = HeaderValue::from_str(&credentials.account_id)
+            .map_err(|_| GatewayError::ProviderUnavailable)?;
+        account.set_sensitive(true);
+        headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
+        plan.path_and_query = plan
+            .path_and_query
+            .replacen("/v1/responses", "/responses", 1);
+    } else if profile.is_held_bearer() {
         let token = profile
             .held_token()
             .ok_or(GatewayError::ProviderUnavailable)?;
@@ -1251,12 +1266,24 @@ pub async fn send(
     provider_key: &str,
     provider_model_id: &str,
 ) -> Result<reqwest::Response, GatewayError> {
-    Ok(client
+    let codex_stream =
+        base_url == crate::codex_auth::BASE_URL && request.path_and_query() == "/responses";
+    let mut response = client
         .post(format!("{}{}", base_url, request.path_and_query()))
         .headers(request.headers)
         .body(request.body)
         .send()
-        .await?)
+        .await?;
+    if codex_stream
+        && response.status().is_success()
+        && !response.headers().contains_key(header::CONTENT_TYPE)
+    {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1399,6 +1426,66 @@ mod tests {
             second.headers().get("authorization").unwrap(),
             "Bearer sk-ant-oat01-two"
         );
+    }
+
+    #[test]
+    fn codex_file_is_loaded_after_startup_and_never_forwards_client_credentials() {
+        use crate::error::GatewayError;
+        use base64::Engine;
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("codex-provider-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("auth.json");
+        let profile =
+            ProviderProfile::codex_file(path.clone(), "owner".to_owned(), vec![Uuid::nil()]);
+        let adapter = for_kind(ProviderKind::OpenAi).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer gateway-secret".parse().unwrap());
+        headers.insert("chatgpt-account-id", "attacker".parse().unwrap());
+        let send = || {
+            let input = ProviderRequestInput {
+                source_path_and_query: "/v1/responses",
+                client_headers: &headers,
+                idempotency_key: None,
+            };
+            let plan = adapter
+                .plan_for_target(
+                    GatewayOperation::OpenAiResponses,
+                    GatewayOperation::OpenAiResponses,
+                    "provider-model",
+                    true,
+                    &input,
+                )
+                .unwrap();
+            adapter.send(plan, Bytes::from_static(b"{}"), &profile, input)
+        };
+        assert!(matches!(send(), Err(GatewayError::ProviderUnavailable)));
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({"exp":chrono::Utc::now().timestamp()+3600}).to_string());
+        let token = format!("header.{claims}.signature");
+        let auth = serde_json::json!({"auth_mode":"chatgpt","tokens":{"access_token":token,"account_id":"owner"}});
+        std::fs::write(&path, auth.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let request = send().unwrap();
+        assert_eq!(request.path_and_query(), "/responses");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            format!("Bearer {token}").as_str()
+        );
+        assert_eq!(
+            request.headers().get("chatgpt-account-id").unwrap(),
+            "owner"
+        );
+        assert!(
+            request
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .is_sensitive()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(send(), Err(GatewayError::ProviderUnavailable)));
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

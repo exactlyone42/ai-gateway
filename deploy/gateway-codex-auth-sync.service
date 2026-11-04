@@ -1,0 +1,13 @@
+[Unit]
+Description=Synchronize personal Codex access credentials for Gateway
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/agent-pool-gateway/codex-auth-sync.conf
+ExecStart=/usr/bin/python3 /usr/local/lib/agent-pool-gateway/sync_codex_auth.py --source ${CODEX_AUTH_SOURCE} --destination /var/lib/agent-pool-gateway/codex-auth/auth.json --uid 10001
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/agent-pool-gateway/codex-auth
+PrivateTmp=true
+UMask=0077

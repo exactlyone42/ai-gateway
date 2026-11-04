@@ -81,6 +81,13 @@ impl AppState {
             .acquire_timeout(Duration::from_secs(2))
             .connect_lazy_with(pool.connect_options().as_ref().clone());
         let mut provider_profiles = Vec::new();
+        if let Some(path) = &config.codex_auth_file {
+            provider_profiles.push(ProviderProfile::codex_file(
+                path.clone(),
+                config.codex_account_id.clone(),
+                config.provider_allowed_tenant_ids.clone(),
+            ));
+        }
         if !config.openai_api_key.is_empty() {
             provider_profiles.push(ProviderProfile::bearer(
                 "env://OPENAI_API_KEY",

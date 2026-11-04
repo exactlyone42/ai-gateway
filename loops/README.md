@@ -60,3 +60,5 @@ W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因�
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
 
 - [jev-local](jev-local.loop.md)：本機 Jev 接入。
+
+| [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 進行中 | P1 | 運行中取得 Codex 憑證 |

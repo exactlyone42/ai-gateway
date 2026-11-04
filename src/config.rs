@@ -41,6 +41,8 @@ pub struct Config {
     /// Direct OpenAI-compatible endpoint used by Responses and Chat Completions.
     pub openai_base_url: String,
     pub openai_api_key: String,
+    pub codex_auth_file: Option<std::path::PathBuf>,
+    pub codex_account_id: String,
     pub openai_provider: String,
     pub openai_request_max_bytes: usize,
     /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
@@ -206,6 +208,11 @@ impl Config {
             .unwrap_or_else(|_| "https://api.openai.com".to_owned())
             .trim_end_matches('/')
             .to_owned();
+        let codex_auth_file = setting("CODEX_AUTH_FILE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from);
+        let codex_account_id = setting("CODEX_ACCOUNT_ID").unwrap_or_default();
         let openai_api_key = setting("OPENAI_API_KEY").unwrap_or_default();
         let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
         let openai_request_max_bytes = setting("OPENAI_REQUEST_MAX_BYTES")
@@ -506,6 +513,8 @@ impl Config {
             listen_address,
             openai_base_url,
             openai_api_key,
+            codex_auth_file,
+            codex_account_id,
             openai_provider,
             openai_request_max_bytes,
             anthropic_base_url,

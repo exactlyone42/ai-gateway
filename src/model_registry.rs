@@ -464,6 +464,7 @@ pub struct ProviderProfile {
 enum ProviderAuthorization {
     Bearer(Arc<str>),
     ApiKey(Arc<str>),
+    CodexFile(std::path::PathBuf, String),
     ClientBearer,
     HeldBearer(crate::held_token::HeldToken),
     None,
@@ -619,6 +620,35 @@ impl ProviderProfile {
         }
     }
 
+    pub(crate) fn codex_file(
+        path: std::path::PathBuf,
+        account: String,
+        tenants: Vec<Uuid>,
+    ) -> Self {
+        let mut profile = Self::bearer(
+            "env://CODEX_AUTH_FILE",
+            "codex-subscription",
+            crate::codex_auth::BASE_URL,
+            ProviderDialect::OpenAi,
+            vec![GatewayOperation::OpenAiResponses],
+            tenants,
+            "",
+        );
+        profile.authorization = ProviderAuthorization::CodexFile(path, account);
+        profile
+    }
+
+    pub(crate) fn codex_credentials(
+        &self,
+    ) -> Result<Option<crate::codex_auth::Credentials>, crate::error::GatewayError> {
+        match &self.authorization {
+            ProviderAuthorization::CodexFile(path, account) => {
+                crate::codex_auth::load(path, account).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub fn uses_client_bearer(&self) -> bool {
         matches!(self.authorization, ProviderAuthorization::ClientBearer)
     }
@@ -647,6 +677,7 @@ impl ProviderProfile {
             ProviderAuthorization::ApiKey(_)
             | ProviderAuthorization::ClientBearer
             | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::CodexFile(_, _)
             | ProviderAuthorization::None => None,
         }
     }
@@ -656,6 +687,7 @@ impl ProviderProfile {
             ProviderAuthorization::Bearer(_)
             | ProviderAuthorization::ClientBearer
             | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::CodexFile(_, _)
             | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
         }

@@ -149,6 +149,8 @@ mod tests {
             listen_address: "127.0.0.1:0".parse().unwrap(),
             openai_base_url: "http://127.0.0.1:1".to_owned(),
             openai_api_key: "upstream-key".to_owned(),
+            codex_auth_file: None,
+            codex_account_id: String::new(),
             openai_provider: "openai-test".to_owned(),
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
