@@ -19,6 +19,7 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
+| [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 已完成 | P1 | 運行中取得 Codex 憑證 |
 | [gateway-completion](./gateway-completion.loop.md) | — | 進行中 | P0 | 上層總 LOOP：線上版本入庫、各項驗收與剩餘工作依序收尾 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
@@ -60,5 +61,3 @@ W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因�
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
 
 - [jev-local](jev-local.loop.md)：本機 Jev 接入。
-
-| [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 進行中 | P1 | 運行中取得 Codex 憑證 |

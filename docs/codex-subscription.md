@@ -15,3 +15,5 @@ Gateway 只讀取登入後的存取權杖，不替使用者登入，不改用 AP
 主機同步服務使用 deploy/gateway-codex-auth-sync.service 與同名 timer，每 10 秒執行一次。程式安裝在 root 擁有的 /usr/local/lib/agent-pool-gateway/，來源路徑放在 /etc/agent-pool-gateway/codex-auth-sync.conf；專用輸出目錄為 /var/lib/agent-pool-gateway/codex-auth，容器使用者 UID 10001，目錄唯讀掛載到 /run/gateway-codex。同步服務只更新憑證快照，不會呼叫模型。
 
 當候選包含 Codex 訂閱時，只保留訂閱候選，略過任務分類與自動選模型，避免明確選擇訂閱後又被改成其他供應商。沒有可用訂閱憑證時仍回傳 503，不改走 API。
+
+2026-11-04 正式驗收：版本 63fe6d0bef32，公開入口 https://gateway.exactlyone.dev 。Essence 的預設 Codex 與目前 Orca 帳號已使用自訂 Gateway provider；新啟動的原 Codex 回答 OK，帳務紀錄確認走 codex-subscription，未嘗試自動選模型。已啟動的 Codex／Orca 程序需重開才會載入新設定；本次未修改 Mac。原設定已保存在各 config.toml 同目錄的 before-gateway 備份。

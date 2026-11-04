@@ -246,7 +246,7 @@ def deploy(args):
                    'ON_ERROR_STOP=1', '-U', database.username, '-d', database.path[1:],
                    '-Atc', "SELECT version, encode(checksum,'hex'), success FROM _sqlx_migrations ORDER BY version"]).decode()
     name = 'gateway-release-' + args.revision + '-' + uuid.uuid4().hex[:8]
-    run(['docker', 'create', '--name', name, '--network', next(iter(source['NetworkSettings']['Networks'])),
+    run(['docker', 'create', '--label', 'expire=' + time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)), '--name', name, '--network', next(iter(source['NetworkSettings']['Networks'])),
          '--cpus', '2', '--memory', '768m', '--restart', 'no', image['Id']])
     run(['docker', 'cp', name + ':/app/migrations.sha384', str(evidence / 'migrations.sha384')])
     manifest = migration_manifest((evidence / 'migrations.sha384').read_text())
@@ -258,7 +258,8 @@ def deploy(args):
     env_file = evidence / 'candidate.env'
     env_file.write_text('\n'.join(k + '=' + v for k, v in env.items()) + '\n')
     env_file.chmod(0o600)
-    run(['docker', 'run', '-d', '--name', candidate, '--network', next(iter(source['NetworkSettings']['Networks'])),
+    run(['docker', 'volume', 'create', '--label', 'expire=never', candidate + '-spool'])
+    run(['docker', 'run', '--label', 'expire=never', '-d', '--name', candidate, '--network', next(iter(source['NetworkSettings']['Networks'])),
          '--cpus', '2', '--memory', '768m', '--restart', 'no', '--env-file', str(env_file),
          '-p', f'127.0.0.1:{args.port}:8080', '-v', candidate + '-spool:/var/lib/agent-pool-gateway/ledger-spool', *mounts, image['Id']])
     deadline = time.monotonic() + 45
