@@ -88,3 +88,7 @@ SHA-256 比對且不寫 DB。其他組合若誤設，程序會拒絕啟動；未
 `./scripts/check.sh all` 會啟動一個有界的本機 PostgreSQL，讓 `sqlx::test` 在隔離資料庫套用真
 migration。測試涵蓋跨 tenant 外鍵、狀態轉移、單一 successor、HMAC key overlap、DB 故障、
 cache／撤銷競態、production bootstrap 拒絕，以及五表明文掃描的陰性與注入正對照。
+
+## 群組與權杖歸屬（2026-11-01 決定，S04 前尚未實作）
+
+同一個人的多個帳號（不同 email、角色）各是一個 user，放進同一個群組；供應商權杖綁在群組，查找順序是使用者自己的、再所屬群組的。放棄的做法：在 user 之上新增「人」，或讓一個 user 掛多個 email，因為都更複雜。群組不檢查成員是否同一個人，把不同人放進掛有權杖的群組就是共用訂閱席次，由管理者負責。

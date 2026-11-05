@@ -18,6 +18,13 @@
 
 三個詞（Gateway 金鑰、API 金鑰、權杖）的定義見 `terminology.md`。
 
+## 現況盤點（2026-11-01）
+
+- 正式環境與 `main` 都在 `d1c29e89990d`，`/health` 於 2026-11-01 讀回該版本。已有：一份由容器持有的訂閱權杖、Gateway 金鑰驗證、政策、配額、排程、帳本。
+- 尚未進 `main`：多人各用自己的權杖、加密保存層、本機模型與工具往返驗收。這些在另一工作樹 `agent-pool-gateway-completion`（分支 `feature/gateway-completion`，比 `main` 多 1 個已提交變更與約 26 個未提交檔案，使用者 2026-10-30 令其暫停）；程式存在不代表已驗收，文件仍以 `main` 為準。
+- 本工作樹 `feature/identity-groups` 只有文件與 `prelude` 重構，W21 的 email、群組、Credential 啟停尚未開始；`src/routes.rs` 的測試搬到 `src/routes/tests.rs` 尚未提交。
+- 兩工作樹都大改 `src/routes.rs`，合併前必須先定順序，見 `src-architecture-refactor-plan.md`。
+
 正式環境於 2026-10-29 切到 `d1c29e89990d`，Claude Code 帶 Gateway 金鑰實送成功，切換期間串流完整。現行版本只有一份共用的訂閱權杖，尚未實作依使用者選擇各自權杖；多人各用自己的訂閱仍是目標，不能視為已完成。
 
 ## 三個 Plane
@@ -206,6 +213,8 @@ Agent 一律只認 Gateway 的位址，不分本機或遠端。保存層的暫�
 ### 工具執行分工（2026-10-29）
 
 架構圖：[現況](agent-pool-gateway-現況.pdf)與[目標](agent-pool-gateway-目標.pdf)。兩圖採用 architecture-diagrams 技能的 `variants.py` 手繪風格 `--themes=sketch --pdf`；對應資料分別為 `gateway-current-diagram.json`、`gateway-target-diagram.json`。修改前先對照程式與使用者決策，輸出後檢查畫面、文字及每頁不透明白底。目標圖是規劃，不表示功能已完成。
+
+目標的上下文分工：Claude Code 與 Codex 自行決定何時壓縮並呼叫模型產生摘要，Gateway 不重複壓縮；自家 Agent 自行決定何時壓縮並呼叫模型，摘要可評估供應商功能或自行選擇模型。這是目標設計，尚未完成實作與原 Client 驗收。
 
 - Gateway 負責模型連線、身分、政策、額度，以及請求和回應的協定轉換；工具由 Agent 端依使用者授權執行。Gateway 在遠端時不直接操作使用者電腦，也不代管 Agent 的工具執行。
 - Gateway 要保留模型的工具名稱、參數、呼叫識別與執行結果，讓 Agent 能把結果交回模型；串流、錯誤與協定轉換不得遺失或錯配。各模型與 Client 實際支援範圍需逐項驗證，不能推定全部相容。

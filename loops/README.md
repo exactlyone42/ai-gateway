@@ -19,6 +19,7 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
+| [src-layering](./src-layering.loop.md) | 整理 | 暫停（等 gateway-completion 整合） | P1 | 整理程式分層並將 SQL 移到獨立檔案 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
@@ -40,11 +41,12 @@
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
 | [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
-| [identity-groups](./identity-groups.loop.md) | W21 | PLANNED | P1 | 員工加 email、群組共用額度與權限、credential 啟停不刪除 |
+| [identity-groups](./identity-groups.loop.md) | W21 | S01–S03 有本機成果；S04 待整合，見總母檔 | P1 | 員工加 email、群組共用額度與權限、credential 啟停不刪除 |
 
 ## 現在該做哪一個
 
-W00–W19 共 20 份 loop 已全數交付。W20 `production-readiness` 等待使用者決定。
-W21 `identity-groups` 已規劃，準備開工。
+2026-11-05 已重查：唯一整體母檔為 [gateway-completion](../../agent-pool-gateway-completion/loops/gateway-completion.loop.md)，盤點與完成門檻見 [優先工作](../../agent-pool-gateway-completion/loops/gateway-completion/07-priority-audit.md)，接續指令見 [執行 prompt](../../agent-pool-gateway-completion/loops/gateway-completion/08-execution-prompt.md)。
 
-一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
+優先順序：修復 #108 CI 並整合現有 Codex／群組成果 → 個人與群組憑證隔離及加密保存、可恢復備份 → 原 Client 全流程與發布。分層整理排在整合後。
+
+W21 S01–S03 已有 groups 工作樹提交，不能再寫尚未開工；本工作樹的 W21 檔是舊副本，S04 尚待整合。W20 的舊等待理由須重查：現有 Codex 正式驗收紀錄不等於 W20 全部條件通過。公開版本為 63fe6d0bef32，遠端 main 為 71f746c，舊交接版本已過時。每次只接一個 writer、一張可驗收票，不重複啟動長任務。

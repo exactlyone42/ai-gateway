@@ -22,6 +22,7 @@
 | 文件 | 什麼時候讀 | 產出段落 |
 | --- | --- | --- |
 | `docs/work-breakdown.md` | 要知道整體切成哪些段落、依賴順序、現在該做哪一段 | — |
+| `HANDOFF.md` | 接手工作、要知道哪個工作樹有什麼成果與第一步 | — |
 | `docs/engineering-standards.md` | 要動程式碼、寫測試、加指標、開 PR 之前 | — |
 | `docs/feasibility.md` | 有人問「這件事到底做不做得到」、或要新增一個 Client | — |
 | `docs/architecture.md` | 要知道三個 Plane 的邊界、請求路徑、故障模型 | — |

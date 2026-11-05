@@ -5,7 +5,7 @@
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | 未開始 |
+| 狀態 | 進行中 |
 | 優先度 | P1 |
 | 前置 | identity-credential、policy-engine、quota-ratelimit、admin-web |
 | 開始 | 2026-10-08 13:45+08:00 |
@@ -21,6 +21,7 @@
 - [ ] User 支援 tenant 內唯一的可選 email，後台可建立、編輯與搜尋。
 - [ ] 可建立群組、加移成員，群組可綁政策與配額；user scope 優先，無命中才使用群組。
 - [ ] 後台可啟用或停用 Credential，狀態變更立即使快取失效。
+- [ ] 供應商權杖可綁群組：使用者自己有權杖就用自己的，否則用所屬群組的（S04，依賴 `gateway-completion` 的個人權杖設計，整合後才做）。
 - [ ] 格式、靜態檢查、後端與前端測試全過。
 - [ ] 陰性對照：重複 email、跨 tenant 成員、停用 Credential 與 user scope 覆蓋群組都必須被對應測試抓到。
 
@@ -28,11 +29,13 @@
 
 - 現有 users 表沒有 email/status；Credential 已有狀態機制，但後台未完整提供操作。
 - 使用者於 2026-10-08 決定 email 可選但建議填寫。
+- 使用者 2026-11-01 決定：同一個人的多個帳號（不同 email、角色）各建一個使用者，放進同一群組，權杖綁在群組，不新增「人」這一層，也不做一人多 email。群組不限制成員必須是同一個人，若把不同人放進掛有權杖的群組就等於共用席次，由管理者自律，文件須寫明。
 - 不做群組繼承、巢狀群組、跨 tenant 群組或自動派發 Credential。
 
 ## 已做
 
 - `2026-10-08` 完成需求與驗收規劃，尚未修改程式。
+- `2026-11-01` 使用者決定權杖綁群組並下令開工；S01 開始，先寫陰性測試。
 - `2026-10-20` 從最新 `dev` 建立本分支並修正 Loop 格式。
 
 ## 已確定不可行
@@ -59,6 +62,7 @@
 
 ## 下一步
 
-1. S01：新增 users email/status、groups 與 group_members migration，先寫陰性測試再實作。
+1. S01：新增 users email（status 已存在）、groups 與 group_members migration，先寫陰性測試再實作。
 2. S02：擴充 policy/quota group scope 與優先序。
 3. S03：完成後端 CRUD、Credential 啟停、整合測試與後台頁面。
+4. S04：權杖綁群組；等 `gateway-completion` 整合後，沿用其個人權杖的存放方式。
