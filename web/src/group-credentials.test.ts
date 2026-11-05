@@ -117,21 +117,30 @@ test('更新後斷線且狀態未知，只送一次並清空秘密、禁止修�
   expect(screen.getByRole('button', { name: '撤銷憑證' })).toBeDisabled()
 })
 
-test.each(['PUT', 'DELETE'])('%s 未完成時切換種類，舊結果不影響新對象', async (method) => {
-  mount()
+test.each(['PUT', 'DELETE'].flatMap((method) => ['group', 'provider', 'kind'].flatMap((target) => ['success', 'failure'].map((outcome) => [method, target, outcome]))))('%s 未完成切換 %s，舊請求 %s 不影響新對象', async (method, target, outcome) => {
+  const { client, rerender } = mount()
   await selectProvider()
   let complete!: () => void
-  const pending = new Promise<void>((resolve) => { complete = resolve })
+  const pending = new Promise<void>((resolve, reject) => { complete = () => outcome === 'success' ? resolve() : reject(new Error('old request failed')) })
   const original = mocks.request.getMockImplementation()!
   mocks.request.mockImplementation(async (...args: unknown[]) => (args[3] as RequestInit | undefined)?.method === method ? pending : original(...args))
   fireEvent.change(screen.getByLabelText('本人供應商憑證'), { target: { value: 'private-token' } })
   fireEvent.click(screen.getByRole('button', { name: method === 'PUT' ? '更新憑證' : '撤銷憑證' }))
-  fireEvent.change(screen.getByLabelText('憑證種類'), { target: { value: 'subscription' } })
+  if (target === 'group') {
+    rerender(createElement(QueryClientProvider, { client }, createElement(GroupCredentials, { key: 'group2', group: 'group2' })))
+    await screen.findByText('第一個供應商')
+    fireEvent.change(screen.getByLabelText('憑證供應商'), { target: { value: 'first' } })
+  } else if (target === 'provider') {
+    fireEvent.click(screen.getByRole('button', { name: '下一頁供應商' }))
+    await screen.findByText('第二個供應商')
+    fireEvent.change(screen.getByLabelText('憑證供應商'), { target: { value: 'second' } })
+  } else fireEvent.change(screen.getByLabelText('憑證種類'), { target: { value: 'subscription' } })
   await screen.findByText('憑證已設定並啟用。')
   complete()
-  await waitFor(() => expect(mocks.request.mock.calls.filter((call) => call[0].endsWith('/api') && !call[3])).toHaveLength(2))
+  await waitFor(() => expect(mocks.request.mock.calls.filter((call) => call[0] === '/groups/group1/provider-credentials/first/api' && !call[3])).toHaveLength(2))
   expect(screen.queryByText('憑證已更新。')).toBeNull()
   expect(screen.queryByText('憑證已撤銷。')).toBeNull()
+  expect(screen.queryByText(/操作結果未確認/)).toBeNull()
   expect((screen.getByLabelText('本人供應商憑證') as HTMLInputElement).value).toBe('')
   expect(mocks.request.mock.calls.filter((call) => call[3]?.method === method)).toHaveLength(1)
 })

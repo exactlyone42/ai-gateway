@@ -143,3 +143,9 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 2026-11-05 群組憑證切片已接入初版管理 HTTP 與請求選取：個人優先、唯一群組後備、完整摘要一致性、訂閱／API 分開及管理者限定。已通過6項隔離測試（/tmp/gateway-closeout-group-http-tests.log），含真正管理HTTP、Gateway金鑰與模擬上游；撤銷後上游無新請求。故意反轉摘要比對時，半成功拒絕測試確實失敗（/tmp/gateway-closeout-group-digest-negative.log）。審查指出會員資料庫連線失效、嘗試後再取鎖失敗漏稽核及Messages保留多餘profile複本；已補本機會員鎖、終態失敗稽核與標頭即釋放，新增API與故障測試仍在驗證。未跑新版全套、瀏覽器管理、正式與多人實送，不標P1完成。
 
 最新版九項群組測試已通過（/tmp/gateway-closeout-group-nine-tests-final.log），另有466項未在該命令執行；所有目標Clippy通過（/tmp/gateway-closeout-group-clippy-final.log）。測試包含管理者限定、真正HTTP到模擬上游、跨租戶約束、API／訂閱分離、來源歧義、個人損壞不後備、會員撤銷、資料庫backend中止、半成功與舊快照。新版全套由推送前檢查驗證，管理畫面與原Client／正式仍未驗收。
+
+2026-11-05 管理畫面847f84e已過完整推送檢查並推送。另建隔離資料庫，以明確BUILD_REVISION重建測試Gateway並讀回847f84e8ff72，真正API瀏覽器1項通過：管理者設定／查核／撤銷，operator及viewer的GET／PUT／DELETE各回403。資料庫讀回1筆32-byte摘要且enabled=false，更新及撤銷各有attempt、success各1筆（/tmp/gateway-group-browser-db-readback.log）；測試服務已停止。首次測試資料的供應商操作名稱及credential_ref不符合既有schema而失敗，修正fixture、啟用供應商後於新隔離DB通過（/tmp/gateway-group-browser-real-v2.log）。供應商指向本機關閉埠，未呼叫模型；正式環境未動。
+
+進行中操作的畫面切換已補PUT／DELETE×群組／供應商／種類×舊請求成功／失敗共12組；前端完整檢查22項通過（/tmp/gateway-group-ui-matrix-frontend.log）。原Client實送、第二真人及跨主機仍未驗；不能據此標P1整體完成。
+
+續補API種類後，在另一個空白隔離DB重跑真正瀏覽器1項通過（/tmp/gateway-group-browser-real-v3.log）：訂閱與API分別設定／撤銷，兩種其他角色的讀／寫／撤銷合計12次403；每個角色遭拒後管理者讀回仍為啟用且一致，API設定時訂閱保持已撤銷。DB讀回兩筆各32-byte摘要且均停用，更新及撤銷的attempt／success各2筆（/tmp/gateway-group-browser-db-v3-readback.log）。這證明當輪管理流程，不替代供應商實送；隔離服務已停止。
