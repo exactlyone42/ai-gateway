@@ -26,6 +26,10 @@ def main():
     parser.add_argument('--check-codex-held', action='store_true')
     parser.add_argument('--codex-auth-file', type=Path)
     parser.add_argument('--source-model')
+    parser.add_argument('--check-compact', action='store_true')
+    parser.add_argument('--control-omit-summary', action='store_true')
+    parser.add_argument('--compact-failure', choices=('summary', 'context-overflow'))
+    parser.add_argument('--control-compact-success', action='store_true')
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
@@ -34,6 +38,14 @@ def main():
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
+    if args.control_compact_success and not args.compact_failure:
+        parser.error('compact success control requires compact failure mode')
+    if args.compact_failure and (not args.check_compact or args.control_omit_summary):
+        parser.error('compact failure requires compact mode separately from summary control')
+    if args.control_omit_summary and not args.check_compact:
+        parser.error('summary control requires compact mode')
+    if args.check_compact and (args.client != 'codex' or any((args.check_tools, args.check_cancel, args.check_error, args.check_codex_held, args.check_capture))):
+        parser.error('compact validation requires codex separately from other modes')
     if args.control_wrong_tool_result and not args.check_tools:
         parser.error('wrong tool result control requires --check-tools')
     if sum((args.check_cancel, args.check_tools, args.check_error)) > 1:
@@ -81,6 +93,10 @@ def main():
     if args.check_error:
         fixture = runpy.run_path(str(root / 'scripts/client_error_fixture.py'))['handler'](fixture)
         fixture.success_control = args.control_error_as_success
+    if args.check_compact:
+        fixture = runpy.run_path(str(root / 'scripts/client_compact_fixture.py'))['handler'](fixture)
+        fixture.omit_summary = args.control_omit_summary
+        fixture.failure = None if args.control_compact_success else args.compact_failure
     fixture.fixture_dir = root / 'tests/fixtures/client-roundtrip'
     fixture.capture_dir = captures
     fixture.request_paths = {'claude-code': [], 'codex-cli': []}
@@ -200,6 +216,10 @@ def main():
             prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
             if codex:
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
+                if args.check_compact:
+                    config = home / 'config.toml'
+                    extra = 'model_auto_compact_token_limit = 1000\nmodel_context_window = 32768\ncompact_prompt = "GATEWAY_COMPACT_REQUEST"\n'
+                    config.write_text(extra + config.read_text())
                 command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', *(['--json'] if cancel or error else []), prompt]
                 client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
             else:
@@ -245,6 +265,15 @@ def main():
                             process.wait()
             else:
                 result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
+                if args.check_compact:
+                    initial_diagnostic = result.stdout + '\n' + result.stderr
+                    for secret in fixture.client_credentials | fixture.provider_credentials:
+                        initial_diagnostic = initial_diagnostic.replace(secret, '[credential]')
+                    (home / 'initial-client-diagnostic.txt').write_text(initial_diagnostic)
+                    if result.returncode != 0 or result.stdout.strip() != expected_reply:
+                        raise RuntimeError('壓縮驗收第一輪原Client未完成')
+                    resume = ['codex', 'exec', 'resume', '--last', '--skip-git-repo-check', prompt]
+                    result = subprocess.run(['timeout', '--kill-after=5s', '30s', *resume], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
             after = len(fixture.request_paths[client_key])
             diagnostic = result.stdout + '\n' + result.stderr
             for secret in fixture.client_credentials | fixture.provider_credentials:
@@ -255,6 +284,12 @@ def main():
                     raise RuntimeError(f'{label}: 原Codex未完成本人來源實送，紀錄位於{runtime}')
                 if not success and (result.returncode != 1 or result.stdout.strip() == expected_reply):
                     raise RuntimeError(f'{label}: 原Codex應拒絕卻成功')
+            elif args.check_compact and args.compact_failure:
+                if result.returncode != 1 or fixture.failure_marker not in diagnostic or result.stdout.strip() == expected_reply:
+                    raise RuntimeError(f'原Codex未正確回報壓縮失敗：{runtime}')
+                observed = fixture.captured_requests[capture_start:]
+                if not observed or any(not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
+                    raise RuntimeError('壓縮失敗路徑憑證隔離不符')
             elif success or error:
                 if error and (result.returncode != 1 or fixture.error_marker not in diagnostic or not 1 <= after - before <= 6):
                     raise RuntimeError(f'{label}: 原Client未正確回報上游錯誤，退出{result.returncode}、上游{after - before}次')
@@ -266,6 +301,20 @@ def main():
             elif after != before or result.stdout.strip() == expected_reply:
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
             checks.append({'case': label, 'passed': True, 'upstream_requests': None if args.check_codex_held else after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
+
+        if args.check_compact:
+            client('alice', f'{model_prefix}-alice', True, 'compact-continuation')
+            result = {'compact_requests': fixture.compact_requests, 'resumed_requests': fixture.resumed_requests}
+            (runtime / 'compact-result.json').write_text(json.dumps(result, indent=2))
+            if args.compact_failure:
+                if not 1 <= fixture.compact_requests <= 6 or fixture.resumed_requests != 0 or checks[0]['upstream_requests'] != 1 + fixture.compact_requests:
+                    raise RuntimeError(f'壓縮失敗後錯誤接續或次數無界：{runtime}')
+            elif fixture.compact_requests != 1 or fixture.resumed_requests != 1 or checks[0]['upstream_requests'] != 3:
+                raise RuntimeError(f'未觀察到原Client壓縮及摘要接續：{runtime}')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'compact_failure': args.compact_failure, 'checks': checks, **result}, indent=2))
+            outcome = '壓縮失敗處理' if args.compact_failure else '壓縮接續'
+            print(f'原Codex{outcome}驗收通過；證據：{runtime}')
+            return
 
         if args.check_codex_held:
             client('alice', f'{model_prefix}-alice', True, 'held-owner')

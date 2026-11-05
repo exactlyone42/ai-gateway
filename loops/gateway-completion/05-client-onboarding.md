@@ -72,3 +72,11 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 低並行新版全套/tmp/gateway-original-client-error-bounded-all.log結束碼0（session77065）：RUST_TEST_THREADS=2，主Rust473過0失敗7ignored，Python備份20skipped，原5項setup逾時均過，未修改逾時與功能斷言。不能據此證明先前逾時唯一成因。HTTP400已符合原門檻泛稱的錯誤驗收；429/5xx等未驗範圍保留，不自行擴成所有錯誤矩陣的新增發布阻擋。下一優先為本人CodexFile原Client實送、壓縮接續及測試環境；第二真人、跨主機、正式備份位置／見證授權與自家Agent跨repo驗收缺口維持。
 
 2026-11-05 壓縮驗收前置研究：已讀原Codex0.166.0相符官方來源`https://raw.githubusercontent.com/openai/codex/rust-v0.166.0/codex-rs/core/src/compact.rs`與`config/mod.rs`，原件`/tmp/gateway-codex-compact-reference.rs`、`/tmp/gateway-codex-config-reference.rs`。設定含model_auto_compact_token_limit及compact_prompt；Client會另送Prompt並以摘要替換歷史。下一步以獨立假來源提高回報用量、設定低門檻與唯一摘要標記，必須觀察實際壓縮請求及後續請求帶摘要，並以缺標記陰性對照拒絕；不能拿兩輪工具往返當已壓縮。尚未實作／實測，不宣稱摘要品質或壓縮完成。
+
+2026-11-05 原Codex0.166.0壓縮接續隔離實測：第一版單輪exec未觸發，`/home/cash/.cache/tmp/gateway-client-identity-iy9w7o77/compact-result.json`為0/0且驗收失敗。改用同隔離CODEX_HOME執行exec後resume --last，假來源第一輪回報25000輸入用量、門檻1000；觀察三次上游（初答、壓縮、接續），壓縮1次且後續請求含指定摘要1次，原Client顯示context compacted、退出0。正向`/home/cash/.cache/tmp/gateway-client-identity-r0irv0cb/result.json`；移除摘要陰性`/home/cash/.cache/tmp/gateway-client-identity-8it29u3p/compact-result.json`為1/0，Client雖退出0但驗收拒絕。假來源未運算模型；不證明摘要品質、摘要失敗、內容超限、Claude壓縮或真來源接續。服務已回收；新增腳本未跑全套未提交。
+
+2026-11-05 原Codex壓縮失敗與內容超限：同一隔離Client第一輪成功，第二輪壓縮假來源回HTTP400。一般摘要錯誤`/home/cash/.cache/tmp/gateway-client-identity-3yi01z6i/result.json`；code=context_length_exceeded的超限錯誤`/home/cash/.cache/tmp/gateway-client-identity-v2om4rj9/result.json`。兩者均初答1次、壓縮6次（原Client顯示Reconnecting 1/5到5/5）、退出1、摘要接續0；沒有把失敗摘要當成功。這是Client自身重試，未新增Gateway重試。陰性將壓縮錯誤換成成功串流，原Client退出0，但失敗驗收拒絕，`/home/cash/.agents/temp-services/logs/gateway-codex-compact-failure-control-20261105.log`及`/home/cash/.cache/tmp/gateway-client-identity-up4og4p5/compact-continuation/client-diagnostic.txt`。暫存服務皆已結束。超限測的是供應商回報錯誤，不證明真模型最大內容長度；未測自動縮短後成功恢復、真模型摘要品質及Claude壓縮。新全套與提交待辦。
+
+2026-11-05 Claude壓縮前置來源：官方`https://code.claude.com/docs/en/env-vars`已下載`/tmp/gateway-claude-env-reference.html`，載明CLAUDE_AUTOCOMPACT_PCT_OVERRIDE可用1–100降低自動壓縮門檻，DISABLE_AUTO_COMPACT關閉自動壓縮但保留手動/compact；本機2.1.318的help也列--autocompact。後續以隔離Client設定、假來源回報用量觸發，不改原Client。尚未實測，不算Claude壓縮通過。
+
+2026-11-05 Codex壓縮切片新版全套`/tmp/gateway-codex-compact-all.log`結束碼0；主Rust473過7ignored，Python備份20skipped。只改驗收程式及文件，正式環境未動；Claude壓縮仍未驗，不標P3完成。
