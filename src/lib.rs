@@ -44,3 +44,5 @@ mod services;
 pub mod startup;
 mod state;
 mod task_classification;
+
+mod group_credentials;

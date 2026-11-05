@@ -71,3 +71,9 @@ P1 授權綁定依據：OWASP Authorization Cheat Sheet（https://cheatsheetseri
 Codex 持有人切片：來源選擇正反對照、設定14項與部署28項測試通過。啟動檢查新增缺 owner／錯誤 owner／正確 owner 三案例，缺 owner 在修正前實際失敗（/tmp/gateway-closeout-owner-startup-negative.log），修正後設定14項通過。直接啟動與 Compose 也拒絕缺綁定。初版全套 /tmp/gateway-closeout-owner-all.log 結束碼0；啟動補強後 gate 通過，最新版全套由 push 再驗。部署測試中的「原 Client 通過」是模擬輸出，不是新版實送。
 
 整合 CI 41950107993：Rust 及隔離資料庫測試已過，最後 Compose 設定檢查因 runner 未安裝 compose 而失敗，原文 unknown shorthand flag: 'f' in -f（/tmp/gateway-closeout-integrated-ci-failure.log）。依 Docker 官方 setup-compose-action v1 文件新增安裝步驟，固定與本機通過版本相同的 v5.6.1（2026-10-21 發布）；尚待新版遠端 CI 驗證，未算修復完成。來源 https://github.com/docker/setup-compose-action 、https://github.com/docker/compose/releases/tag/v5.6.1。
+
+群組查詢使用SQLx0.8.6官方巨集連隔離資料庫產生離線描述（SQLX_OFFLINE_DIR），沒有手寫欄位型別。此資料庫無獨立刪除見證schema，因此整體線上編譯會在既有四個見證巨集失敗，該命令不算整體通過；改用既有見證離線描述後，本機離線編譯及六項群組測試已通過。來源為安裝套件FAQ與 /tmp/gateway-sqlx-cli-086-reference.md，新增查詢仍實際連隔離PostgreSQL驗證。新逾時設定編譯曾誤用execute於回傳資料的查詢，已改fetch_one並重新驗證，未當作綠燈。
+
+後續已在隔離編譯資料庫套用 repo 的正式見證schema（無登入的測試擁有者，只授予該測試DB建立schema權限），所有目標線上編譯成功：/tmp/gateway-closeout-group-final-online.log。固定測試查詢也改用query_file巨集；多句建資料及故障注入使用SQLx raw_sql讀SQL檔，巨集不支援多句。先前四個編譯錯誤保留作歷史，不代表最新版仍失敗。
+
+審查指出未配置目錄的會員移除，若在同一SELECT讀綁定並等待群組鎖，會沿用舊快照。已拆成先鎖群組、再讀綁定；故意改為先讀綁定再等鎖時，並行測試實際失敗（/tmp/gateway-closeout-group-member-race-negative.log）。c8d1528的遠端CI 41952189654已成功，正式服務尚未升級；群組新版仍待全套與發布驗收。

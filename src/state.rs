@@ -85,19 +85,28 @@ impl AppState {
         let is_subscription = profile.is_held_bearer();
         let api_store = store.api_store(&profile.provider_key);
         let selected = if is_subscription { store } else { &api_store };
-        let (token, lock) = selected
-            .get_with_lock(principal.tenant_id, user)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "personal provider token read failed");
-                crate::error::GatewayError::ProviderUnavailable
-            })?
-            .ok_or(crate::error::GatewayError::ProviderUnavailable)?;
+        let (token, lease) = crate::group_credentials::select(
+            &self.pool,
+            selected,
+            principal.tenant_id,
+            user,
+            &profile.provider_key,
+            if is_subscription {
+                "subscription"
+            } else {
+                "api"
+            },
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "provider credential selection failed");
+            crate::error::GatewayError::ProviderUnavailable
+        })?;
         if is_subscription {
-            Ok(profile.with_personal_token_lock(token, lock))
+            Ok(profile.with_personal_token_lock(token, lease))
         } else {
             profile
-                .with_personal_api_key(token, lock)
+                .with_personal_api_key(token, lease)
                 .ok_or(crate::error::GatewayError::ProviderUnavailable)
         }
     }

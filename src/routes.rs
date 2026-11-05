@@ -106,6 +106,7 @@ pub(crate) fn body_bytes(body: BodyBytes) -> Result<Bytes, crate::error::Gateway
 
 #[cfg(test)]
 mod tests {
+    mod group_credentials;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},

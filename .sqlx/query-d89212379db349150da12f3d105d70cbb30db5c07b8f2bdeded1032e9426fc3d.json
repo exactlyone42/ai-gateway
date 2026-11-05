@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.group_id, c.digest\nFROM group_provider_credentials c\nJOIN group_members gm ON gm.tenant_id = c.tenant_id AND gm.group_id = c.group_id\nJOIN users u ON u.tenant_id = gm.tenant_id AND u.id = gm.user_id\nWHERE c.tenant_id = $1 AND gm.user_id = $2 AND c.provider_key = $3\n  AND c.credential_kind = $4 AND c.enabled AND u.status = 'active'\nORDER BY c.group_id\nLIMIT 2\nFOR SHARE OF c, gm, u;\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "digest",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d89212379db349150da12f3d105d70cbb30db5c07b8f2bdeded1032e9426fc3d"
+}

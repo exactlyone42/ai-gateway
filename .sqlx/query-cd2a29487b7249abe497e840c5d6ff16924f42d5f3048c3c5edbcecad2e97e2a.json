@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT set_config('lock_timeout', '2s', true) AS lock_timeout,\n       set_config('statement_timeout', '5s', true) AS statement_timeout;\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "lock_timeout",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "statement_timeout",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "cd2a29487b7249abe497e840c5d6ff16924f42d5f3048c3c5edbcecad2e97e2a"
+}

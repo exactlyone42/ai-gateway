@@ -309,8 +309,8 @@ pub(super) async fn proxy(
     let send_base_url = profile.base_url.clone();
     let send_provider = profile.provider_key.clone();
     let send_model = provider_model.clone();
-    let send_profile = profile.clone();
-    let client = state.client_for_provider(profile.kind).clone();
+    let provider_kind = profile.kind;
+    let client = state.client_for_provider(provider_kind).clone();
     let mut send = Box::pin(async move {
         let result = provider::send(
             &client,
@@ -320,7 +320,7 @@ pub(super) async fn proxy(
             &send_model,
         )
         .await;
-        drop(send_profile);
+        drop(profile);
         result
     });
     let upstream = tokio::select! {
@@ -552,7 +552,7 @@ pub(super) async fn proxy(
             )
         }));
         if status.is_success() && matches!(operation, Operation::Messages) {
-            let usage = match provider::usage_for(profile.kind, &bytes) {
+            let usage = match provider::usage_for(provider_kind, &bytes) {
                 Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
                 Err(error) => {
                     crate::services::capture_request::save_error(&capture, &bytes, &error).await?;

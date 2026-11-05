@@ -467,9 +467,12 @@ enum ProviderAuthorization {
     CodexFile(std::path::PathBuf, String),
     ClientBearer,
     HeldBearer(crate::held_token::HeldToken),
-    PersonalBearer(Arc<str>, Option<Arc<std::fs::File>>),
-    PersonalApiKey(Arc<str>, Arc<std::fs::File>),
-    PersonalApiBearer(Arc<str>, Arc<std::fs::File>),
+    PersonalBearer(
+        Arc<str>,
+        Option<Arc<crate::group_credentials::CredentialLease>>,
+    ),
+    PersonalApiKey(Arc<str>, Arc<crate::group_credentials::CredentialLease>),
+    PersonalApiBearer(Arc<str>, Arc<crate::group_credentials::CredentialLease>),
     PersonalApiSlot,
     PersonalBearerSlot,
     None,
@@ -724,19 +727,28 @@ impl ProviderProfile {
         profile
     }
 
-    pub(crate) fn with_personal_token_lock(&self, token: Arc<str>, lock: std::fs::File) -> Self {
+    pub(crate) fn with_personal_token_lock(
+        &self,
+        token: Arc<str>,
+        lock: impl Into<crate::group_credentials::CredentialLease>,
+    ) -> Self {
         let mut profile = self.clone();
-        profile.authorization = ProviderAuthorization::PersonalBearer(token, Some(Arc::new(lock)));
+        profile.authorization =
+            ProviderAuthorization::PersonalBearer(token, Some(Arc::new(lock.into())));
         profile
     }
 
-    pub(crate) fn with_personal_api_key(&self, key: Arc<str>, lock: std::fs::File) -> Option<Self> {
+    pub(crate) fn with_personal_api_key(
+        &self,
+        key: Arc<str>,
+        lock: impl Into<crate::group_credentials::CredentialLease>,
+    ) -> Option<Self> {
         let authorization = match self.authorization {
             ProviderAuthorization::ApiKey(_) | ProviderAuthorization::PersonalApiSlot => {
-                ProviderAuthorization::PersonalApiKey(key, Arc::new(lock))
+                ProviderAuthorization::PersonalApiKey(key, Arc::new(lock.into()))
             }
             ProviderAuthorization::Bearer(_) | ProviderAuthorization::PersonalBearerSlot => {
-                ProviderAuthorization::PersonalApiBearer(key, Arc::new(lock))
+                ProviderAuthorization::PersonalApiBearer(key, Arc::new(lock.into()))
             }
             _ => return None,
         };

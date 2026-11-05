@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.id\nFROM groups g\nJOIN providers p ON p.tenant_id = g.tenant_id AND p.provider_key = $3\nWHERE g.tenant_id = $1 AND g.id = $2 AND p.lifecycle_state = 'active'\n  AND ($4 = 'api' OR p.provider_type = 'anthropic')\nFOR UPDATE OF g\nFOR SHARE OF p;\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6261ffdaf9856c0a2f07542053d53f580cf30c3ca2f0009de3d2ef689f187573"
+}

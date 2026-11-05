@@ -3435,18 +3435,39 @@ mod tests {
         );
         assert!(matches!(
             service
-                .change_group_member(&context, (group, user), true, source, source, "duplicate")
+                .change_group_member(
+                    &context,
+                    (group, user),
+                    true,
+                    None,
+                    (source, source),
+                    "duplicate"
+                )
                 .await,
             Err(AdminError::Conflict)
         ));
         assert!(matches!(
             service
-                .change_group_member(&context, (foreign, user), true, source, source, "foreign")
+                .change_group_member(
+                    &context,
+                    (foreign, user),
+                    true,
+                    None,
+                    (source, source),
+                    "foreign"
+                )
                 .await,
             Err(AdminError::NotFound)
         ));
         service
-            .change_group_member(&context, (group, user), false, source, source, "remove")
+            .change_group_member(
+                &context,
+                (group, user),
+                false,
+                None,
+                (source, source),
+                "remove",
+            )
             .await
             .unwrap();
         assert!(
@@ -3463,15 +3484,15 @@ mod tests {
                     &context,
                     (group, user),
                     false,
-                    source,
-                    source,
+                    None,
+                    (source, source),
                     "duplicate-remove"
                 )
                 .await,
             Err(AdminError::NotFound)
         ));
         service
-            .change_group_member(&context, (group, user), true, source, source, "add")
+            .change_group_member(&context, (group, user), true, None, (source, source), "add")
             .await
             .unwrap();
         assert_eq!(
@@ -3506,8 +3527,8 @@ mod tests {
                 &context,
                 (group, user),
                 false,
-                source,
-                source,
+                None,
+                (source, source),
                 "missing-audit-actor",
             )
             .await;
@@ -3582,8 +3603,8 @@ mod tests {
                 &context,
                 (group, user),
                 false,
-                source,
-                source,
+                None,
+                (source, source),
                 "no-invalidation",
             )
             .await
@@ -3603,7 +3624,7 @@ mod tests {
             1
         );
         service
-            .change_group_member(&context, (group, user), true, source, source, "add")
+            .change_group_member(&context, (group, user), true, None, (source, source), "add")
             .await
             .unwrap();
         assert_eq!(
@@ -3614,7 +3635,14 @@ mod tests {
             2
         );
         service
-            .change_group_member(&context, (group, user), false, source, source, "remove")
+            .change_group_member(
+                &context,
+                (group, user),
+                false,
+                None,
+                (source, source),
+                "remove",
+            )
             .await
             .unwrap();
         let result = evaluate().await.unwrap();
@@ -3630,7 +3658,14 @@ mod tests {
             "second"
         );
         service
-            .change_group_member(&context, (group, user), true, source, source, "restore")
+            .change_group_member(
+                &context,
+                (group, user),
+                true,
+                None,
+                (source, source),
+                "restore",
+            )
             .await
             .unwrap();
         assert_eq!(

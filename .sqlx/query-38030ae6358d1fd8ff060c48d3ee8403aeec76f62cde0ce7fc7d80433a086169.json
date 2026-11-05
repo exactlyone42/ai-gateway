@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n    SELECT 1 FROM group_provider_credentials\n    WHERE tenant_id = $1 AND group_id = $2 AND enabled\n) AS \"bound!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bound!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "38030ae6358d1fd8ff060c48d3ee8403aeec76f62cde0ce7fc7d80433a086169"
+}

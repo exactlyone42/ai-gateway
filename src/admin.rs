@@ -22,11 +22,13 @@ use crate::policy::PolicyEngine;
 use crate::scheduler::Scheduler;
 
 mod accounts;
+mod group_credentials;
 mod groups;
 mod incidents;
 mod reports;
 mod resources;
 pub use accounts::{AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput};
+pub use group_credentials::{GroupCredentialKind, GroupCredentialTarget};
 pub use groups::GroupCreate;
 pub use incidents::{IncidentCreate, IncidentEventCreate, IncidentListQuery, IncidentPatch};
 pub use reports::{CursorPage, ReportListQuery, ReportWindowQuery, RequestListQuery, UsageQuery};
@@ -272,6 +274,24 @@ pub const RBAC_RULES: &[RbacRule] = &[
         route: "/admin/v1/credentials/{id}/rotate",
         action: AdminAction::MutateResource,
         roles: WRITERS,
+    },
+    RbacRule {
+        method: "GET",
+        route: "/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "PUT",
+        route: "/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
+    },
+    RbacRule {
+        method: "DELETE",
+        route: "/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}",
+        action: AdminAction::ManageRbac,
+        roles: ADMINS,
     },
     RbacRule {
         method: "PUT",

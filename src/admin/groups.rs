@@ -128,11 +128,47 @@ impl AdminService {
         context: &AdminContext,
         (group, user): (Uuid, Uuid),
         add: bool,
-        source_ip: IpAddr,
-        peer_ip: IpAddr,
+        store: Option<&crate::held_token::PersonalTokens>,
+        (source_ip, peer_ip): (IpAddr, IpAddr),
         request_id: &str,
     ) -> Result<(), AdminError> {
+        let _member_lock = if !add {
+            match store {
+                Some(store) => Some(store.lock_membership(context.tenant_id, user, false).await.map_err(|error| {
+                    tracing::error!(error = %error, "group member removal is blocked by an active credential request");
+                    AdminError::Unavailable
+                })?),
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut transaction = self.pool.begin().await?;
+        sqlx::query_file!("queries/credential_timeouts.sql")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if !add && store.is_none() {
+            let group_exists = sqlx::query_file_scalar!(
+                "queries/admin/group_member_subject_lock.sql",
+                context.tenant_id,
+                group
+            )
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if group_exists.is_none() {
+                return Err(AdminError::NotFound);
+            }
+            let bound = sqlx::query_file_scalar!(
+                "queries/admin/group_member_credential_guard.sql",
+                context.tenant_id,
+                group
+            )
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if bound == Some(true) {
+                return Err(AdminError::Unavailable);
+            }
+        }
         let changed: Option<Uuid> = if add {
             sqlx::query_file_scalar!(
                 "queries/admin/group_member_add.sql",

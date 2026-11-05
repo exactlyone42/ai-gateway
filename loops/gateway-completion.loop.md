@@ -21,8 +21,8 @@
 
 ## 已知
 - 詳細盤點、證據邊界、三項完成門檻及取捨：[07 優先工作](gateway-completion/07-priority-audit.md)。每輪只讀母檔、當前子檔與必要來源。
-- 2026-11-05 公開版本 63fe6d0bef32；遠端 main=71f746c，兩者不同。#108 待合 main；整合版 CI 因 runner 缺 Compose 失敗，已補安裝步驟待驗；遠端查詢只見 main，不照舊快取假設 dev/develop 存在。
-- 初始盤點 completion @34b7db0、groups @1c80096、codex @e2081c0；主樹修改已提交推送 aded13a。completion 已提交三項計畫、CI 修正，並於 0fa238b 整合 main；90fe81f 已整合 groups。Codex 持有人隔離正反向測試通過；群組憑證綁定仍未完成。單一 writer，建置與推送依序執行。
+- 2026-11-05 公開版本 63fe6d0bef32；遠端 main=71f746c，兩者不同。#108 待合 main；c8d1528 的 CI 已全綠，群組憑證新版尚未推送；遠端查詢只見 main，不照舊快取假設 dev/develop 存在。
+- 初始盤點 completion @34b7db0、groups @1c80096、codex @e2081c0；主樹修改已提交推送 aded13a。completion 已提交三項計畫、CI 修正，並於 0fa238b 整合 main；90fe81f 已整合 groups。Codex 持有人隔離正反向測試通過；群組憑證已有管理與請求初版，正驗撤銷、失效與半成功拒絕。單一 writer，建置與推送依序執行。
 - 舊交接的暫停、98 個未提交檔與舊正式版本已過時。子檔舊測試是歷史證據，不能算最新整合版本通過。
 
 ## 計畫
@@ -41,12 +41,12 @@
 - 不以壓警告、放寬測試或刪未提交修改換綠燈；不在整合前大規模重構。
 
 ## 證據
-直接查詢與邊界見 07；舊 CI run 41794503227 失敗；整合版 41950107993 因 runner 缺 Compose 失敗，公開 /health=63fe6d0bef32。codex-held-auth 的實送為歷史證據，本輪未重跑。
+直接查詢與邊界見 07；舊 CI run 41794503227 失敗；舊整合版 41950107993 因 runner 缺 Compose 失敗，補正後 41952189654 全綠，公開 /health=63fe6d0bef32。codex-held-auth 的實送為歷史證據，本輪未重跑。
 
 ## 來源
 兩張架構圖、docs/architecture.md、request-response-storage.md、01–06、groups 的 W21 決策、main 的 #109／#110、既有工作樹程式。
 
 ## 下一步
 2026-11-05：使用者要求盤點核心三項並立即執行，已建立 active goal；原提交、部署與清理要求納入 P3。checkpoint：`gateway-completion.checkpoints.jsonl`。
-執行 P1：CI 編譯修正及既有分支整合已推進；接著完成群組權杖與 Codex 使用者綁定，補陰性對照。P1 全綠才做 P2，P2 全綠才完成 P3；各 step 細項及陰性對照見 07。
+執行 P1：CI 編譯修正及既有分支整合已推進；Codex 持有人隔離已推送且 CI 綠；群組權杖已補管理、選取與故障測試，接著驗完整套、審查與管理介面。P1 全綠才做 P2，P2 全綠才完成 P3；各 step 細項及陰性對照見 07。
 普通取捨依已記錄決策自行做並記理由；缺外部資源先做無依賴項，最後一次回報。沿用部署與本人 PR 合併授權，不推定付費、刪除或其他外部寫入也被授權。未驗項保留，整體未全過不得 COMPLETE。分層與 SQL 全面整理排整合後；自家 Agent 摘要沿用 agent-platform 母檔，跨 repo 驗收不省略。

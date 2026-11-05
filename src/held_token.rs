@@ -25,6 +25,7 @@ pub struct HeldToken {
 
 pub struct PersonalTokens {
     root: PathBuf,
+    membership_root: PathBuf,
     api_key: bool,
     #[cfg(test)]
     fail_sync: Arc<std::sync::atomic::AtomicBool>,
@@ -33,6 +34,7 @@ pub struct PersonalTokens {
 impl PersonalTokens {
     pub fn new(root: PathBuf) -> Self {
         Self {
+            membership_root: root.join("memberships"),
             root,
             api_key: false,
             #[cfg(test)]
@@ -44,6 +46,7 @@ impl PersonalTokens {
         let hash = Sha256::digest(provider.as_bytes());
         let encoded: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         Self {
+            membership_root: root.join("memberships"),
             root: root.join("api").join(encoded),
             api_key: true,
             #[cfg(test)]
@@ -52,13 +55,43 @@ impl PersonalTokens {
     }
 
     pub(crate) fn api_store(&self, provider: &str) -> Self {
-        let store = Self::for_api(self.root.clone(), provider);
+        let mut store = Self::for_api(self.root.clone(), provider);
+        store.membership_root = self.membership_root.clone();
         #[cfg(test)]
         let store = Self {
             fail_sync: self.fail_sync.clone(),
             ..store
         };
         store
+    }
+
+    pub(crate) fn group_store(&self, provider: &str) -> Self {
+        let digest = Sha256::digest(provider.as_bytes());
+        let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self {
+            membership_root: self.membership_root.clone(),
+            root: self.root.join("groups").join(name),
+            api_key: self.api_key,
+            #[cfg(test)]
+            fail_sync: self.fail_sync.clone(),
+        }
+    }
+
+    pub(crate) async fn lock_membership(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+        shared: bool,
+    ) -> Result<std::fs::File, HeldTokenError> {
+        let root = self.membership_root.clone();
+        tokio::task::spawn_blocking(move || Self::lock_user(&root, tenant, user, shared))
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .map_err(HeldTokenError::from)
+    }
+
+    pub(crate) fn digest(&self, raw: &str) -> Result<Vec<u8>, HeldTokenError> {
+        Ok(Sha256::digest(normalize_personal(raw, self.api_key)?.as_bytes()).to_vec())
     }
 
     #[cfg(test)]
@@ -141,6 +174,15 @@ impl PersonalTokens {
         tenant: uuid::Uuid,
         user: uuid::Uuid,
     ) -> Result<Option<(Arc<str>, std::fs::File)>, HeldTokenError> {
+        let (token, lock) = self.read_locked(tenant, user).await?;
+        Ok(token.map(|token| (token, lock)))
+    }
+
+    pub(crate) async fn read_locked(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+    ) -> Result<(Option<Arc<str>>, std::fs::File), HeldTokenError> {
         let path = self.path(tenant, user);
         let root = self.root.clone();
         let api_key = self.api_key;
@@ -148,9 +190,9 @@ impl PersonalTokens {
             let lock = Self::lock_user(&root, tenant, user, true)?;
             match std::fs::read_to_string(path) {
                 Ok(token) => {
-                    normalize_personal(&token, api_key).map(|token| Some((Arc::from(token), lock)))
+                    normalize_personal(&token, api_key).map(|token| (Some(Arc::from(token)), lock))
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, lock)),
                 Err(error) => Err(error.into()),
             }
         })

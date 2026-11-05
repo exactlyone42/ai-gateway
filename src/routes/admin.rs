@@ -13,10 +13,11 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, GroupCreate, IncidentCreate,
-        IncidentEventCreate, IncidentListQuery, IncidentPatch, LifecycleInput, ListQuery,
-        ReportListQuery, ReportWindowQuery, RequestListQuery, ResourceKind, ResourceMutationOutput,
-        ResourcePage, ResourceTarget, RotateCredentialInput, SessionOutput, UsageQuery, authorize,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, GroupCreate, GroupCredentialKind,
+        GroupCredentialTarget, IncidentCreate, IncidentEventCreate, IncidentListQuery,
+        IncidentPatch, LifecycleInput, ListQuery, ReportListQuery, ReportWindowQuery,
+        RequestListQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
+        RotateCredentialInput, SessionOutput, UsageQuery, authorize,
     },
     middleware::REQUEST_ID_HEADER,
     state::AppState,
@@ -64,6 +65,12 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/admin/v1/groups/{group}/members/{user}",
             post(add_group_member).delete(remove_group_member),
+        )
+        .route(
+            "/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}",
+            get(group_credential_status)
+                .put(replace_group_credential)
+                .delete(revoke_group_credential),
         )
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
@@ -507,8 +514,8 @@ async fn add_group_member(
             &context,
             (group, user),
             true,
-            source,
-            peer.ip(),
+            state.personal_tokens.as_ref(),
+            (source, peer.ip()),
             request_id(&headers)?,
         )
         .await?;
@@ -529,8 +536,8 @@ async fn remove_group_member(
             &context,
             (group, user),
             false,
-            source,
-            peer.ip(),
+            state.personal_tokens.as_ref(),
+            (source, peer.ip()),
             request_id(&headers)?,
         )
         .await?;
@@ -1079,6 +1086,87 @@ fn cors(origin: Option<&str>) -> CorsLayer {
         Some(origin) => layer.allow_origin(origin),
         None => layer,
     }
+}
+
+async fn group_credential_status(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    Ok(Json(
+        state
+            .admin
+            .group_credential_status(
+                &context,
+                GroupCredentialTarget {
+                    group,
+                    provider,
+                    kind,
+                },
+                store,
+            )
+            .await?,
+    ))
+}
+
+async fn replace_group_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+    headers: HeaderMap,
+    Json(input): Json<ReplaceTokenInput>,
+) -> Result<StatusCode, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    state
+        .admin
+        .change_group_credential(
+            &context,
+            GroupCredentialTarget {
+                group,
+                provider,
+                kind,
+            },
+            store,
+            Some(&input.token),
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_group_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    state
+        .admin
+        .change_group_credential(
+            &context,
+            GroupCredentialTarget {
+                group,
+                provider,
+                kind,
+            },
+            store,
+            None,
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

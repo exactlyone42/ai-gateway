@@ -139,3 +139,7 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 整合 main 的 CodexFile 後，個人模式會把它當成 API 金鑰查詢，導致拒絕；不能只跳過個人解析讓所有同租戶使用者用同一 Codex 帳號。P1 須補 Codex 檔案帳號與 Gateway 使用者／群組的明確綁定及負向對照；已由下方持有人切片改為明確綁定；未綁定一律拒絕。尚未完成此驗收，不可開啟多人正式配置。
 
 2026-11-05 Codex 持有人切片：新增 CODEX_OWNER_USER_ID，未綁定、無 user 或 user 不符均拒絕；無論個人模式是否啟用都不能借用。符合才保留原動態來源。新測試在舊邏輯實際失敗，修正後1項通過／465未跑，覆蓋2種模式×3種持有人設定及匿名拒絕。證據 /tmp/gateway-closeout-codex-owner-negative.log、-positive.log；目前僅驗來源選擇，尚未做新版 HTTP／原 Client 實送與部署，也未支援多 Codex 帳號。既有正式容器尚未設定此綁定，部署時必須補齊。
+
+2026-11-05 群組憑證切片已接入初版管理 HTTP 與請求選取：個人優先、唯一群組後備、完整摘要一致性、訂閱／API 分開及管理者限定。已通過6項隔離測試（/tmp/gateway-closeout-group-http-tests.log），含真正管理HTTP、Gateway金鑰與模擬上游；撤銷後上游無新請求。故意反轉摘要比對時，半成功拒絕測試確實失敗（/tmp/gateway-closeout-group-digest-negative.log）。審查指出會員資料庫連線失效、嘗試後再取鎖失敗漏稽核及Messages保留多餘profile複本；已補本機會員鎖、終態失敗稽核與標頭即釋放，新增API與故障測試仍在驗證。未跑新版全套、瀏覽器管理、正式與多人實送，不標P1完成。
+
+最新版九項群組測試已通過（/tmp/gateway-closeout-group-nine-tests-final.log），另有466項未在該命令執行；所有目標Clippy通過（/tmp/gateway-closeout-group-clippy-final.log）。測試包含管理者限定、真正HTTP到模擬上游、跨租戶約束、API／訂閱分離、來源歧義、個人損壞不後備、會員撤銷、資料庫backend中止、半成功與舊快照。新版全套由推送前檢查驗證，管理畫面與原Client／正式仍未驗收。
