@@ -37,6 +37,12 @@ CAPTURES = {
         "required_headers": set(),
     },
 }
+CAPTURES[Path("tests/fixtures/client-roundtrip/captures/claude-code-2.1.318.json")] = CAPTURES[
+    Path("tests/fixtures/client-roundtrip/captures/claude-code-2.1.267.json")
+]
+CAPTURES[Path("tests/fixtures/client-roundtrip/captures/codex-cli-0.166.0.json")] = CAPTURES[
+    Path("tests/fixtures/client-roundtrip/captures/codex-cli-0.153.0.json")
+]
 ALLOWED_KEYS = {
     "client_credential_absent",
     "has_reasoning",

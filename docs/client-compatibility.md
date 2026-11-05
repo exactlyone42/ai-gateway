@@ -15,8 +15,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 
 | Client | 狀態 | 自訂端點 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.306 驗證中 |
-| Codex CLI | supported | `model_providers` | OpenAI Responses | 0.153.0 已通過 |
+| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.318 本機假供應商通過 |
+| Codex CLI | supported | `model_providers` | OpenAI Responses | 0.166.0 本機假供應商通過 |
 | Claude Desktop | pending | Claude apps gateway `/user/bootstrap` | apps gateway 私有協定 | 未做 |
 | VS Code Copilot Chat | supported | Custom Endpoint | Chat/Responses/Messages | 未安裝，未做 |
 | Cursor | partial | BYOK／OpenAI-compatible base URL override | exact wire unknown | 未安裝，未做 |
@@ -27,8 +27,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 | 欄位 | 值 |
 | --- | --- |
 | client | Claude Code CLI |
-| version | 2.1.267（本機） |
-| verification_date | 2026-09-11 |
+| version | 2.1.318（本機） |
+| verification_date | 2026-11-05 |
 | custom_endpoint | `ANTHROPIC_BASE_URL`，可由 shell、`settings.json` 的 `env` 或 managed settings 設定 |
 | protocol | Anthropic Messages：`POST /v1/messages`；`POST /v1/messages/count_tokens` 可選 |
 | authentication | 一般模式用 Gateway credential；單一擁有者模式可保留 Claude OAuth，Gateway 每次向 Anthropic 驗證並對應既有 Principal，不保存 OAuth |
@@ -73,8 +73,8 @@ bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發�
 | 欄位 | 值 |
 | --- | --- |
 | client | Codex CLI |
-| version | 0.153.0（本機） |
-| verification_date | 2026-09-11 |
+| version | 0.166.0（本機） |
+| verification_date | 2026-11-05 |
 | custom_endpoint | `~/.codex/config.toml` 的 `model_provider` 與 `[model_providers.<id>]` |
 | protocol | OpenAI Responses；`wire_api` 唯一支援值為 `responses` |
 | authentication | gateway 用 `env_key` 或可定期更新 bearer 的 `auth` command，且保持 `requires_openai_auth = false`；`requires_openai_auth = true` 會改用 OpenAI 登入，見下方政策 |
@@ -223,3 +223,11 @@ private connectivity 是否能連 custom LLM gateway 沒有官方證據，維持
 `26.429.30905` 的最低版本；但它只證明 Bedrock，不能外推任意 gateway，也不能證明自架
 provider 的 Client 端 plan meter 行為。因此由 unsupported 改為 pending，待安裝後做一次和
 CLI 相同的本機 Responses 往返。
+
+## 2026-11-05 原 Client 版本複核
+
+Claude Code 2.1.318 與 Codex CLI 0.166.0 各經本機 Gateway d7c7cfd 取得固定假串流，完整腳本回報 `client roundtrip ok: all`。去除內容的版本紀錄已保存，供應商收到假供應商憑證且沒有 Gateway 金鑰；工具清單與推理參數僅驗請求格式，沒有工具執行或結果往返。保存功能在本次傳輸測試明確關閉，不能用來證明 P2。
+
+整批檢查原本把 Claude 的模型清單請求誤算給 Codex；現在僅檢查 Codex 執行期間的 Gateway 日誌，仍確認 Codex 沒有查模型清單。未知模型提示保留，不捏造模型能力。新版本紀錄也納入欄位及金鑰隔離檢查；故意把未轉送金鑰的結果改為 false 時，檢查會失敗。真實供應商、多人、跨主機、工具結果與取消仍須各自驗收。
+
+本輪官方設定參考：[Claude Code 設定](https://code.claude.com/docs/en/settings)、[Codex 設定](https://developers.openai.com/codex/config-reference)，於2026-11-05核對；實際版本與行為以本機指令及去除內容的紀錄為準。

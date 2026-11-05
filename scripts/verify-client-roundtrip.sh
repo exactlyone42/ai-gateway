@@ -35,14 +35,14 @@ if [ "$mode" = all ] || [ "$mode" = claude ]; then command -v claude >/dev/null;
 if [ "$mode" = all ] || [ "$mode" = codex ]; then command -v codex >/dev/null; fi
 if [ "$mode" = all ] || [ "$mode" = claude ]; then
   case "$(claude --version)" in
-    *2.1.306*) ;;
-    *) echo "expected Claude Code 2.1.306; update the versioned evidence first" >&2; exit 1 ;;
+    *2.1.318*) ;;
+    *) echo "expected Claude Code 2.1.318; update the versioned evidence first" >&2; exit 1 ;;
   esac
 fi
 if [ "$mode" = all ] || [ "$mode" = codex ]; then
   case "$(codex --version)" in
-    *0.153.0*) ;;
-    *) echo "expected Codex CLI 0.153.0; update the versioned evidence first" >&2; exit 1 ;;
+    *0.166.0*) ;;
+    *) echo "expected Codex CLI 0.166.0; update the versioned evidence first" >&2; exit 1 ;;
   esac
 fi
 
@@ -53,10 +53,12 @@ gateway_pid=""
 cleanup() {
   if [ -n "$gateway_pid" ]; then kill "$gateway_pid" 2>/dev/null || true; fi
   if [ -n "$mock_pid" ]; then kill "$mock_pid" 2>/dev/null || true; fi
+  if [ -n "$gateway_pid" ]; then wait "$gateway_pid" 2>/dev/null || true; fi
+  if [ -n "$mock_pid" ]; then wait "$mock_pid" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 
-python3 "$root/scripts/client-roundtrip-mock.py" \
+timeout --kill-after=5s 300s python3 "$root/scripts/client-roundtrip-mock.py" \
   --port "$mock_port" \
   --fixture-dir "$root/tests/fixtures/client-roundtrip" \
   --capture-dir "$runtime/captures" \
@@ -69,7 +71,8 @@ if ! kill -0 "$mock_pid" 2>/dev/null; then
 fi
 
 cargo build --quiet --manifest-path "$root/Cargo.toml"
-env \
+cp "$root/target/debug/agent-pool-gateway" "$runtime/gateway"
+env -i PATH="$PATH" \
   LISTEN_ADDRESS="127.0.0.1:$gateway_port" \
   DATABASE_URL="$database_url" \
   DATABASE_MAX_CONNECTIONS=5 \
@@ -80,12 +83,13 @@ env \
   ANTHROPIC_API_KEY=fixture-provider-key \
   CREDENTIAL_HASH_KEY=fixture-hash-key-with-at-least-32-bytes \
   CREDENTIAL_ENVIRONMENT=dev \
+  CONTENT_CAPTURE_ENABLED=false \
   ENABLE_DEVELOPMENT_BOOTSTRAP=true \
   BOOTSTRAP_CLIENT_KEY=fixture-client-key \
   ALLOWED_MODELS=claude-test,company-default \
   LEDGER_SPOOL_DIR="$runtime/spool" \
   RUST_LOG=agent_pool_gateway=info \
-  "$root/target/debug/agent-pool-gateway" >"$runtime/gateway.log" 2>&1 &
+  timeout --kill-after=5s 180s "$runtime/gateway" >"$runtime/gateway.log" 2>&1 &
 gateway_pid=$!
 
 sleep 2
@@ -93,28 +97,27 @@ if ! kill -0 "$gateway_pid" 2>/dev/null; then
   echo "gateway failed to start; see $runtime/gateway.log" >&2
   exit 1
 fi
-curl --fail --silent "http://127.0.0.1:$gateway_port/health" >"$runtime/health.json"
+curl --fail --silent --max-time 5 "http://127.0.0.1:$gateway_port/health" >"$runtime/health.json"
 
 if [ "$mode" = all ] || [ "$mode" = claude ]; then
-  env \
-    -u ANTHROPIC_API_KEY \
-    -u CLAUDE_CODE_OAUTH_TOKEN \
+  env -i PATH="$PATH" \
     CLAUDE_CONFIG_DIR="$runtime/claude-home" \
     ANTHROPIC_BASE_URL="http://127.0.0.1:$gateway_port" \
     ANTHROPIC_AUTH_TOKEN=fixture-client-key \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
-    claude -p --model claude-test --max-turns 1 \
+    timeout --kill-after=5s 45s claude -p --model claude-test --max-turns 1 \
       "Reply with exactly W05_CLAUDE_CODE_OK and nothing else." \
       >"$runtime/claude.out"
   grep -Fxq 'W05_CLAUDE_CODE_OK' "$runtime/claude.out"
   diff -u \
-    "$root/tests/fixtures/client-roundtrip/captures/claude-code-2.1.306.json" \
+    "$root/tests/fixtures/client-roundtrip/captures/claude-code-2.1.318.json" \
     "$runtime/captures/claude-code.json"
 fi
 
 if [ "$mode" = all ] || [ "$mode" = codex ]; then
+  codex_log_start=$(( $(wc -l <"$runtime/gateway.log") + 1 ))
   printf '%s\n' \
     'model = "company-default"' \
     'model_provider = "aigw"' \
@@ -127,22 +130,23 @@ if [ "$mode" = all ] || [ "$mode" = codex ]; then
     'wire_api = "responses"' \
     'requires_openai_auth = false' \
     >"$runtime/codex-home/config.toml"
-  env \
+  env -i PATH="$PATH" \
     CODEX_HOME="$runtime/codex-home" \
     AIGW_API_KEY=fixture-client-key \
-    codex exec --sandbox read-only --skip-git-repo-check \
+    timeout --kill-after=5s 45s codex exec --sandbox read-only --skip-git-repo-check \
       "Reply with exactly W06_CODEX_OK and nothing else." \
       >"$runtime/codex.out" 2>"$runtime/codex.err"
   grep -Fxq 'W06_CODEX_OK' "$runtime/codex.out"
   grep -Fq 'Model metadata for' "$runtime/codex.err"
   grep -Fq 'company-default' "$runtime/codex.err"
   grep -Fq 'Defaulting to fallback metadata' "$runtime/codex.err"
-  if grep -Fq '/v1/models' "$runtime/gateway.log"; then
-    echo "Codex 0.153.0 unexpectedly called gateway model discovery; update the contract" >&2
+  tail -n +"$codex_log_start" "$runtime/gateway.log" >"$runtime/codex-gateway.log"
+  if grep -Fq '/v1/models' "$runtime/codex-gateway.log"; then
+    echo "Codex 0.166.0 unexpectedly called gateway model discovery; update the contract" >&2
     exit 1
   fi
   diff -u \
-    "$root/tests/fixtures/client-roundtrip/captures/codex-cli-0.153.0.json" \
+    "$root/tests/fixtures/client-roundtrip/captures/codex-cli-0.166.0.json" \
     "$runtime/captures/codex-cli.json"
 fi
 

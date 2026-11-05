@@ -58,6 +58,8 @@ artifacts=(
   "$fixture_dir/openai-response.sse"
   "$fixture_dir/captures/claude-code-2.1.267.json"
   "$fixture_dir/captures/codex-cli-0.153.0.json"
+  "$fixture_dir/captures/claude-code-2.1.318.json"
+  "$fixture_dir/captures/codex-cli-0.166.0.json"
   "docs/client-roundtrip-evidence.md"
 )
 for artifact in "${artifacts[@]}"; do
