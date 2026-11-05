@@ -248,6 +248,12 @@ def deploy(args):
     if codex_directory:
         env['CODEX_AUTH_FILE'] = '/run/gateway-codex/auth.json'
         env['CODEX_ACCOUNT_ID'] = codex_account
+    owner = getattr(args, 'codex_owner_user_id', None) or env.get('CODEX_OWNER_USER_ID')
+    if env.get('CODEX_AUTH_FILE'):
+        try:
+            env['CODEX_OWNER_USER_ID'] = str(uuid.UUID(owner or ''))
+        except (ValueError, AttributeError) as error:
+            raise RuntimeError('必須設定有效的 Codex 訂閱持有人，未啟動候選版') from error
     if env.get('SCHEDULER_PASSTHROUGH') != 'true':
         raise RuntimeError('目前安全切換只支援原本已啟用直接轉送的服務；排隊模式不可並行，也不會自動修改模式')
     from urllib.parse import urlsplit
@@ -323,6 +329,7 @@ def main():
     parser = argparse.ArgumentParser(description='新版驗收後才切換入口；失敗保留舊版')
     parser.add_argument('--codex-auth-dir')
     parser.add_argument('--codex-account-id')
+    parser.add_argument('--codex-owner-user-id')
     parser.add_argument('--image', required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--source-container', required=True)

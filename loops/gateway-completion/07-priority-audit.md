@@ -65,3 +65,9 @@ completion 首次 all 主程式443通過／7略過；兩項 capture_startup 在�
 最新全套已結束碼0：/tmp/gateway-closeout-completion-check-stable.log。Rust 490 次測試通過（含日誌檢查子程序）、7 略過；Python 25＋157 項中20略過；前端2項與守門33/33通過。未執行需獨立見證／特定擁有者／額外環境開關的驗收，不能當作正式完成。正式 /health 實讀仍為63fe6d0bef32。
 
 main 已於0fa238b整合到工作分支；群組整合的 gate、Rust workspace 520 次通過／7 略過、前端 lint／型別／3測試／建置通過（/tmp/gateway-closeout-merge-groups-tests.log、-frontend.log、-gate.log）。這不是 main 合併或部署；群組權杖、Codex 使用者綁定及正式串流保存仍是未完成門檻。
+
+P1 授權綁定依據：OWASP Authorization Cheat Sheet（https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html，2026-11-05 下載 /tmp/gateway-authorization-reference.html），預設拒絕、每次確認資源授權。Codex 持有人切片已開始，詳02；只新增當前需要的一位持有人，不預做多帳號平台。
+
+Codex 持有人切片：來源選擇正反對照、設定14項與部署28項測試通過。啟動檢查新增缺 owner／錯誤 owner／正確 owner 三案例，缺 owner 在修正前實際失敗（/tmp/gateway-closeout-owner-startup-negative.log），修正後設定14項通過。直接啟動與 Compose 也拒絕缺綁定。初版全套 /tmp/gateway-closeout-owner-all.log 結束碼0；啟動補強後 gate 通過，最新版全套由 push 再驗。部署測試中的「原 Client 通過」是模擬輸出，不是新版實送。
+
+整合 CI 41950107993：Rust 及隔離資料庫測試已過，最後 Compose 設定檢查因 runner 未安裝 compose 而失敗，原文 unknown shorthand flag: 'f' in -f（/tmp/gateway-closeout-integrated-ci-failure.log）。依 Docker 官方 setup-compose-action v1 文件新增安裝步驟，固定與本機通過版本相同的 v5.6.1（2026-10-21 發布）；尚待新版遠端 CI 驗證，未算修復完成。來源 https://github.com/docker/setup-compose-action 、https://github.com/docker/compose/releases/tag/v5.6.1。

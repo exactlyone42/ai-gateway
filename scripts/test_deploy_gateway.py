@@ -229,7 +229,8 @@ class DeploymentTests(unittest.TestCase):
             return {'NetworkSettings': {'Ports': {'8080/tcp': [{'HostPort': '18080'}]},
                     'Networks': {'gateway': {}}},
                     'Config': {'Env': ['DATABASE_URL=postgres://gateway@db-alias/gateway',
-                                      'SCHEDULER_PASSTHROUGH=' + ('false' if self.failure == 'queued-mode' else 'true')]}}
+                                      'SCHEDULER_PASSTHROUGH=' + ('false' if self.failure == 'queued-mode' else 'true'),
+                                      *getattr(self, 'extra_source_env', [])]}}
         if name == 'database':
             networks = {'gateway': {'IPAddress': '172.18.0.2', 'Aliases': ['db-alias']}}
             if self.failure == 'database-host':
@@ -283,6 +284,30 @@ class DeploymentTests(unittest.TestCase):
                 self.assertNotIn('stop', value)
                 self.assertNotIn('kill', value)
                 self.assertNotIn('rm', value)
+
+    def test_codex_owner_is_required_before_starting_candidate_and_preserved(self):
+        owner = '00000000-0000-0000-0000-000000000001'
+        for index, (requested, stored, valid) in enumerate([
+            (None, None, False), ('invalid', None, False),
+            (owner, None, True), (None, owner, True),
+        ]):
+            with self.subTest(requested=requested, stored=stored):
+                self.args.evidence = str(Path(self.temp.name) / f'owner-{index}')
+                self.args.codex_owner_user_id = requested
+                self.extra_source_env = ['CODEX_AUTH_FILE=/run/gateway-codex/auth.json']
+                if stored:
+                    self.extra_source_env.append('CODEX_OWNER_USER_ID=' + stored)
+                self.events.clear()
+                self.config.write_text(self.previous)
+                if not valid:
+                    with self.assertRaisesRegex(RuntimeError, '訂閱持有人'):
+                        deploy_gateway.deploy(self.args)
+                    self.assertEqual(self.events, [])
+                    self.assertEqual(self.config.read_text(), self.previous)
+                else:
+                    deploy_gateway.deploy(self.args)
+                    env = (Path(self.args.evidence) / 'candidate.env').read_text()
+                    self.assertIn('CODEX_OWNER_USER_ID=' + owner, env.splitlines())
 
     def test_created_resources_have_expiry_labels(self):
         deploy_gateway.deploy(self.args)

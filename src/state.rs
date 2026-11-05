@@ -67,6 +67,12 @@ impl AppState {
         principal: &crate::canonical::PrincipalRef,
         profile: &ProviderProfile,
     ) -> Result<ProviderProfile, crate::error::GatewayError> {
+        if profile.is_codex_subscription() {
+            return match (self.config.codex_owner_user_id, principal.user_id) {
+                (Some(owner), Some(user)) if owner == user => Ok(profile.clone()),
+                _ => Err(crate::error::GatewayError::ProviderUnavailable),
+            };
+        }
         let Some(store) = self.personal_tokens.as_ref() else {
             return Ok(profile.clone());
         };

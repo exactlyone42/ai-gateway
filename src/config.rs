@@ -43,6 +43,7 @@ pub struct Config {
     pub openai_api_key: String,
     pub codex_auth_file: Option<std::path::PathBuf>,
     pub codex_account_id: String,
+    pub codex_owner_user_id: Option<Uuid>,
     pub openai_provider: String,
     pub openai_request_max_bytes: usize,
     /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
@@ -121,6 +122,8 @@ pub struct Config {
 pub enum ConfigError {
     #[error("CONTENT_CAPTURE_ENABLED must be true or false")]
     InvalidContentCaptureEnabled,
+    #[error("CODEX_OWNER_USER_ID 必須是有效的使用者識別碼（UUID）")]
+    InvalidCodexOwner,
     #[error("invalid Jev configuration")]
     InvalidJev,
     #[error("missing required environment variable {0}")]
@@ -227,6 +230,14 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from);
         let codex_account_id = setting("CODEX_ACCOUNT_ID").unwrap_or_default();
+        let codex_owner_user_id = setting("CODEX_OWNER_USER_ID")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse().map_err(|_| ConfigError::InvalidCodexOwner))
+            .transpose()?;
+        if codex_auth_file.is_some() && codex_owner_user_id.is_none() {
+            return Err(ConfigError::InvalidCodexOwner);
+        }
         let openai_api_key = setting("OPENAI_API_KEY").unwrap_or_default();
         let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
         let openai_request_max_bytes = setting("OPENAI_REQUEST_MAX_BYTES")
@@ -571,6 +582,7 @@ impl Config {
             openai_api_key,
             codex_auth_file,
             codex_account_id,
+            codex_owner_user_id,
             openai_provider,
             openai_request_max_bytes,
             anthropic_base_url,
@@ -1173,6 +1185,15 @@ mod tests {
                         "OPENAI_API_KEY"
                     ))
                 ));
+            } else if case.starts_with("codex-") {
+                if case == "codex-owner" {
+                    assert_eq!(
+                        parsed.unwrap().codex_owner_user_id,
+                        Some(Uuid::from_u128(1))
+                    );
+                } else {
+                    assert!(matches!(parsed, Err(ConfigError::InvalidCodexOwner)));
+                }
             } else {
                 let mut config = parsed.unwrap();
                 assert_eq!(config.openai_api_key.is_empty(), case != "keys");
@@ -1227,7 +1248,17 @@ mod tests {
             }
             return;
         }
-        for case in ["absent", "blank", "oauth", "token", "keys", "placeholder"] {
+        for case in [
+            "absent",
+            "blank",
+            "oauth",
+            "token",
+            "keys",
+            "placeholder",
+            "codex-missing",
+            "codex-invalid",
+            "codex-owner",
+        ] {
             let spool =
                 std::env::temp_dir().join(format!("gateway-config-{}-{case}", Uuid::new_v4()));
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -1271,6 +1302,14 @@ mod tests {
                 }
                 "placeholder" => {
                     command.env("OPENAI_API_KEY", "replace-me");
+                }
+                "codex-missing" | "codex-invalid" | "codex-owner" => {
+                    command.env("CODEX_AUTH_FILE", "/fixture/auth.json");
+                    if case == "codex-invalid" {
+                        command.env("CODEX_OWNER_USER_ID", "invalid");
+                    } else if case == "codex-owner" {
+                        command.env("CODEX_OWNER_USER_ID", Uuid::from_u128(1).to_string());
+                    }
                 }
                 _ => {}
             }

@@ -153,6 +153,7 @@ mod tests {
             openai_api_key: "upstream-key".to_owned(),
             codex_auth_file: None,
             codex_account_id: String::new(),
+            codex_owner_user_id: None,
             openai_provider: "openai-test".to_owned(),
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
@@ -778,6 +779,47 @@ mod tests {
         store.revoke(tenant, user).await.unwrap();
         assert!(store.get(tenant, user).await.unwrap().is_none());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn codex_profile_requires_an_explicit_owner_with_or_without_personal_tokens() {
+        use crate::model_registry::ProviderProfile;
+
+        let root = std::env::temp_dir().join(format!("codex-owner-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let tenant = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let mut identity = principal(tenant);
+        identity.user_id = Some(owner);
+        let profile =
+            ProviderProfile::codex_file(root.join("auth.json"), "owner".to_owned(), vec![tenant]);
+        for personal in [false, true] {
+            for configured_owner in [None, Some(Uuid::new_v4()), Some(owner)] {
+                let mut config = test_config();
+                config.codex_owner_user_id = configured_owner;
+                config.anthropic_personal_token_dir = personal.then(|| root.join("personal"));
+                let pool = db::pool(&config.database_url, 1).unwrap();
+                let spool = config.ledger_spool_dir.clone();
+                let state = AppState::new(config, pool).unwrap();
+                let selected = state.profile_for_user(&(&identity).into(), &profile).await;
+                assert_eq!(selected.is_ok(), configured_owner == Some(owner));
+                if let Ok(selected) = selected {
+                    assert!(selected.is_codex_subscription());
+                    assert!(selected.codex_credentials().is_err());
+                }
+                identity.user_id = None;
+                assert!(
+                    state
+                        .profile_for_user(&(&identity).into(), &profile)
+                        .await
+                        .is_err()
+                );
+                identity.user_id = Some(owner);
+                drop(state);
+                std::fs::remove_dir_all(spool).unwrap();
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
