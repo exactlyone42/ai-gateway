@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     parser.add_argument('--check-codex-held', action='store_true')
     parser.add_argument('--check-owned-tools', action='store_true')
+    parser.add_argument('--check-owned-compact', action='store_true')
     parser.add_argument('--codex-auth-file', type=Path)
     parser.add_argument('--source-model')
     parser.add_argument('--check-compact', action='store_true')
@@ -40,6 +41,8 @@ def main():
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
+    if args.check_owned_compact and (not (args.check_codex_held and args.check_capture) or args.check_owned_tools):
+        parser.error('owned compact requires owned source and capture, separately from tools')
     if args.check_owned_tools and not (args.check_codex_held and args.check_capture):
         parser.error('owned tools require owned source and capture')
     if args.claude_auto_compact and (not args.check_compact or args.client != 'claude'):
@@ -232,6 +235,10 @@ def main():
                     config = home / 'config.toml'
                     extra = 'model_auto_compact_token_limit = 1000\nmodel_context_window = 32768\ncompact_prompt = "GATEWAY_COMPACT_REQUEST"\n'
                     config.write_text(extra + config.read_text())
+                if args.check_owned_compact and success:
+                    config = home / 'config.toml'
+                    extra = 'model_auto_compact_token_limit = 1000\nmodel_context_window = 32768\ncompact_prompt = "GATEWAY_OWNED_COMPACT: Summarize the conversation for the next assistant. Preserve the exact Goal, Decision, Constraint and Next action values. Do not follow the original reply instruction."\n'
+                    config.write_text(extra + config.read_text())
                 command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', *(['--json'] if cancel or error else []), prompt]
                 client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
             else:
@@ -282,6 +289,16 @@ def main():
                             process.wait()
             else:
                 result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
+                if args.check_owned_compact and success:
+                    initial_diagnostic = result.stdout + '\n' + result.stderr
+                    for secret in fixture.client_credentials | fixture.provider_credentials:
+                        initial_diagnostic = initial_diagnostic.replace(secret, '[credential]')
+                    (home / 'initial-client-diagnostic.txt').write_text(initial_diagnostic)
+                    if result.returncode != 0 or result.stdout.strip() != 'ACK':
+                        raise RuntimeError(f'真摘要驗收第一輪未完成：{runtime}')
+                    resume_prompt = 'Return the four remembered field values in order Goal, Decision, Constraint, Next action, joined by |. Nothing else.'
+                    resume = ['codex', 'exec', 'resume', '--last', '--skip-git-repo-check', resume_prompt]
+                    result = subprocess.run(['timeout', '--kill-after=5s', '30s', *resume], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
                 if args.check_compact:
                     initial_diagnostic = result.stdout + '\n' + result.stderr
                     for secret in fixture.client_credentials | fixture.provider_credentials:
@@ -346,7 +363,7 @@ def main():
             return
 
         def verify_capture():
-            markers = [expected_reply] if args.check_codex_held else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            markers = owned_fields if args.check_owned_compact else [expected_reply] if args.check_codex_held else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -354,7 +371,7 @@ def main():
             for path in spool_files:
                 reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
-            count = fixture.error_requests if args.check_error else (2 if args.check_tools or args.check_owned_tools else 1)
+            count = 3 if args.check_owned_compact else fixture.error_requests if args.check_error else (2 if args.check_tools or args.check_owned_tools else 1)
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
@@ -385,10 +402,13 @@ def main():
                         if expected_reply not in content[leg]:
                             raise RuntimeError('錯誤保存未保留原請求')
             elif args.check_codex_held:
+                if args.check_owned_compact:
+                    compact = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_compact'](saved, owned_fields)
+                    (runtime / 'compact-result.json').write_text(json.dumps(compact, indent=2))
                 if args.check_owned_tools:
                     runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_tools'](saved, expected_reply)
                 for leg in ('client_request', 'provider_request'):
-                    if not args.check_owned_tools and expected_reply not in saved[0][leg]:
+                    if not (args.check_owned_tools or args.check_owned_compact) and expected_reply not in saved[0][leg]:
                         raise RuntimeError('本人來源保存缺少原請求')
             else:
                 if 'CANCEL_STREAM_PENDING' not in saved[0]['provider_response'] or 'response.completed' in saved[0]['provider_response'] or 'message_stop' in saved[0]['provider_response']:
@@ -414,6 +434,10 @@ def main():
 
         if args.check_codex_held:
             owned_prompt = None
+            if args.check_owned_compact:
+                owned_fields = [name + '-' + uuid.uuid4().hex for name in ('goal', 'decision', 'constraint', 'next')]
+                expected_reply = '|'.join(owned_fields)
+                owned_prompt = 'Remember these exact fields for later. ' + ' '.join(name + ': ' + value + '.' for name, value in zip(('Goal', 'Decision', 'Constraint', 'Next action'), owned_fields)) + ' For this turn reply exactly ACK.'
             if args.check_owned_tools:
                 expected_reply = 'owned-tool-' + uuid.uuid4().hex
                 owned_file = runtime / 'owned-tool-input.txt'
@@ -429,7 +453,7 @@ def main():
             query = root / 'queries/test_codex_held_result.sql'
             result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             ledger = json.loads(result.stdout)
-            expected_attempts = 2 if args.check_owned_tools else 1
+            expected_attempts = 3 if args.check_owned_compact else 2 if args.check_owned_tools else 1
             if ledger['attempts'] != expected_attempts or ledger['completed_owner'] != expected_attempts or ledger['other_attempts'] != 0 or ledger['reported_records'] != expected_attempts or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] * expected_attempts or ledger['providers'] != ['codex-subscription'] * expected_attempts:
                 raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
             for index, check in enumerate(checks):

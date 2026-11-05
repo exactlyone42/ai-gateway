@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_compact
 
 
 class CaptureValidationTest(unittest.TestCase):
@@ -214,3 +214,43 @@ class OwnedToolsValidationTest(unittest.TestCase):
         saved[1]['client_request'] = json.dumps(body)
         with self.assertRaisesRegex(RuntimeError, '遺失原訊息'):
             validate_owned_tools(saved, 'random-file-value')
+
+
+class OwnedCompactValidationTest(unittest.TestCase):
+    def sample(self):
+        fields = ['goal-a', 'decision-b', 'constraint-c', 'next-d']
+        summary = 'Remember:\n' + '\n'.join(fields)
+        saved = [{'provider_response': ''}, {'provider_response': 'data: ' + json.dumps({'type': 'response.output_text.done', 'text': summary})}, {'provider_response': ''}]
+        for leg in ('client_request', 'provider_request'):
+            for content, text in zip(saved, (' '.join(fields), 'GATEWAY_OWNED_COMPACT', summary)):
+                content[leg] = json.dumps({'input': [{'role': 'user', 'content': text}]})
+        return saved, fields
+
+    def test_true_summary_and_continuation_preserve_four_fields(self):
+        result = validate_owned_compact(*self.sample())
+        self.assertEqual(result['preserved_fields'], 4)
+
+    def test_summary_cannot_drop_any_field(self):
+        for index in range(4):
+            saved, fields = self.sample()
+            saved[1]['provider_response'] = saved[1]['provider_response'].replace(fields[index], 'omitted')
+            with self.assertRaisesRegex(RuntimeError, '遺失'):
+                validate_owned_compact(saved, fields)
+
+    def test_original_fields_cannot_replace_missing_summary(self):
+        for leg in ('client_request', 'provider_request'):
+            saved, fields = self.sample()
+            saved[2][leg] = saved[0][leg]
+            with self.assertRaisesRegex(RuntimeError, '未完整帶入'):
+                validate_owned_compact(saved, fields)
+
+    def test_missing_summary_instruction_is_rejected(self):
+        saved, fields = self.sample()
+        saved[1]['provider_request'] = saved[0]['provider_request']
+        with self.assertRaisesRegex(RuntimeError, '摘要指令'):
+            validate_owned_compact(saved, fields)
+
+    def test_two_turns_cannot_replace_compaction(self):
+        saved, fields = self.sample()
+        with self.assertRaisesRegex(RuntimeError, '三輪'):
+            validate_owned_compact(saved[:2], fields)

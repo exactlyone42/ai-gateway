@@ -1,6 +1,22 @@
 import json
 
 
+def validate_owned_compact(saved, fields):
+    if len(saved) != 3 or len(fields) != 4 or len(set(fields)) != 4:
+        raise RuntimeError('真摘要驗收缺少三輪或四項不同內容')
+    events = [json.loads(line[5:].lstrip()) for line in saved[1]['provider_response'].splitlines() if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]')]
+    summary = '\n'.join(event['text'] for event in events if event.get('type') == 'response.output_text.done')
+    if not summary or any(value not in summary for value in fields):
+        raise RuntimeError('真摘要遺失目標、決策、限制或下一步')
+    for leg in ('client_request', 'provider_request'):
+        inputs = [json.dumps(json.loads(content[leg]).get('input', []), ensure_ascii=False) for content in saved]
+        if any(value not in inputs[0] for value in fields) or 'GATEWAY_OWNED_COMPACT' not in inputs[1]:
+            raise RuntimeError('真摘要請求未保留原內容或摘要指令')
+        if json.dumps(summary, ensure_ascii=False)[1:-1] not in inputs[2]:
+            raise RuntimeError('真摘要未完整帶入接續請求')
+    return {'compact_requests': 1, 'resumed_requests': 1, 'preserved_fields': len(fields), 'summary_characters': len(summary)}
+
+
 def validate_owned_usage(saved, usage_records, records, expected_reply):
     if not saved or len(saved) != len(records) or len(usage_records) != len(records) or len({row['id'] for row in usage_records}) != len(records) or {row['id'] for row in usage_records} != {record['capture_id'] for record in records}:
         raise RuntimeError('本人來源保存與用量數量不符')
