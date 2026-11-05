@@ -1,0 +1,1 @@
+DROP INDEX quotas_active_scope_idx

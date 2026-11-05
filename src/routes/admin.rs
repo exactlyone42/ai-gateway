@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, IncidentCreate,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, GroupCreate, IncidentCreate,
         IncidentEventCreate, IncidentListQuery, IncidentPatch, LifecycleInput, ListQuery,
         ReportListQuery, ReportWindowQuery, RequestListQuery, ResourceKind, ResourceMutationOutput,
         ResourcePage, ResourceTarget, RotateCredentialInput, SessionOutput, UsageQuery, authorize,
@@ -58,6 +58,12 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/admin/v1/incidents/{id}/events",
             post(append_incident_event),
+        )
+        .route("/admin/v1/groups", get(list_groups).post(create_group))
+        .route("/admin/v1/groups/{group}/members", get(list_group_members))
+        .route(
+            "/admin/v1/groups/{group}/members/{user}",
+            post(add_group_member).delete(remove_group_member),
         )
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
@@ -444,6 +450,91 @@ async fn get_resource(
 ) -> Result<Json<serde_json::Value>, AdminError> {
     let kind = resource.parse::<ResourceKind>()?;
     Ok(Json(state.admin.get_resource(&context, kind, id).await?))
+}
+
+async fn list_groups(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ResourcePage>, AdminError> {
+    Ok(Json(state.admin.list_groups(&context, query).await?))
+}
+
+async fn list_group_members(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(group): Path<uuid::Uuid>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ResourcePage>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .list_group_members(&context, group, query)
+            .await?,
+    ))
+}
+
+async fn create_group(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<GroupCreate>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .admin
+                .create_group(&context, input, source, peer.ip(), request_id(&headers)?)
+                .await?,
+        ),
+    ))
+}
+
+async fn add_group_member(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, user)): Path<(uuid::Uuid, uuid::Uuid)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    state
+        .admin
+        .change_group_member(
+            &context,
+            (group, user),
+            true,
+            source,
+            peer.ip(),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_group_member(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, user)): Path<(uuid::Uuid, uuid::Uuid)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    state
+        .admin
+        .change_group_member(
+            &context,
+            (group, user),
+            false,
+            source,
+            peer.ip(),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_resource(
@@ -1710,7 +1801,9 @@ mod tests {
             )
             .header("content-type", "application/json")
             .header("x-request-id", "operator-allowed")
-            .body(Body::from(json!({"display_name": "allowed"}).to_string()))
+            .body(Body::from(
+                json!({"display_name": "allowed", "email":"person@example.com"}).to_string(),
+            ))
             .unwrap();
         operator_request.extensions_mut().insert(ConnectInfo(peer));
         let allowed = routes::router(state.clone())
@@ -1718,6 +1811,268 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allowed.status(), StatusCode::CREATED);
+        let user_body = axum::body::to_bytes(allowed.into_body(), 4096)
+            .await
+            .unwrap();
+        let user: serde_json::Value = serde_json::from_slice(&user_body).unwrap();
+        let user_id = user["resource"]["id"].as_str().unwrap();
+        let search = Request::builder()
+            .uri("/admin/v1/users?email=PERSON%40example.com")
+            .header(
+                "authorization",
+                format!("Bearer {}", viewer_session.access_token),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let found = routes::router(state.clone()).oneshot(search).await.unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(found.into_body(), 4096).await.unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], user_id);
+        let mut duplicate = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/users")
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "duplicate-email")
+            .body(Body::from(
+                json!({"display_name":"duplicate", "email":"PERSON@example.com"}).to_string(),
+            ))
+            .unwrap();
+        duplicate.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(duplicate)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let mut patch = Request::builder()
+            .method("PATCH")
+            .uri(format!("/admin/v1/users/{user_id}"))
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "clear-email")
+            .body(Body::from(json!({"version":1,"email":null}).to_string()))
+            .unwrap();
+        patch.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone()).oneshot(patch).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(updated["resource"]["email"].is_null());
+
+        let mut create_key = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/credentials")
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "create-key")
+            .body(Body::from(
+                json!({"display_name":"key", "user_id":user_id}).to_string(),
+            ))
+            .unwrap();
+        create_key.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(create_key)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let credential: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let credential_id = credential["resource"]["id"].as_str().unwrap();
+        let secret = credential["secret"].as_str().unwrap();
+        let check_key = || {
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let before = routes::router(state.clone())
+            .oneshot(check_key())
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK);
+        for (version, status, expected) in [
+            (1, "disabled", StatusCode::UNAUTHORIZED),
+            (2, "active", before.status()),
+        ] {
+            let mut request = Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/v1/credentials/{credential_id}"))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("content-type", "application/json")
+                .header("x-request-id", "key-status")
+                .body(Body::from(
+                    json!({"version":version, "status":status}).to_string(),
+                ))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let updated = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(updated.status(), StatusCode::OK);
+            let result = routes::router(state.clone())
+                .oneshot(check_key())
+                .await
+                .unwrap();
+            assert_eq!(result.status(), expected);
+        }
+
+        let mut group_request = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/groups")
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "create-group")
+            .body(Body::from(json!({"display_name":"group"}).to_string()))
+            .unwrap();
+        group_request.extensions_mut().insert(ConnectInfo(peer));
+        let group_response = routes::router(state.clone())
+            .oneshot(group_request)
+            .await
+            .unwrap();
+        assert_eq!(group_response.status(), StatusCode::CREATED);
+        let group_body = axum::body::to_bytes(group_response.into_body(), 4096)
+            .await
+            .unwrap();
+        let group: serde_json::Value = serde_json::from_slice(&group_body).unwrap();
+        let group_id = group["id"].as_str().unwrap();
+        let mut membership = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/v1/groups/{group_id}/members/{}",
+                Uuid::new_v4()
+            ))
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("x-request-id", "operator-member-denied")
+            .body(Body::empty())
+            .unwrap();
+        membership.extensions_mut().insert(ConnectInfo(peer));
+        let denied = routes::router(state.clone())
+            .oneshot(membership)
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let member_path = format!("/admin/v1/groups/{group_id}/members/{user_id}");
+        for (method, expected) in [
+            ("POST", StatusCode::NO_CONTENT),
+            ("POST", StatusCode::CONFLICT),
+            ("DELETE", StatusCode::NO_CONTENT),
+            ("DELETE", StatusCode::NOT_FOUND),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(&member_path)
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("x-request-id", "member-action")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if method == "POST" && expected == StatusCode::NO_CONTENT {
+                let list = Request::builder()
+                    .uri(format!("/admin/v1/groups/{group_id}/members"))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", viewer_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap();
+                let response = routes::router(state.clone()).oneshot(list).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(page["items"][0]["user_id"], user_id);
+            }
+        }
+        let foreign_user = Uuid::new_v4();
+        sqlx::query(include_str!("../../tests/foreign_member_fixture.sql"))
+            .bind(foreign_user)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut foreign_request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/v1/groups/{group_id}/members/{foreign_user}"
+            ))
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("x-request-id", "foreign-member")
+            .body(Body::empty())
+            .unwrap();
+        foreign_request.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(foreign_request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        for (path, body) in [
+            (
+                "/admin/v1/policies",
+                json!({"policy_key":"missing-group", "revision":1, "group_id":Uuid::new_v4(), "configuration":{}}),
+            ),
+            (
+                "/admin/v1/quotas",
+                json!({"quota_key":"missing-group", "revision":1, "group_id":Uuid::new_v4(), "configuration":{"mode":"hard","limits":{"requests_per_minute":1}}}),
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("content-type", "application/json")
+                .header("x-request-id", "missing-group-target")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
 
         let mut oversized_request = Request::builder()
             .method("POST")

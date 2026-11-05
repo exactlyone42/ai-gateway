@@ -1,0 +1,1 @@
+ALTER TABLE policies DROP CONSTRAINT policies_group_tenant_fk

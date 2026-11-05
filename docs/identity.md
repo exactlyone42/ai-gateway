@@ -7,6 +7,8 @@
 
 ## 資料模型
 
+管理服務的使用者 email 可不填；同一 tenant 的 email 不分大小寫且不得重複。修改時不提供 email 保留原值，提供 `null` 清空；列表可用 `email` 精確搜尋，忽略大小寫且只搜尋目前 tenant。建立及修改的稽核紀錄不保存 email。
+
 `users`、`devices`、`clients`、`agents` 是四個獨立維度，彼此沒有父子外鍵。
 `credentials` 用 nullable foreign key 組成一次請求的 `PrincipalContext`。每個外鍵都連同
 `tenant_id` 驗證，因此無法把不同 tenant 的維度拼成一個 Principal。
@@ -32,6 +34,8 @@
 | revoke | active／disabled → revoked，立即失效 cache |
 | expire | 解析時把命中的到期列改成 expired；控制面亦可一次 batch 處理 tenant |
 
+停用使用者、裝置、客戶端或代理身分時，原有行為會撤銷綁定的金鑰；重新啟用身分不會恢復已撤銷的金鑰。若只需暫時停用並恢復金鑰，應操作金鑰本身的停用與啟用。
+
 輪替 overlap 必須介於 1 秒和 15 分鐘，同一舊 key 只能建立一個 successor。解析／cache 填入
 與生命週期異動由同一把 async read/write gate 線性化，異動成功後不會再填回舊 cache。
 第一版只跑單一閘道實例；W19 維持這個契約。改成多實例前必須另行補跨實例失效與 durable
@@ -42,10 +46,10 @@ counter 機制，並量測新增的資料庫成本。
 認證中介層先處理既有的 development bootstrap key，再解析正式 `aigw_` key：
 
 1. 從 key 取得 environment 與 tenant，計算 fingerprint。
-2. cache key 同時包含 tenant 與 fingerprint；命中後仍以常數時間驗 HMAC。
+2. cache key 同時包含 tenant 與 fingerprint；命中後先查資料庫確認憑證及其身分仍有效，再以常數時間驗 HMAC。
 3. 未命中時用一條 tenant-scoped SQL 取得 credential、更新 `last_used_at` 並組成 Principal。
 4. 命中的過期列在同一個 SQL statement 轉為 `expired`；無效狀態回 401。
-5. cache miss 且 DB 不可用回 503；缺少資料列指定的 HMAC key 版本也回 503。
+5. 資料庫不可用時，即使快取命中也回 503；缺少資料列指定的 HMAC key 版本也回 503。
 
 Gateway 的 PostgreSQL connection 設 1 秒 `lock_timeout`、2 秒 `statement_timeout` 與 2 秒
 pool acquire timeout。credential row 被其他 transaction 鎖住時，認證會在期限內回 503 並釋放
@@ -88,3 +92,7 @@ SHA-256 比對且不寫 DB。其他組合若誤設，程序會拒絕啟動；未
 `./scripts/check.sh all` 會啟動一個有界的本機 PostgreSQL，讓 `sqlx::test` 在隔離資料庫套用真
 migration。測試涵蓋跨 tenant 外鍵、狀態轉移、單一 successor、HMAC key overlap、DB 故障、
 cache／撤銷競態、production bootstrap 拒絕，以及五表明文掃描的陰性與注入正對照。
+
+## 群組與權杖歸屬（2026-11-01 決定，S04 前尚未實作）
+
+同一個人的多個帳號（不同 email、角色）各是一個 user，放進同一個群組；供應商權杖綁在群組，查找順序是使用者自己的、再所屬群組的。放棄的做法：在 user 之上新增「人」，或讓一個 user 掛多個 email，因為都更複雜。群組不檢查成員是否同一個人，把不同人放進掛有權杖的群組就是共用訂閱席次，由管理者負責。

@@ -5,7 +5,7 @@ import { adminRequest } from './api'
 import { useAuth } from './auth'
 import { DataTable, ErrorState, Loading, Page, RangePicker, SecretDialog, Status, Unavailable } from './components'
 import { compactNumber, formatCost, formatDate, reportWindow, type RangeKey } from './time'
-import type { CursorPage, JsonObject } from './types'
+import type { CursorPage, JsonObject, ResourcePage } from './types'
 
 function useAdminQuery<T>(key: unknown[], path: string, enabled = true) {
   const auth = useAuth()
@@ -65,6 +65,7 @@ export function IdentitiesPage() {
   const query = useAdminQuery<JsonObject>(['identity-map'], '/identity-map')
   const dimensions = ['user', 'device', 'client', 'agent']
   const [creating, setCreating] = useState(false)
+  const [kind, setKind] = useState('users')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const canWrite = auth.role !== 'viewer'
@@ -72,13 +73,15 @@ export function IdentitiesPage() {
     event.preventDefault(); setBusy(true); setError(null)
     const values = new FormData(event.currentTarget)
     try {
-      await adminRequest(`/${values.get('kind')}`, auth.token!, auth.clear, { method: 'POST', body: JSON.stringify({ display_name: values.get('name') }) })
+      const body = { display_name: values.get('name'), ...(kind === 'users' && values.get('email') ? { email: values.get('email') } : {}) }
+      await adminRequest(`/${kind}`, auth.token!, auth.clear, { method: 'POST', body: JSON.stringify(body) })
       setCreating(false)
       await queryClient.invalidateQueries({ queryKey: ['identity-map'] })
+      await queryClient.invalidateQueries({ queryKey: ['users'] })
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
     finally { setBusy(false) }
   }
-  return <Page title="Identities" actions={canWrite ? <button onClick={() => setCreating(true)}><Plus size={16} />Create identity</button> : undefined}>{error && <div className="state error">{error}</div>}<QueryBody query={query}>{(data) => <>
+  return <Page title="Identities" actions={canWrite ? <button onClick={() => setCreating(true)}><Plus size={16} />Create identity</button> : undefined}>{error && <div className="state error">{error}</div>}<UserEmails canWrite={canWrite} /><Groups canWrite={canWrite} canManageMembers={auth.role === 'admin'} /><QueryBody query={query}>{(data) => <>
     <DataTable rows={data.paths ?? []} columns={[
       { key: 'user', label: 'User', render: (row) => row.user?.display_name ?? 'Unassigned' },
       { key: 'device', label: 'Device', render: (row) => row.device?.display_name ?? 'Unassigned' },
@@ -87,7 +90,55 @@ export function IdentitiesPage() {
       { key: 'credential', label: 'Credential', render: (row) => <><strong>{row.credential.display_name}</strong><small className="subline">{row.credential.key_prefix} · {row.credential.id}</small></> },
     ]} />
     <section className="section"><h2>Unassociated entities</h2><div className="entity-columns">{dimensions.map((dimension) => <div key={dimension}><h3>{dimension}</h3>{(data.unassociated?.[`${dimension}s`] ?? []).map((item: JsonObject) => <p key={item.id}>{item.display_name}</p>)}</div>)}</div></section>
-  </>}</QueryBody>{creating && <div className="dialog-backdrop"><form className="dialog" onSubmit={(event) => void create(event)}><header><h2>Create identity</h2><button type="button" className="icon-button" title="Close" onClick={() => setCreating(false)}><X /></button></header><label>Dimension<select name="kind"><option value="users">User</option><option value="devices">Device</option><option value="clients">Client</option><option value="agents">Agent</option></select></label><label>Name<input name="name" required maxLength={120} /></label><footer><button type="button" className="secondary" onClick={() => setCreating(false)}>Cancel</button><button disabled={busy}>{busy ? 'Creating' : 'Create'}</button></footer></form></div>}</Page>
+  </>}</QueryBody>{creating && <div className="dialog-backdrop"><form className="dialog" onSubmit={(event) => void create(event)}><header><h2>Create identity</h2><button type="button" className="icon-button" title="Close" onClick={() => setCreating(false)}><X /></button></header><label>Dimension<select name="kind" value={kind} onChange={(event) => setKind(event.target.value)}><option value="users">User</option><option value="devices">Device</option><option value="clients">Client</option><option value="agents">Agent</option></select></label><label>Name<input name="name" required maxLength={120} /></label>{kind === 'users' && <label>Email<input name="email" type="email" maxLength={320} /></label>}<footer><button type="button" className="secondary" onClick={() => setCreating(false)}>Cancel</button><button disabled={busy}>{busy ? 'Creating' : 'Create'}</button></footer></form></div>}</Page>
+}
+
+function Groups({ canWrite, canManageMembers }: { canWrite: boolean; canManageMembers: boolean }) {
+  const auth = useAuth()
+  const client = useQueryClient()
+  const [group, setGroup] = useState('')
+  const [groupAfter, setGroupAfter] = useState('')
+  const [userAfter, setUserAfter] = useState('')
+  const [memberAfter, setMemberAfter] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const groups = useAdminQuery<ResourcePage>(['groups', groupAfter], `/groups?limit=100${groupAfter ? `&after=${groupAfter}` : ''}`)
+  const users = useAdminQuery<ResourcePage>(['users', 'group-members', userAfter], `/users?limit=100${userAfter ? `&after=${userAfter}` : ''}`)
+  const members = useAdminQuery<ResourcePage>(['group-members', group, memberAfter], `/groups/${group}/members?limit=100${memberAfter ? `&after=${memberAfter}` : ''}`, Boolean(group))
+  async function change(path: string, method: string, body?: JsonObject) {
+    setError(null)
+    try {
+      await adminRequest(path, auth.token!, auth.clear, { method, ...(body ? { body: JSON.stringify(body) } : {}) })
+      await client.invalidateQueries({ queryKey: ['groups'] })
+      await client.invalidateQueries({ queryKey: ['group-members'] })
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '操作失敗') }
+  }
+  return <section className="section"><h2>群組與成員</h2>{error && <div className="state error">{error}</div>}
+    {canWrite && <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const name = String(new FormData(form).get('name') ?? '').trim(); if (name) void change('/groups', 'POST', { display_name: name }) }}><label>群組名稱<input name="name" required maxLength={120} /></label><button>建立群組</button></form>}
+    <QueryBody query={groups}>{(data) => <><label>選擇群組<select value={group} onChange={(event) => { setGroup(event.target.value); setMemberAfter('') }}><option value="">請選擇</option>{data.items.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>{groupAfter && <button onClick={() => { setGroupAfter(''); setGroup('') }}>回第一頁</button>}{data.next_after && <button onClick={() => { setGroupAfter(data.next_after!); setGroup('') }}>下一頁群組</button>}</>}</QueryBody>
+    {group && <QueryBody query={members}>{(data) => <><DataTable rows={data.items} columns={[{ key: 'user_id', label: '使用者', render: (row) => users.data?.items.find((user) => user.id === row.user_id)?.display_name ?? row.user_id }, ...(canManageMembers ? [{ key: 'actions', label: '操作', render: (row: JsonObject) => <button onClick={() => void change(`/groups/${group}/members/${row.user_id}`, 'DELETE')}>移除</button> }] : [])]} />{memberAfter && <button onClick={() => setMemberAfter('')}>回第一頁成員</button>}{data.next_after && <button onClick={() => setMemberAfter(data.next_after!)}>下一頁成員</button>}{canManageMembers && <form onSubmit={(event) => { event.preventDefault(); const user = String(new FormData(event.currentTarget).get('user') ?? ''); if (user) void change(`/groups/${group}/members/${user}`, 'POST') }}><label>加入使用者<select name="user" required><option value="">請選擇</option>{(users.data?.items ?? []).map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select></label><button>加入</button>{userAfter && <button type="button" onClick={() => setUserAfter('')}>回第一頁使用者</button>}{users.data?.next_after && <button type="button" onClick={() => setUserAfter(users.data!.next_after!)}>下一頁使用者</button>}</form>}</>}</QueryBody>}
+  </section>
+}
+
+function UserEmails({ canWrite }: { canWrite: boolean }) {
+  const auth = useAuth()
+  const queryClient = useQueryClient()
+  const [search, setSearch] = useState('')
+  const [email, setEmail] = useState('')
+  const [editing, setEditing] = useState<JsonObject | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const query = useAdminQuery<ResourcePage>(['users', search], `/users?limit=100${search ? `&email=${encodeURIComponent(search)}` : ''}`)
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!editing) return
+    setError(null)
+    try {
+      await adminRequest(`/users/${editing.id}`, auth.token!, auth.clear, { method: 'PATCH', body: JSON.stringify({ version: editing.version, email: email || null }) })
+      setEditing(null)
+      await queryClient.invalidateQueries({ queryKey: ['users'] })
+      await queryClient.invalidateQueries({ queryKey: ['identity-map'] })
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed') }
+  }
+  return <section className="section"><h2>使用者 email</h2><form onSubmit={(event) => { event.preventDefault(); setSearch(String(new FormData(event.currentTarget).get('search') ?? '').trim()) }}><label>精確搜尋 email<input name="search" type="email" /></label><button>搜尋</button></form>{error && <div className="state error">{error}</div>}<QueryBody query={query}>{(data) => <><DataTable rows={data.items} columns={[{ key: 'display_name', label: '姓名' }, { key: 'email', label: 'Email', render: (row) => row.email ?? '未填寫' }, ...(canWrite ? [{ key: 'actions', label: '操作', render: (row: JsonObject) => <button onClick={() => { setEditing(row); setEmail(row.email ?? '') }}>編輯 email</button> }] : [])]} />{data.next_after && <p>只顯示前 100 筆，請使用 email 搜尋。</p>}</>}</QueryBody>{editing && <div className="dialog-backdrop"><form className="dialog" onSubmit={(event) => void save(event)}><header><h2>編輯 email</h2><button type="button" className="icon-button" title="關閉" onClick={() => setEditing(null)}><X /></button></header><label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" maxLength={320} /></label><p>留空會清除 email。</p><footer><button type="button" className="secondary" onClick={() => setEditing(null)}>取消</button><button>儲存</button></footer></form></div>}</section>
 }
 
 export function CredentialsPage() {
@@ -125,6 +176,7 @@ export function CredentialsPage() {
       { key: 'last_used_at', label: 'Last used', render: (row) => formatDate(row.last_used_at) },
       { key: 'status', label: 'Status', render: (row) => <Status value={row.status} /> },
       ...(canWrite ? [{ key: 'actions', label: 'Actions', render: (row: JsonObject) => <div className="row-actions">
+        {(row.status === 'active' || row.status === 'disabled') && <button disabled={busy} onClick={(event) => { event.stopPropagation(); void mutate(`/credentials/${row.id}`, { method: 'PATCH', body: JSON.stringify({ version: row.version, status: row.status === 'active' ? 'disabled' : 'active' }) }) }}>{row.status === 'active' ? '停用' : '啟用'}</button>}
         <button className="icon-button" title="Rotate credential" disabled={busy} onClick={(event) => { event.stopPropagation(); void mutate(`/credentials/${row.id}/rotate`, { method: 'POST', body: JSON.stringify({ version: row.version, overlap_seconds: 60 }) }) }}><RefreshCw /></button>
         <button className="icon-button danger" title="Revoke credential" disabled={busy} onClick={(event) => { event.stopPropagation(); void mutate(`/credentials/${row.id}?version=${row.version}`, { method: 'DELETE' }) }}><ShieldOff /></button>
       </div> }] : []),
@@ -376,7 +428,7 @@ export function GovernancePage() {
 }
 
 function policyScope(row: JsonObject) {
-  return ['user', 'device', 'client', 'agent', 'credential'].find((scope) => row[`${scope}_id`]) ?? 'global'
+  return ['user', 'group', 'device', 'client', 'agent', 'credential'].find((scope) => row[`${scope}_id`]) ?? 'global'
 }
 
 function policyTarget(row: JsonObject) {
@@ -386,13 +438,19 @@ function policyTarget(row: JsonObject) {
 }
 
 function quotaScope(row: JsonObject) {
-  return ['user', 'device', 'client', 'agent', 'credential', 'model', 'provider'].find((scope) => row[`${scope}_id`]) ?? 'global'
+  return ['user', 'group', 'device', 'client', 'agent', 'credential', 'model', 'provider'].find((scope) => row[`${scope}_id`]) ?? 'global'
 }
 
 function quotaTarget(row: JsonObject) {
   const scope = quotaScope(row)
   if (scope === 'global') return scope
   return `${scope} · ${String(row[`${scope}_id`]).slice(0, 8)}`
+}
+
+export function GroupTarget() {
+  const [after, setAfter] = useState('')
+  const groups = useAdminQuery<ResourcePage>(['groups', after], `/groups?limit=100${after ? `&after=${after}` : ''}`)
+  return <QueryBody query={groups}>{(data) => <><label>群組<select name="scope_id" required key={after}><option value="">請選擇</option>{data.items.map((group) => <option key={group.id} value={group.id}>{group.display_name} · {String(group.id).slice(0, 8)}</option>)}</select></label>{after && <button type="button" onClick={() => setAfter('')}>回第一頁</button>}{data.next_after && <button type="button" onClick={() => setAfter(data.next_after!)}>下一頁群組</button>}</>}</QueryBody>
 }
 
 function PolicyDialog({ initial, identities, busy, onClose, onSubmit }: { initial: JsonObject | null; identities?: JsonObject; busy: boolean; onClose: () => void; onSubmit: (path: string, body: JsonObject, method: string) => void }) {
@@ -415,14 +473,14 @@ function PolicyDialog({ initial, identities, busy, onClose, onSubmit }: { initia
     if (scope !== 'global' && !scopedId) { setValidationError('Select a scope target.'); return }
     onSubmit('/policies', {
       policy_key: data.get('policy_key'), revision: Number(data.get('revision')),
-      user_id: scope === 'user' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
+      user_id: scope === 'user' ? scopedId : null, group_id: scope === 'group' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
       client_id: scope === 'client' ? scopedId : null, agent_id: scope === 'agent' ? scopedId : null,
       credential_id: scope === 'credential' ? scopedId : null, configuration,
     }, 'POST')
   }
   return <div className="dialog-backdrop"><form className="dialog policy-dialog" onSubmit={submit}><header><h2>{initial ? 'Edit policy' : 'Create policy'}</h2><button type="button" className="icon-button" title="Close" onClick={onClose}><X /></button></header>
     {validationError && <div className="state error">{validationError}</div>}
-    {!initial && <><label>Policy key<input name="policy_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'device', 'client', 'agent', 'credential'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
+    {!initial && <><label>Policy key<input name="policy_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'group', 'device', 'client', 'agent', 'credential'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope === 'group' ? <GroupTarget /> : scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
     <label>Configuration<textarea name="configuration" required spellCheck={false} defaultValue={JSON.stringify(initial?.configuration ?? { defaults: { workload_class: 'interactive', urgency: 'normal', quality: 'standard', budget_class: 'normal' } }, null, 2)} /></label>
     <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>
   </form></div>
@@ -464,7 +522,7 @@ function QuotaDialog({ initial, identities, catalog, busy, onClose, onSubmit }: 
     if (scope !== 'global' && !scopedId) { setValidationError('Select a scope target.'); return }
     onSubmit('/quotas', {
       quota_key: data.get('quota_key'), revision: Number(data.get('revision')),
-      user_id: scope === 'user' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
+      user_id: scope === 'user' ? scopedId : null, group_id: scope === 'group' ? scopedId : null, device_id: scope === 'device' ? scopedId : null,
       client_id: scope === 'client' ? scopedId : null, agent_id: scope === 'agent' ? scopedId : null,
       credential_id: scope === 'credential' ? scopedId : null, model_id: scope === 'model' ? scopedId : null,
       provider_id: scope === 'provider' ? scopedId : null, configuration,
@@ -473,7 +531,7 @@ function QuotaDialog({ initial, identities, catalog, busy, onClose, onSubmit }: 
   const configured = initial?.configuration?.limits ?? {}
   return <div className="dialog-backdrop"><form className="dialog policy-dialog" onSubmit={submit}><header><h2>{initial ? 'Edit quota' : 'Create quota'}</h2><button type="button" className="icon-button" title="Close" onClick={onClose}><X /></button></header>
     {validationError && <div className="state error">{validationError}</div>}
-    {!initial && <><label>Quota key<input name="quota_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'device', 'client', 'agent', 'credential', 'model', 'provider'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name ?? entity.public_model_id ?? entity.provider_key} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
+    {!initial && <><label>Quota key<input name="quota_key" required maxLength={200} /></label><label>Revision<input name="revision" type="number" min="1" required defaultValue="1" /></label><label>Scope<select name="scope" value={scope} onChange={(event) => setScope(event.target.value)}>{['global', 'user', 'group', 'device', 'client', 'agent', 'credential', 'model', 'provider'].map((value) => <option key={value}>{value}</option>)}</select></label>{scope === 'group' ? <GroupTarget /> : scope !== 'global' && <label>Scope target<select name="scope_id" required><option value="">Select target</option>{entities.map((entity: JsonObject) => <option key={entity.id} value={entity.id}>{entity.display_name ?? entity.public_model_id ?? entity.provider_key} · {String(entity.id).slice(0, 8)}</option>)}</select></label>}</>}
     <label>Mode<select name="mode" defaultValue={initial?.configuration?.mode ?? 'hard'}><option value="hard">Hard</option><option value="soft">Soft</option></select></label>
     <fieldset><legend>Limits</legend>{quotaLimits.map(([key, label]) => <label key={key}>{label}<input name={key} type="number" min="0" step="1" defaultValue={configured[key] ?? (key === 'requests_per_minute' && !initial ? 100 : '')} /></label>)}</fieldset>
     <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button disabled={busy}>{busy ? 'Saving' : initial ? 'Save' : 'Create'}</button></footer>

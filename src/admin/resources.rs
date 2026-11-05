@@ -16,6 +16,18 @@ use super::{
     AdminContext, AdminError, AdminService, AuditEntry, append_audit, map_conflict, validate_name,
 };
 
+fn map_group_target_error(error: sqlx::Error) -> AdminError {
+    if error
+        .as_database_error()
+        .and_then(|database| database.constraint())
+        .is_some_and(|name| matches!(name, "policies_group_tenant_fk" | "quotas_group_tenant_fk"))
+    {
+        AdminError::NotFound
+    } else {
+        AdminError::Database(error)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
     Users,
@@ -116,26 +128,6 @@ impl ResourceKind {
     }
 }
 
-const LIST_RESOURCES: &str = r#"
-    SELECT id, resource - $5::text[] AS resource
-    FROM (
-        SELECT 'users' AS kind, id, tenant_id, to_jsonb(users) AS resource FROM users
-        UNION ALL SELECT 'devices', id, tenant_id, to_jsonb(devices) FROM devices
-        UNION ALL SELECT 'clients', id, tenant_id, to_jsonb(clients) FROM clients
-        UNION ALL SELECT 'agents', id, tenant_id, to_jsonb(agents) FROM agents
-        UNION ALL SELECT 'credentials', id, tenant_id, to_jsonb(credentials) FROM credentials
-        UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers
-        UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models
-        UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases
-        UNION ALL SELECT 'model-task-profiles', id, tenant_id, to_jsonb(model_task_profiles) FROM model_task_profiles
-        UNION ALL SELECT 'task-classifier-configs', id, tenant_id, to_jsonb(task_classifier_configs) FROM task_classifier_configs
-        UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies
-        UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas
-    ) resources
-    WHERE kind = $1 AND tenant_id = $2 AND id > $3
-    ORDER BY id LIMIT $4
-"#;
-
 const GET_RESOURCE: &str = r#"
     SELECT resource - $4::text[]
     FROM (
@@ -159,6 +151,7 @@ const GET_RESOURCE: &str = r#"
 pub struct ListQuery {
     pub limit: Option<u16>,
     pub after: Option<Uuid>,
+    pub email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +183,7 @@ pub struct ResourceMutationOutput {
 #[serde(deny_unknown_fields)]
 struct IdentityCreate {
     display_name: String,
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -281,6 +275,7 @@ struct TaskClassifierConfigCreate {
 struct PolicyCreate {
     policy_key: String,
     revision: i64,
+    group_id: Option<Uuid>,
     user_id: Option<Uuid>,
     device_id: Option<Uuid>,
     client_id: Option<Uuid>,
@@ -294,6 +289,7 @@ struct PolicyCreate {
 struct QuotaCreate {
     quota_key: String,
     revision: i64,
+    group_id: Option<Uuid>,
     user_id: Option<Uuid>,
     device_id: Option<Uuid>,
     client_id: Option<Uuid>,
@@ -310,6 +306,30 @@ struct IdentityPatch {
     version: i64,
     display_name: Option<String>,
     status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_email")]
+    email: Option<Option<String>>,
+}
+
+fn deserialize_optional_email<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn validate_email(email: &str) -> Result<(), AdminError> {
+    if email.trim().is_empty() || email.chars().count() > 320 {
+        return Err(AdminError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn audit_resource(kind: ResourceKind, mut value: Value) -> Value {
+    if kind == ResourceKind::Users
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("email");
+    }
+    value
 }
 
 #[derive(Deserialize)]
@@ -318,6 +338,7 @@ struct CredentialPatch {
     version: i64,
     display_name: Option<String>,
     expires_at: Option<DateTime<Utc>>,
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -461,22 +482,36 @@ impl AdminService {
         if limit == 0 || limit > 100 {
             return Err(AdminError::InvalidRequest);
         }
+        if let Some(email) = query.email.as_deref() {
+            if kind != ResourceKind::Users {
+                return Err(AdminError::InvalidRequest);
+            }
+            validate_email(email)?;
+        }
         let after = query.after.unwrap_or(Uuid::nil());
-        let rows = sqlx::query(LIST_RESOURCES)
-            .bind(kind.slug())
-            .bind(context.tenant_id)
-            .bind(after)
-            .bind(i64::from(limit) + 1)
-            .bind(kind.hidden_fields())
-            .fetch_all(&self.pool)
-            .await?;
+        let hidden_fields = kind
+            .hidden_fields()
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query_file!(
+            "queries/admin/list_resources.sql",
+            kind.slug(),
+            context.tenant_id,
+            after,
+            i64::from(limit) + 1,
+            &hidden_fields,
+            query.email.as_deref()
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let has_more = rows.len() > usize::from(limit);
         let visible = rows.into_iter().take(usize::from(limit));
         let mut items = Vec::with_capacity(usize::from(limit));
         let mut last_id = None;
         for row in visible {
-            last_id = Some(row.try_get::<Uuid, _>("id")?);
-            items.push(row.try_get("resource")?);
+            last_id = Some(row.id);
+            items.push(row.resource);
         }
         Ok(ResourcePage {
             items,
@@ -518,28 +553,45 @@ impl AdminService {
             | ResourceKind::Agents => {
                 let input: IdentityCreate = decode(payload)?;
                 validate_name(&input.display_name)?;
-                let statement = match kind {
-                    ResourceKind::Users => {
-                        "INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(users)"
+                if let Some(email) = input.email.as_deref() {
+                    if kind != ResourceKind::Users {
+                        return Err(AdminError::InvalidRequest);
                     }
-                    ResourceKind::Devices => {
-                        "INSERT INTO devices (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(devices)"
-                    }
-                    ResourceKind::Clients => {
-                        "INSERT INTO clients (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(clients)"
-                    }
-                    ResourceKind::Agents => {
-                        "INSERT INTO agents (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(agents)"
-                    }
-                    _ => return Err(AdminError::Unavailable),
-                };
-                let value: Value = sqlx::query_scalar(statement)
-                    .bind(id)
-                    .bind(context.tenant_id)
-                    .bind(input.display_name)
+                    validate_email(email)?;
+                }
+                if kind == ResourceKind::Users {
+                    let value: Value = sqlx::query_file_scalar!(
+                        "queries/admin/user_create.sql",
+                        id,
+                        context.tenant_id,
+                        input.display_name,
+                        input.email
+                    )
                     .fetch_one(&mut *transaction)
-                    .await?;
-                (value, None)
+                    .await
+                    .map_err(map_conflict)?;
+                    (value, None)
+                } else {
+                    let statement = match kind {
+                        ResourceKind::Devices => {
+                            "INSERT INTO devices (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(devices)"
+                        }
+                        ResourceKind::Clients => {
+                            "INSERT INTO clients (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(clients)"
+                        }
+                        ResourceKind::Agents => {
+                            "INSERT INTO agents (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(agents)"
+                        }
+                        _ => return Err(AdminError::Unavailable),
+                    };
+                    let value: Value = sqlx::query_scalar(statement)
+                        .bind(id)
+                        .bind(context.tenant_id)
+                        .bind(input.display_name)
+                        .fetch_one(&mut *transaction)
+                        .await?;
+                    (value, None)
+                }
             }
             ResourceKind::Credentials => {
                 let input: CredentialCreate = decode(payload)?;
@@ -734,6 +786,7 @@ impl AdminService {
                 if input.revision <= 0
                     || input.policy_key.len() > 200
                     || [
+                        input.group_id,
                         input.user_id,
                         input.device_id,
                         input.client_id,
@@ -749,34 +802,23 @@ impl AdminService {
                 }
                 let configuration = Value::Object(input.configuration);
                 validate_policy_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
-                let value: Value = sqlx::query_scalar(
-                    r#"
-                    INSERT INTO policies (
-                        id, tenant_id, policy_key, revision, user_id, device_id, client_id,
-                        agent_id, credential_id, configuration
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8,
-                        COALESCE((
-                            SELECT COALESCE(rotation_root_id, id)
-                            FROM credentials WHERE tenant_id = $2 AND id = $9
-                        ), $9),
-                        $10
-                    )
-                    RETURNING to_jsonb(policies)
-                    "#,
+                let value: Value = sqlx::query_file_scalar!(
+                    "queries/admin/policy_create.sql",
+                    id,
+                    context.tenant_id,
+                    input.policy_key,
+                    input.revision,
+                    input.user_id,
+                    input.device_id,
+                    input.client_id,
+                    input.agent_id,
+                    input.credential_id,
+                    configuration,
+                    input.group_id
                 )
-                .bind(id)
-                .bind(context.tenant_id)
-                .bind(input.policy_key)
-                .bind(input.revision)
-                .bind(input.user_id)
-                .bind(input.device_id)
-                .bind(input.client_id)
-                .bind(input.agent_id)
-                .bind(input.credential_id)
-                .bind(configuration)
                 .fetch_one(&mut *transaction)
-                .await?;
+                .await
+                .map_err(map_group_target_error)?;
                 (value, None)
             }
             ResourceKind::Quotas => {
@@ -786,6 +828,7 @@ impl AdminService {
                     || input.quota_key.len() > 200
                     || input.revision <= 0
                     || [
+                        input.group_id,
                         input.user_id,
                         input.device_id,
                         input.client_id,
@@ -803,36 +846,25 @@ impl AdminService {
                 }
                 let configuration = Value::Object(input.configuration);
                 validate_quota_document(&configuration).map_err(|_| AdminError::InvalidRequest)?;
-                let value: Value = sqlx::query_scalar(
-                    r#"
-                    INSERT INTO quotas (
-                        id, tenant_id, quota_key, revision, user_id, device_id, client_id,
-                        agent_id, credential_id, model_id, provider_id, configuration
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8,
-                        COALESCE((
-                            SELECT COALESCE(rotation_root_id, id)
-                            FROM credentials WHERE tenant_id = $2 AND id = $9
-                        ), $9),
-                        $10, $11, $12
-                    )
-                    RETURNING to_jsonb(quotas)
-                    "#,
+                let value: Value = sqlx::query_file_scalar!(
+                    "queries/admin/quota_create.sql",
+                    id,
+                    context.tenant_id,
+                    input.quota_key,
+                    input.revision,
+                    input.user_id,
+                    input.device_id,
+                    input.client_id,
+                    input.agent_id,
+                    input.credential_id,
+                    input.model_id,
+                    input.provider_id,
+                    configuration,
+                    input.group_id
                 )
-                .bind(id)
-                .bind(context.tenant_id)
-                .bind(input.quota_key)
-                .bind(input.revision)
-                .bind(input.user_id)
-                .bind(input.device_id)
-                .bind(input.client_id)
-                .bind(input.agent_id)
-                .bind(input.credential_id)
-                .bind(input.model_id)
-                .bind(input.provider_id)
-                .bind(configuration)
                 .fetch_one(&mut *transaction)
-                .await?;
+                .await
+                .map_err(map_group_target_error)?;
                 (value, None)
             }
         };
@@ -846,7 +878,7 @@ impl AdminService {
                 target_type: kind.singular(),
                 target_id: Some(id),
                 before: None,
-                after: Some(resource.clone()),
+                after: Some(audit_resource(kind, resource.clone())),
                 source_ip,
                 peer_ip,
                 request_id,
@@ -891,8 +923,14 @@ impl AdminService {
             | ResourceKind::Clients
             | ResourceKind::Agents => {
                 let input: IdentityPatch = decode(payload)?;
-                if input.display_name.is_none() && input.status.is_none() {
+                if input.display_name.is_none() && input.status.is_none() && input.email.is_none() {
                     return Err(AdminError::InvalidRequest);
+                }
+                if input.email.is_some() && kind != ResourceKind::Users {
+                    return Err(AdminError::InvalidRequest);
+                }
+                if let Some(Some(email)) = input.email.as_ref() {
+                    validate_email(email)?;
                 }
                 if let Some(name) = input.display_name.as_deref() {
                     validate_name(name)?;
@@ -904,30 +942,46 @@ impl AdminService {
                 {
                     return Err(AdminError::InvalidRequest);
                 }
-                let statement = match kind {
-                    ResourceKind::Users => {
-                        "UPDATE users SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(users)"
-                    }
-                    ResourceKind::Devices => {
-                        "UPDATE devices SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(devices)"
-                    }
-                    ResourceKind::Clients => {
-                        "UPDATE clients SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(clients)"
-                    }
-                    ResourceKind::Agents => {
-                        "UPDATE agents SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(agents)"
-                    }
-                    _ => return Err(AdminError::Unavailable),
-                };
-                let resource = sqlx::query_scalar(statement)
-                    .bind(context.tenant_id)
-                    .bind(id)
-                    .bind(input.version)
-                    .bind(input.display_name.as_deref())
-                    .bind(input.status.as_deref())
+                let resource: Value = if kind == ResourceKind::Users {
+                    sqlx::query_file_scalar!(
+                        "queries/admin/user_update.sql",
+                        context.tenant_id,
+                        id,
+                        input.version,
+                        input.display_name.as_deref(),
+                        input.status.as_deref(),
+                        input.email.is_some(),
+                        input.email.as_ref().and_then(|value| value.as_deref())
+                    )
                     .fetch_optional(&mut *transaction)
-                    .await?
-                    .ok_or(AdminError::Conflict)?;
+                    .await
+                    .map_err(map_conflict)?
+                    .ok_or(AdminError::Conflict)?
+                } else {
+                    let statement = match kind {
+                        ResourceKind::Devices => {
+                            "UPDATE devices SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(devices)"
+                        }
+                        ResourceKind::Clients => {
+                            "UPDATE clients SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(clients)"
+                        }
+                        ResourceKind::Agents => {
+                            "UPDATE agents SET display_name = COALESCE($4, display_name), status = COALESCE($5, status), version = version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND version = $3 RETURNING to_jsonb(agents)"
+                        }
+                        _ => return Err(AdminError::Unavailable),
+                    };
+                    let query = sqlx::query_scalar(statement)
+                        .bind(context.tenant_id)
+                        .bind(id)
+                        .bind(input.version)
+                        .bind(input.display_name.as_deref())
+                        .bind(input.status.as_deref());
+                    query
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_conflict)?
+                        .ok_or(AdminError::Conflict)?
+                };
                 if input.status.as_deref() == Some("disabled") {
                     sqlx::query(
                         r#"
@@ -952,27 +1006,31 @@ impl AdminService {
             }
             ResourceKind::Credentials => {
                 let input: CredentialPatch = decode(payload)?;
-                if input.display_name.is_none() && input.expires_at.is_none() {
+                if input.display_name.is_none()
+                    && input.expires_at.is_none()
+                    && input.status.is_none()
+                {
+                    return Err(AdminError::InvalidRequest);
+                }
+                if input
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| !matches!(status, "active" | "disabled"))
+                {
                     return Err(AdminError::InvalidRequest);
                 }
                 if let Some(name) = input.display_name.as_deref() {
                     validate_name(name)?;
                 }
-                sqlx::query_scalar(
-                    r#"
-                    UPDATE credentials
-                    SET display_name = COALESCE($4, display_name),
-                        expires_at = COALESCE($5, expires_at), version = version + 1, updated_at = now()
-                    WHERE tenant_id = $1 AND id = $2 AND version = $3
-                      AND status IN ('active', 'disabled') AND revoked_at IS NULL
-                    RETURNING to_jsonb(credentials) - ARRAY['secret_hash', 'fingerprint']::text[]
-                    "#,
+                sqlx::query_file_scalar!(
+                    "queries/admin/credential_update.sql",
+                    context.tenant_id,
+                    id,
+                    input.version,
+                    input.display_name,
+                    input.expires_at,
+                    input.status
                 )
-                .bind(context.tenant_id)
-                .bind(id)
-                .bind(input.version)
-                .bind(input.display_name)
-                .bind(input.expires_at)
                 .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or(AdminError::Conflict)?
@@ -1185,8 +1243,8 @@ impl AdminService {
                 action: &format!("admin.{}.update", kind.singular()),
                 target_type: kind.singular(),
                 target_id: Some(id),
-                before: Some(before),
-                after: Some(resource.clone()),
+                before: Some(audit_resource(kind, before)),
+                after: Some(audit_resource(kind, resource.clone())),
                 source_ip,
                 peer_ip,
                 request_id,
@@ -1327,51 +1385,16 @@ impl AdminService {
         if kind == ResourceKind::Policies && input.state == "active" {
             validate_policy_document(&before["configuration"])
                 .map_err(|_| AdminError::InvalidRequest)?;
-            sqlx::query(
-                r#"
-                UPDATE policies current SET lifecycle_state = 'disabled',
-                    version = current.version + 1, updated_at = now()
-                FROM policies target
-                WHERE target.tenant_id = $1 AND target.id = $2
-                  AND current.tenant_id = target.tenant_id
-                  AND current.id <> target.id AND current.lifecycle_state = 'active'
-                  AND current.user_id IS NOT DISTINCT FROM target.user_id
-                  AND current.device_id IS NOT DISTINCT FROM target.device_id
-                  AND current.client_id IS NOT DISTINCT FROM target.client_id
-                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id
-                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id
-                "#,
-            )
-            .bind(context.tenant_id)
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+            sqlx::query_file!("queries/admin/policy_activate.sql", context.tenant_id, id)
+                .execute(&mut *transaction)
+                .await?;
         }
         if kind == ResourceKind::Quotas && input.state == "active" {
             validate_quota_document(&before["configuration"])
                 .map_err(|_| AdminError::InvalidRequest)?;
-            sqlx::query(
-                r#"
-                UPDATE quotas current SET lifecycle_state = 'disabled',
-                    version = current.version + 1, updated_at = now()
-                FROM quotas target
-                WHERE target.tenant_id = $1 AND target.id = $2
-                  AND current.tenant_id = target.tenant_id
-                  AND current.id <> target.id AND current.lifecycle_state = 'active'
-                  AND current.quota_key = target.quota_key
-                  AND current.user_id IS NOT DISTINCT FROM target.user_id
-                  AND current.device_id IS NOT DISTINCT FROM target.device_id
-                  AND current.client_id IS NOT DISTINCT FROM target.client_id
-                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id
-                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id
-                  AND current.model_id IS NOT DISTINCT FROM target.model_id
-                  AND current.provider_id IS NOT DISTINCT FROM target.provider_id
-                "#,
-            )
-            .bind(context.tenant_id)
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+            sqlx::query_file!("queries/admin/quota_activate.sql", context.tenant_id, id)
+                .execute(&mut *transaction)
+                .await?;
         }
         if kind == ResourceKind::ModelAliases && input.state == "active" {
             sqlx::query(
@@ -1906,28 +1929,10 @@ async fn load_policy_replacement(
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Vec<Value>, AdminError> {
-    let rows: Value = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-            'target_type', 'policy', 'id', current.id, 'before', to_jsonb(current)
-        )), '[]'::jsonb)
-        FROM policies target
-        JOIN policies current
-          ON current.tenant_id = target.tenant_id
-         AND current.id <> target.id
-         AND current.user_id IS NOT DISTINCT FROM target.user_id
-         AND current.device_id IS NOT DISTINCT FROM target.device_id
-         AND current.client_id IS NOT DISTINCT FROM target.client_id
-         AND current.agent_id IS NOT DISTINCT FROM target.agent_id
-         AND current.credential_id IS NOT DISTINCT FROM target.credential_id
-        WHERE target.tenant_id = $1 AND target.id = $2
-          AND current.lifecycle_state = 'active'
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(id)
-    .fetch_one(&mut **transaction)
-    .await?;
+    let rows: Value =
+        sqlx::query_file_scalar!("queries/admin/policy_replacement.sql", tenant_id, id)
+            .fetch_one(&mut **transaction)
+            .await?;
     Ok(rows.as_array().cloned().unwrap_or_default())
 }
 
@@ -1936,31 +1941,10 @@ async fn load_quota_replacement(
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Vec<Value>, AdminError> {
-    let rows: Value = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-            'target_type', 'quota', 'id', current.id, 'before', to_jsonb(current)
-        )), '[]'::jsonb)
-        FROM quotas target
-        JOIN quotas current
-          ON current.tenant_id = target.tenant_id
-         AND current.id <> target.id
-         AND current.quota_key = target.quota_key
-         AND current.user_id IS NOT DISTINCT FROM target.user_id
-         AND current.device_id IS NOT DISTINCT FROM target.device_id
-         AND current.client_id IS NOT DISTINCT FROM target.client_id
-         AND current.agent_id IS NOT DISTINCT FROM target.agent_id
-         AND current.credential_id IS NOT DISTINCT FROM target.credential_id
-         AND current.model_id IS NOT DISTINCT FROM target.model_id
-         AND current.provider_id IS NOT DISTINCT FROM target.provider_id
-        WHERE target.tenant_id = $1 AND target.id = $2
-          AND current.lifecycle_state = 'active'
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(id)
-    .fetch_one(&mut **transaction)
-    .await?;
+    let rows: Value =
+        sqlx::query_file_scalar!("queries/admin/quota_replacement.sql", tenant_id, id)
+            .fetch_one(&mut **transaction)
+            .await?;
     Ok(rows.as_array().cloned().unwrap_or_default())
 }
 
@@ -2496,6 +2480,7 @@ mod tests {
                 ListQuery {
                     limit: Some(1),
                     after: None,
+                    email: None,
                 },
             )
             .await
@@ -2509,6 +2494,7 @@ mod tests {
                 ListQuery {
                     limit: Some(1),
                     after: Some(next_after),
+                    email: None,
                 },
             )
             .await
@@ -2528,6 +2514,7 @@ mod tests {
                     ListQuery {
                         limit: Some(101),
                         after: None,
+                        email: None,
                     },
                 )
                 .await,
@@ -3132,6 +3119,683 @@ mod tests {
         assert_eq!(state["active_count"], 1);
         assert_eq!(state["replacement_audits"], 1);
         assert_eq!(state["replacement_audit_exact"], true);
+    }
+
+    #[sqlx::test]
+    async fn user_email_creation_update_clear_and_duplicate_are_checked(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let first = service
+            .create_resource(
+                &context,
+                ResourceKind::Users,
+                json!({"display_name":"first","email":"Cash@example.com"}),
+                source,
+                source,
+                "email-create",
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.resource["email"], "Cash@example.com");
+        let search = || ListQuery {
+            limit: Some(10),
+            after: None,
+            email: Some("cash@EXAMPLE.com".to_owned()),
+        };
+        let found = service
+            .list_resources(&context, ResourceKind::Users, search())
+            .await
+            .unwrap();
+        assert_eq!(found.items.len(), 1);
+        assert_eq!(found.items[0]["id"], id(&first).to_string());
+        let other = AdminContext {
+            tenant_id: Uuid::from_u128(0x200),
+            ..context.clone()
+        };
+        assert!(
+            service
+                .list_resources(&other, ResourceKind::Users, search())
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let without_tenant_filter = include_str!("../../queries/admin/list_resources.sql")
+            .replace("tenant_id = $2", "$2::uuid IS NOT NULL");
+        let leaked = sqlx::query(&without_tenant_filter)
+            .bind("users")
+            .bind(other.tenant_id)
+            .bind(Uuid::nil())
+            .bind(11_i64)
+            .bind(Vec::<String>::new())
+            .bind("cash@EXAMPLE.com")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(leaked.len(), 1);
+        assert!(matches!(
+            service
+                .list_resources(&context, ResourceKind::Devices, search())
+                .await,
+            Err(AdminError::InvalidRequest)
+        ));
+        let duplicate = service
+            .create_resource(
+                &context,
+                ResourceKind::Users,
+                json!({"display_name":"second","email":"cash@example.com"}),
+                source,
+                source,
+                "email-duplicate",
+            )
+            .await;
+        assert!(matches!(duplicate, Err(AdminError::Conflict)));
+        let invalid = service
+            .create_resource(
+                &context,
+                ResourceKind::Devices,
+                json!({"display_name":"device","email":"x@example.com"}),
+                source,
+                source,
+                "email-device",
+            )
+            .await;
+        assert!(matches!(invalid, Err(AdminError::InvalidRequest)));
+        let unchanged = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Users, id(&first)),
+                json!({"version":1,"display_name":"changed"}),
+                source,
+                source,
+                "email-keep",
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.resource["email"], "Cash@example.com");
+        let cleared = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Users, id(&first)),
+                json!({"version":2,"email":null}),
+                source,
+                source,
+                "email-clear",
+            )
+            .await
+            .unwrap();
+        assert!(cleared.resource["email"].is_null());
+        let reused = service
+            .create_resource(
+                &context,
+                ResourceKind::Users,
+                json!({"display_name":"second","email":"cash@example.com"}),
+                source,
+                source,
+                "email-reuse",
+            )
+            .await;
+        assert!(reused.is_ok());
+        let leaked: i64 =
+            sqlx::query_file_scalar!("tests/user_email_audit_count.sql", context.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(leaked, 0);
+    }
+
+    #[sqlx::test]
+    async fn credential_status_update_invalidates_cached_key(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let other_process = service(pool.clone());
+        let service = service(pool.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let user = service
+            .create_resource(
+                &context,
+                ResourceKind::Users,
+                json!({"display_name":"user"}),
+                source,
+                source,
+                "create-user",
+            )
+            .await
+            .unwrap();
+        let credential = service
+            .create_resource(
+                &context,
+                ResourceKind::Credentials,
+                json!({"display_name":"key","user_id":id(&user)}),
+                source,
+                source,
+                "create-key",
+            )
+            .await
+            .unwrap();
+        let secret = credential.secret.as_ref().unwrap();
+        assert!(service.credentials.resolve(secret).await.is_ok());
+        assert!(other_process.credentials.resolve(secret).await.is_ok());
+        let disabled = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Credentials, id(&credential)),
+                json!({"version":1,"status":"disabled"}),
+                source,
+                source,
+                "disable-key",
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.resource["status"], "disabled");
+        assert!(service.credentials.resolve(secret).await.is_err());
+        assert!(other_process.credentials.resolve(secret).await.is_err());
+        let stale = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Credentials, id(&credential)),
+                json!({"version":1,"status":"active"}),
+                source,
+                source,
+                "stale-key",
+            )
+            .await;
+        assert!(matches!(stale, Err(AdminError::Conflict)));
+        let enabled = service
+            .update_resource(
+                &context,
+                ResourceTarget::new(ResourceKind::Credentials, id(&credential)),
+                json!({"version":2,"status":"active"}),
+                source,
+                source,
+                "enable-key",
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.resource["status"], "active");
+        assert!(service.credentials.resolve(secret).await.is_ok());
+        sqlx::query_file!(
+            "tests/credential_disable_without_invalidation.sql",
+            context.tenant_id,
+            id(&credential)
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(service.credentials.resolve(secret).await.is_err());
+    }
+
+    #[sqlx::test]
+    async fn disabling_user_revokes_credential_even_after_user_is_reenabled(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool);
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let user = service
+            .create_resource(
+                &context,
+                ResourceKind::Users,
+                json!({"display_name":"user"}),
+                source,
+                source,
+                "user",
+            )
+            .await
+            .unwrap();
+        let credential = service
+            .create_resource(
+                &context,
+                ResourceKind::Credentials,
+                json!({"display_name":"key", "user_id":id(&user)}),
+                source,
+                source,
+                "key",
+            )
+            .await
+            .unwrap();
+        let secret = credential.secret.as_ref().unwrap();
+        assert!(service.credentials.resolve(secret).await.is_ok());
+        for (version, status) in [(1, "disabled"), (2, "active")] {
+            service
+                .update_resource(
+                    &context,
+                    ResourceTarget::new(ResourceKind::Users, id(&user)),
+                    json!({"version":version,"status":status}),
+                    source,
+                    source,
+                    "user-status",
+                )
+                .await
+                .unwrap();
+        }
+        assert!(service.credentials.resolve(secret).await.is_err());
+        let saved = service
+            .get_resource(&context, ResourceKind::Credentials, id(&credential))
+            .await
+            .unwrap();
+        assert_eq!(saved["status"], "revoked");
+    }
+
+    #[sqlx::test]
+    async fn group_membership_rejects_other_tenants_and_tracks_changes(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool);
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let user = Uuid::from_u128(1);
+        let group = Uuid::from_u128(0x10);
+        let foreign = Uuid::from_u128(0x20);
+        let query = || serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            service
+                .list_group_members(&context, group, query())
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert!(matches!(
+            service
+                .change_group_member(&context, (group, user), true, source, source, "duplicate")
+                .await,
+            Err(AdminError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .change_group_member(&context, (foreign, user), true, source, source, "foreign")
+                .await,
+            Err(AdminError::NotFound)
+        ));
+        service
+            .change_group_member(&context, (group, user), false, source, source, "remove")
+            .await
+            .unwrap();
+        assert!(
+            service
+                .list_group_members(&context, group, query())
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(matches!(
+            service
+                .change_group_member(
+                    &context,
+                    (group, user),
+                    false,
+                    source,
+                    source,
+                    "duplicate-remove"
+                )
+                .await,
+            Err(AdminError::NotFound)
+        ));
+        service
+            .change_group_member(&context, (group, user), true, source, source, "add")
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .list_group_members(&context, group, query())
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+
+    #[sqlx::test]
+    async fn group_member_change_rolls_back_when_audit_fails(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let service = service(pool);
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let group = Uuid::from_u128(0x10);
+        let user = Uuid::from_u128(1);
+        let result = service
+            .change_group_member(
+                &context,
+                (group, user),
+                false,
+                source,
+                source,
+                "missing-audit-actor",
+            )
+            .await;
+        assert!(result.is_err());
+        let page = service
+            .list_group_members(&context, group, serde_json::from_value(json!({})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0]["user_id"], user.to_string());
+    }
+
+    #[sqlx::test]
+    async fn membership_changes_invalidate_cached_group_policies(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let user = Uuid::from_u128(1);
+        let group = Uuid::from_u128(0x10);
+        let principal = crate::identity::PrincipalContext {
+            tenant_id: context.tenant_id,
+            credential_id: Uuid::new_v4(),
+            credential_name: "test".into(),
+            user_id: Some(user),
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        };
+        let engine =
+            crate::policy::PolicyEngine::with_cache(pool.clone(), 8, Duration::from_secs(60));
+        let other_engine =
+            crate::policy::PolicyEngine::with_cache(pool.clone(), 8, Duration::from_secs(60));
+        let no_invalidation = service(pool);
+        let service = service(no_invalidation.pool.clone()).with_policy_engine(engine.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let selector = ModelSelector::parse("company-default").unwrap();
+        let headers = axum::http::HeaderMap::new();
+        let evaluate = || engine.evaluate(&principal, &headers, &selector, chrono::Utc::now());
+        let evaluate_other =
+            || other_engine.evaluate(&principal, &headers, &selector, chrono::Utc::now());
+        assert_eq!(
+            evaluate().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            evaluate_other().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        no_invalidation
+            .change_group_member(
+                &context,
+                (group, user),
+                false,
+                source,
+                source,
+                "no-invalidation",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            evaluate().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            evaluate_other().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        service
+            .change_group_member(&context, (group, user), true, source, source, "add")
+            .await
+            .unwrap();
+        assert_eq!(
+            evaluate().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        service
+            .change_group_member(&context, (group, user), false, source, source, "remove")
+            .await
+            .unwrap();
+        let result = evaluate().await.unwrap();
+        assert_eq!(
+            result.decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            result.decision()["applied_policies"][0]["policy_key"],
+            "second"
+        );
+        service
+            .change_group_member(&context, (group, user), true, source, source, "restore")
+            .await
+            .unwrap();
+        assert_eq!(
+            evaluate().await.unwrap().decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[sqlx::test]
+    async fn group_policy_and_quota_creation_enforce_scope(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../../tests/group_selection_fixture.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../tests/group_admin_actor.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = AdminContext {
+            tenant_id: Uuid::from_u128(0x100),
+            account_id: Uuid::from_u128(0x99),
+            session_id: Uuid::new_v4(),
+            role: AdminRole::Admin,
+        };
+        let policies =
+            crate::policy::PolicyEngine::with_cache(pool.clone(), 8, Duration::from_secs(60));
+        let service = service(pool).with_policy_engine(policies.clone());
+        let source = IpAddr::from_str("127.0.0.1").unwrap();
+        let group = Uuid::from_u128(0x10);
+        let user = Uuid::from_u128(1);
+        let policy = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({"policy_key":"new", "revision":1, "group_id":group, "configuration":{}}),
+                source,
+                source,
+                "group-policy",
+            )
+            .await
+            .unwrap();
+        assert_eq!(policy.resource["group_id"], group.to_string());
+        let quota = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({"quota_key":"new", "revision":1, "group_id":group,
+                   "configuration":{"mode":"hard","limits":{"requests_per_minute":1}}}),
+                source,
+                source,
+                "group-quota",
+            )
+            .await
+            .unwrap();
+        assert_eq!(quota.resource["group_id"], group.to_string());
+        let invalid = service.create_resource(&context, ResourceKind::Policies,
+            json!({"policy_key":"mixed", "revision":1, "group_id":group, "user_id":user, "configuration":{}}),
+            source, source, "mixed-policy").await;
+        assert!(matches!(invalid, Err(AdminError::InvalidRequest)));
+        let invalid_quota = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({"quota_key":"mixed", "revision":1, "group_id":group, "user_id":user,
+                   "configuration":{"mode":"hard","limits":{"requests_per_minute":1}}}),
+                source,
+                source,
+                "mixed-quota",
+            )
+            .await;
+        assert!(matches!(invalid_quota, Err(AdminError::InvalidRequest)));
+        let foreign = service.create_resource(&context, ResourceKind::Policies,
+            json!({"policy_key":"foreign", "revision":1, "group_id":Uuid::from_u128(0x20), "configuration":{}}),
+            source, source, "foreign-policy").await;
+        assert!(matches!(foreign, Err(AdminError::NotFound)));
+        let foreign_quota = service
+            .create_resource(
+                &context,
+                ResourceKind::Quotas,
+                json!({"quota_key":"foreign", "revision":1, "group_id":Uuid::from_u128(0x20),
+                "configuration":{"mode":"hard","limits":{"requests_per_minute":1}}}),
+                source,
+                source,
+                "foreign-quota",
+            )
+            .await;
+        assert!(matches!(foreign_quota, Err(AdminError::NotFound)));
+        let principal = crate::identity::PrincipalContext {
+            tenant_id: context.tenant_id,
+            credential_id: Uuid::new_v4(),
+            credential_name: "test".into(),
+            user_id: Some(user),
+            user_name: None,
+            device_id: None,
+            device_name: None,
+            client_id: None,
+            client_name: None,
+            agent_id: None,
+            agent_name: None,
+        };
+        let selector = ModelSelector::parse("company-default").unwrap();
+        let first = policies
+            .evaluate(
+                &principal,
+                &axum::http::HeaderMap::new(),
+                &selector,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let personal = service
+            .create_resource(
+                &context,
+                ResourceKind::Policies,
+                json!({"policy_key":"personal", "revision":1, "user_id":user, "configuration":{}}),
+                source,
+                source,
+                "personal-policy",
+            )
+            .await
+            .unwrap();
+        service
+            .set_registry_lifecycle(
+                &context,
+                ResourceTarget::new(ResourceKind::Policies, id(&personal)),
+                LifecycleInput {
+                    version: 1,
+                    state: "active".into(),
+                },
+                source,
+                source,
+                "personal-activate",
+            )
+            .await
+            .unwrap();
+        let refreshed = policies
+            .evaluate(
+                &principal,
+                &axum::http::HeaderMap::new(),
+                &selector,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            refreshed.decision()["applied_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            refreshed.decision()["applied_policies"][2]["policy_key"],
+            "personal"
+        );
     }
 
     #[sqlx::test]

@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO policies (\n                        id, tenant_id, policy_key, revision, user_id, device_id, client_id,\n                        agent_id, credential_id, configuration, group_id\n                    ) VALUES (\n                        $1, $2, $3, $4, $5, $6, $7, $8,\n                        COALESCE((\n                            SELECT COALESCE(rotation_root_id, id)\n                            FROM credentials WHERE tenant_id = $2 AND id = $9\n                        ), $9),\n                        $10, $11\n                    )\n                    RETURNING to_jsonb(policies) AS \"value!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e64c1e4b9bd20c974b98173e2ae0910330d4389d848e4a721b95316e8bccbabc"
+}

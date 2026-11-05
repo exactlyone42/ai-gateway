@@ -266,6 +266,17 @@ impl CredentialService {
         };
 
         if let Some(cached) = self.cache_get(&key)? {
+            let active = sqlx::query_file_scalar!(
+                "queries/identity/cached_credential_active.sql",
+                tenant_id,
+                cached.credential_id
+            )
+            .fetch_one(&self.pool)
+            .await?;
+            if !active {
+                self.cache_lock()?.invalidate(cached.credential_id);
+                return Err(IdentityError::InvalidCredential);
+            }
             return if self.verify_secret(plaintext, &cached.hash_key_id, &cached.secret_hash)? {
                 Ok(cached.principal)
             } else {
@@ -1226,8 +1237,8 @@ mod tests {
         state.credentials.resolve(&rotated.plaintext).await.unwrap();
         pool.close().await;
         assert!(
-            state.credentials.resolve(&rotated.plaintext).await.is_ok(),
-            "a cached credential stopped working when the database closed"
+            state.credentials.resolve(&rotated.plaintext).await.is_err(),
+            "a cached credential was accepted when the database closed"
         );
     }
 

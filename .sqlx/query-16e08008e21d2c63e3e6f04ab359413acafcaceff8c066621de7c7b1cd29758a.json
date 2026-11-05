@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO quotas (id, tenant_id, quota_key, revision, group_id, model_id, configuration, lifecycle_state)\nVALUES ('00000000-0000-0000-0000-000000002012', '00000000-0000-0000-0000-000000000100', 'unrelated', 1, '00000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000003002', '{\"mode\":\"hard\",\"limits\":{\"requests_per_minute\":0}}', 'active')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "16e08008e21d2c63e3e6f04ab359413acafcaceff8c066621de7c7b1cd29758a"
+}

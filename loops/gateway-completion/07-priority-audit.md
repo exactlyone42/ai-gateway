@@ -63,3 +63,5 @@ completion 首次 all 主程式443通過／7略過；兩項 capture_startup 在�
 測試修正的官方參考（2026-11-05）：https://doc.rust-lang.org/std/fs/struct.File.html 的 unlock／lock（File 檔案鎖與解鎖）；https://docs.rs/tracing/latest/tracing/dispatcher/fn.set_global_default.html（程序全域收集器只能設定一次）。沿用 groups 現成初始化，保留獨立子程序測試，未修改正式日誌路徑。
 
 最新全套已結束碼0：/tmp/gateway-closeout-completion-check-stable.log。Rust 490 次測試通過（含日誌檢查子程序）、7 略過；Python 25＋157 項中20略過；前端2項與守門33/33通過。未執行需獨立見證／特定擁有者／額外環境開關的驗收，不能當作正式完成。正式 /health 實讀仍為63fe6d0bef32。
+
+main 已於0fa238b整合到工作分支；群組整合的 gate、Rust workspace 520 次通過／7 略過、前端 lint／型別／3測試／建置通過（/tmp/gateway-closeout-merge-groups-tests.log、-frontend.log、-gate.log）。這不是 main 合併或部署；群組權杖、Codex 使用者綁定及正式串流保存仍是未完成門檻。

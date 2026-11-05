@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE quotas SET quota_key = $1 WHERE id = '00000000-0000-0000-0000-000000002001'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f2ddfa69101ef627d84d436b2f075aa200fea591beab8eeb48b918e7b3c5917e"
+}

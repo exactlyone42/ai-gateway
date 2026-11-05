@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE credentials\nSET display_name = COALESCE($4, display_name),\n    expires_at = COALESCE($5, expires_at), status = COALESCE($6, status),\n    version = version + 1, updated_at = now()\nWHERE tenant_id = $1 AND id = $2 AND version = $3\n  AND status IN ('active', 'disabled') AND revoked_at IS NULL\n  AND ($6::text IS NULL OR COALESCE($5, expires_at) IS NULL OR COALESCE($5, expires_at) > now())\nRETURNING (to_jsonb(credentials) - ARRAY['secret_hash', 'fingerprint']::text[]) AS \"value!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0e83923e07dba7508a156d60ed35b299777348bc893e7cc7f153b1e1248ea456"
+}

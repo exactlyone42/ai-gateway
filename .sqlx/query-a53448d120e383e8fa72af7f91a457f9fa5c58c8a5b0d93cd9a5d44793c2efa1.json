@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE quotas SET configuration = jsonb_set(configuration, '{limits,requests_per_minute}', to_jsonb($1::integer))\nWHERE id = '00000000-0000-0000-0000-000000002011'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a53448d120e383e8fa72af7f91a457f9fa5c58c8a5b0d93cd9a5d44793c2efa1"
+}
