@@ -419,6 +419,7 @@ restore.restore(args)
             manifest_path = bad / "manifest.json"
             manifest = json.loads(manifest_path.read_text())
             manifest["sha256"][encrypted.name] = hashlib.sha256(encrypted.read_bytes()).hexdigest()
+            manifest["size"][encrypted.name] = encrypted.stat().st_size
             manifest_path.write_text(json.dumps(manifest))
             subprocess.run(["gpg", "--batch", "--yes", "--local-user", self.signer, "--detach-sign", "--output", str(bad / "manifest.sig"), str(manifest_path)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             checked = subprocess.run(["python3", str(VERIFY), str(bad), "--signer", self.signer], env=self.env, capture_output=True, text=True, timeout=60)

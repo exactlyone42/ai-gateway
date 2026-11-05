@@ -738,3 +738,11 @@ P2：沿用現有加密保存及備份，逐項核對事件、用量、同內容
 補跑先前略過的真Docker身分測試：資料庫／叢集區分1項及重建磁碟區識別變更1項均通過（`/tmp/gateway-capture-database-identity-live.log`、`/tmp/gateway-capture-storage-identity-live.log`）；對應容器及磁碟區已空。這兩項不代表最低權限或正式身份已驗收。
 
 2026-11-05 帳本鎖修正後完整檢查結束碼0（`/tmp/gateway-ledger-spool-unlock-all.log`）；尚未驗證的最低權限、正式備份及原Client項目維持未完成。
+
+2026-11-05 推送成功，遠端feature/gateway-completion=a8fab43，CI run41968919751仍進行。補跑真Docker備份9項，原版8通過1失敗：危險路徑fixture替換密文後漏更新manifest大小，驗證先被大小不符拒絕。只補大小清單，保留原驗證成功及還原拒絕斷言；新整組9通過、0略過（`/tmp/gateway-capture-backup-live-fixed-20261105.log`），證明危險路徑還原拒絕且正常備份仍可還原及輪替金鑰。此組使用假刪除位置回覆，不能替代完整Gateway演練或最低權限驗證；正式未動。
+
+2026-11-05 降權演練新增`--check-database-privileges`，以獨立fixture_admin初始化叢集，Gateway帳號不再是不可降權的bootstrap superuser。前兩次設定失敗保留於temp-service的limited-role與limited-role-retry日誌；第二次明確錯誤為bootstrap superuser必須保有SUPERUSER。來源移除SUPERUSER、BYPASSRLS、CREATEROLE、CREATEDB、REPLICATION，直接身分查詢因42501拒絕，完整備份也拒絕且無輸出；僅補pg_control_system執行權後備份成功。來源兩協定串流、先存後送、保存失敗拒絕、加密讀回及刪除通過；恢復後啟動前再次降權，刪除不復活、串流讀回、新請求保存皆通過（`/home/cash/.agents/temp-services/logs/gateway-capture-limited-bootstrap-20261105.log`，程序已結束）。審查指出原陰性只看退出碼不夠及還原角色未降權，均已補。這是資料表擁有者降權，非獨立唯讀備份角色；恢復操作本身仍用隔離管理權限。
+
+最終版把來源降權提前至初始化保存層及首次啟動之前；正在`gateway-capture-limited-startup-20261105`驗證，結束碼將寫`/tmp/gateway-capture-limited-startup-exit.json`。全套另在`/tmp/gateway-capture-limited-role-all.log`（session10606）執行；不改正在執行的腳本，不重疊建置與推送。參考PostgreSQL17官方ALTER ROLE與資訊函式文件（`https://www.postgresql.org/docs/17/sql-alterrole.html`、`https://www.postgresql.org/docs/17/functions-info.html`），實際權限及拒絕以隔離SQL輸出判定。
+
+2026-11-05 最終版首次啟動前降權的完整prod演練結束碼0（`/tmp/gateway-capture-limited-startup-exit.json`及對應temp-service日誌）；原始來源和恢復後Gateway均非superuser，兩協定串流與保存、備份、拒絕竄改、刪除不復活及新請求保存讀回全部通過。臨時程序、帶gateway.capture_e2e標籤的容器、卷與網路均空。獨立審查未見新假綠，仍保留schema owner及管理權限恢復邊界。新全套`/tmp/gateway-capture-limited-role-all.log`結束碼0；遠端a8fab43之CI41968919751已成功。本輪未動正式。

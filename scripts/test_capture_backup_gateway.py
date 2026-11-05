@@ -5,6 +5,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--gateway-bin', type=Path, required=True)
 parser.add_argument('--credential-environment', choices=('dev', 'prod'), default='dev')
 parser.add_argument('--check-protocol-streams', action='store_true')
+parser.add_argument('--check-database-privileges', action='store_true')
 parser.add_argument('--check-deletion', action='store_true')
 parser.add_argument('--check-truncated-spool', action='store_true')
 parser.add_argument('--check-wrong-journal', action='store_true')
@@ -64,6 +65,7 @@ volumes = ['capture-e2e-' + suffix + '-' + x for x in ('spool', 'keys', 'anchors
 paths = ['/var/lib/agent-pool-gateway/capture-spool', '/var/lib/agent-pool-gateway/capture-keys', '/var/lib/agent-pool-gateway/capture-anchors', '/var/lib/agent-pool-gateway/ledger-spool', '/var/lib/agent-pool-gateway/capture-erasure', '/var/lib/agent-pool-gateway/capture-witness']
 created = []
 protocol_captures = []
+database_admin = 'fixture_admin' if arguments.check_database_privileges else 'gateway'
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **kwargs).stdout.strip()
@@ -179,13 +181,17 @@ try:
         mounts += ['--mount', f'type=volume,source={v},target={p}']
     docker('run', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--network', 'none', *mounts, '--entrypoint', 'sh', 'python:3.13-slim', '-c', 'chown -R 10001:999 /var/lib/agent-pool-gateway && chmod 700 /var/lib/agent-pool-gateway/*')
     created.append(('container', pg))
-    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', pg, '--network', network, '-e', 'POSTGRES_USER=gateway', '-e', 'POSTGRES_PASSWORD=fixture-password', '-e', 'POSTGRES_DB=gateway', 'postgres:17-alpine')
+    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', pg, '--network', network, '-e', 'POSTGRES_USER=' + database_admin, '-e', 'POSTGRES_PASSWORD=fixture-password', '-e', 'POSTGRES_DB=gateway', 'postgres:17-alpine')
     for _ in range(100):
         if subprocess.run(['docker', 'exec', pg, 'pg_isready', '-h', '127.0.0.1', '-U', 'gateway'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             break
         time.sleep(0.2)
     else:
         raise RuntimeError('database not ready')
+    if arguments.check_database_privileges:
+        fixture = (project_root / 'tests/fixtures/capture-backup/create-database-role.sql').read_text()
+        fixture += (project_root / 'tests/fixtures/capture-backup/restrict-database-role.sql').read_text()
+        docker('exec', '-i', pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)
     created.append(('container', mock))
     protocol_mounts = ['--mount', f'type=volume,source={volumes[0]},target=/capture-spool,readonly', '--mount', f'type=bind,source={project_root / "tests/fixtures/client-roundtrip"},target=/fixtures,readonly', '-e', 'REQUIRE_CAPTURED_REQUEST=1'] if arguments.check_protocol_streams else []
     docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', mock, '--network', network, '--mount', f'type=bind,source={project_root / "tests/fixtures/capture-backup/mock.py"},target=/mock.py,readonly', *protocol_mounts, '--entrypoint', 'python', 'python:3.13-slim', '/mock.py')
@@ -223,6 +229,16 @@ try:
     else:
         logs = subprocess.run(['docker', 'logs', gw], capture_output=True, text=True, timeout=30)
         raise RuntimeError('gateway not ready: ' + str(last_health_error) + '; logs: ' + logs.stdout + logs.stderr)
+    if arguments.check_database_privileges:
+        privileges = (project_root / 'tests/fixtures/capture-backup/database-role-privileges.sql').read_text()
+        actual = docker('exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', input=privileges)
+        if actual != 'f|f|f|f|f|f':
+            raise RuntimeError('gateway database role still has elevated privileges: ' + actual)
+        identity_query = (project_root / 'queries/capture_backup_database_identity.sql').read_text()
+        identity_denied = subprocess.run(['docker', 'exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=verbose'], input=identity_query, capture_output=True, text=True, timeout=10)
+        if identity_denied.returncode != 3 or '42501' not in identity_denied.stderr or 'pg_control_system' not in identity_denied.stderr:
+            raise RuntimeError('database identity negative control did not fail on function permission: ' + identity_denied.stderr)
+        print('gateway role has no superuser, bypassrls, create-role, create-db, replication or cluster identity access: ok', flush=True)
     if arguments.check_instance_lock:
         second_args = ['CONTENT_CAPTURE_ENABLED=false' if item == 'CONTENT_CAPTURE_ENABLED=true' else item for item in args]
         second = subprocess.run(['docker', 'run', '--rm', '--label', expiry, '--label', run_label, *second_args], capture_output=True, text=True, timeout=60)
@@ -337,6 +353,14 @@ try:
     recipient = fingerprint('fixture-encryption@example.invalid')
     signer = fingerprint('fixture-signing@example.invalid')
     backup = str(workspace_path / 'backup')
+    if arguments.check_database_privileges:
+        denied = Path(backup + '-unauthorized')
+        refused = subprocess.run(['python3', 'scripts/capture_backup.py', '--gateway', gw, '--postgres', pg, '--destination', str(denied), '--recipient', recipient, '--signer', signer], env=gpg_env, capture_output=True, text=True, timeout=60)
+        if refused.returncode != 1 or denied.exists():
+            raise RuntimeError('backup did not reject missing database identity permission before creating output')
+        permission = (project_root / 'tests/fixtures/capture-backup/grant-database-identity.sql').read_text()
+        docker('exec', '-i', pg, 'psql', '-X', '-U', 'fixture_admin', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=permission)
+        print('missing database identity permission rejected without output; granted only pg_control_system execution: ok', flush=True)
     if arguments.check_expired_restore:
         expired_capture = str(uuid.uuid4())
         lock_command = ['docker', 'exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', '-v', 'tenant=' + env['ADMIN_BOOTSTRAP_TENANT_ID'], '-v', 'user=' + str(uuid.uuid4()), '-v', 'capture=' + expired_capture, '-f', '-']
@@ -488,13 +512,16 @@ except urllib.error.HTTPError as error:
     docker('volume', 'create', '--label', expiry, '--label', run_label, db_volume)
     db_mount = f'type=volume,source={db_volume},target=/var/lib/postgresql/data'
     created.append(('container', restore_pg))
-    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', restore_pg, '--network', 'none', '--mount', db_mount, '-e', 'POSTGRES_USER=gateway', '-e', 'POSTGRES_PASSWORD=fixture-password', '-e', 'POSTGRES_DB=gateway', 'postgres:17-alpine')
+    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', restore_pg, '--network', 'none', '--mount', db_mount, '-e', 'POSTGRES_USER=' + database_admin, '-e', 'POSTGRES_PASSWORD=fixture-password', '-e', 'POSTGRES_DB=gateway', 'postgres:17-alpine')
     for _ in range(100):
         if subprocess.run(['docker', 'exec', restore_pg, 'pg_isready', '-h', '127.0.0.1', '-U', 'gateway'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             break
         time.sleep(0.2)
     else:
         raise RuntimeError('restore database not ready')
+    if arguments.check_database_privileges:
+        fixture = (project_root / 'tests/fixtures/capture-backup/create-database-role.sql').read_text()
+        docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)
     target_volumes = ['capture-e2e-restored-' + suffix + '-' + x for x in ('spool', 'keys', 'anchors', 'ledger')]
     for v in target_volumes:
         created.append(('volume', v))
@@ -581,6 +608,14 @@ except urllib.error.HTTPError as error:
             raise RuntimeError('rolled back journal did not reject the independent latest position: ' + latest_check.stderr)
         print('rolled back journal accepts old position and rejects independent latest position: ok', flush=True)
         raise SystemExit(0)
+    if arguments.check_database_privileges:
+        fixture = (project_root / 'tests/fixtures/capture-backup/restrict-database-role.sql').read_text()
+        docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)
+        privileges = (project_root / 'tests/fixtures/capture-backup/database-role-privileges.sql').read_text()
+        actual = docker('exec', '-i', restore_pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', input=privileges)
+        if actual != 'f|f|f|f|f|f':
+            raise RuntimeError('restored gateway database role still has elevated privileges: ' + actual)
+        print('restored gateway role has no elevated database privileges before startup: ok', flush=True)
     gw = 'capture-e2e-restored-gw-' + suffix
     created.append(('container', gw))
     if arguments.check_expired_restore:
