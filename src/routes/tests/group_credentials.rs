@@ -108,7 +108,7 @@ async fn group_files_are_separate_from_users_providers_and_api_keys() {
             .await
             .is_err()
     );
-    lock.unlock().unwrap();
+    drop(lock);
     store
         .replace(tenant(), user(), "sk-ant-oat01-new")
         .await

@@ -1403,7 +1403,10 @@ mod tests {
             assert!(apply_authentication(&mut headers, mode, &slot).is_err());
             let lock = std::fs::File::open("/dev/null").unwrap();
             let personal = slot
-                .with_personal_api_key(std::sync::Arc::from("personal-key"), lock)
+                .with_personal_api_key(
+                    std::sync::Arc::from("personal-key"),
+                    crate::held_token::TokenLock::fixture(lock),
+                )
                 .unwrap();
             apply_authentication(&mut headers, mode, &personal).unwrap();
             assert_eq!(headers.get(header_name).unwrap(), expected);

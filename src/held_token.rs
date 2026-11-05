@@ -23,6 +23,23 @@ pub struct HeldToken {
     inner: Arc<Inner>,
 }
 
+pub struct TokenLock(std::fs::File);
+
+#[cfg(test)]
+impl TokenLock {
+    pub(crate) fn fixture(file: std::fs::File) -> Self {
+        Self(file)
+    }
+}
+
+impl Drop for TokenLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::error!(error = %error, error.type = "provider_credential_unlock_failed", "provider credential lock release failed");
+        }
+    }
+}
+
 pub struct PersonalTokens {
     root: PathBuf,
     membership_root: PathBuf,
@@ -82,7 +99,7 @@ impl PersonalTokens {
         tenant: uuid::Uuid,
         user: uuid::Uuid,
         shared: bool,
-    ) -> Result<std::fs::File, HeldTokenError> {
+    ) -> Result<TokenLock, HeldTokenError> {
         let root = self.membership_root.clone();
         tokio::task::spawn_blocking(move || Self::lock_user(&root, tenant, user, shared))
             .await
@@ -136,7 +153,7 @@ impl PersonalTokens {
         tenant: uuid::Uuid,
         user: uuid::Uuid,
         shared: bool,
-    ) -> std::io::Result<std::fs::File> {
+    ) -> std::io::Result<TokenLock> {
         let directory = root.join(tenant.to_string());
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -154,7 +171,7 @@ impl PersonalTokens {
         } else {
             file.try_lock().map_err(std::io::Error::other)?;
         }
-        Ok(file)
+        Ok(TokenLock(file))
     }
 
     #[cfg(test)]
@@ -173,7 +190,7 @@ impl PersonalTokens {
         &self,
         tenant: uuid::Uuid,
         user: uuid::Uuid,
-    ) -> Result<Option<(Arc<str>, std::fs::File)>, HeldTokenError> {
+    ) -> Result<Option<(Arc<str>, TokenLock)>, HeldTokenError> {
         let (token, lock) = self.read_locked(tenant, user).await?;
         Ok(token.map(|token| (token, lock)))
     }
@@ -182,7 +199,7 @@ impl PersonalTokens {
         &self,
         tenant: uuid::Uuid,
         user: uuid::Uuid,
-    ) -> Result<(Option<Arc<str>>, std::fs::File), HeldTokenError> {
+    ) -> Result<(Option<Arc<str>>, TokenLock), HeldTokenError> {
         let path = self.path(tenant, user);
         let root = self.root.clone();
         let api_key = self.api_key;
@@ -593,6 +610,34 @@ mod tests {
             &*store.get(tenant, user).await.unwrap().unwrap(),
             "sk-ant-oat01-new"
         );
+    }
+
+    #[test]
+    fn credential_lock_is_released_with_an_inherited_descriptor() {
+        let root = scratch("inherited-lock");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let lock = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(PersonalTokens::lock_user(&root, tenant, user, false).is_err());
+        drop(lock);
+        let next = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        drop(next);
+        drop(inherited);
+    }
+
+    #[test]
+    fn dropping_one_shared_credential_lock_keeps_the_other_locked() {
+        let root = scratch("independent-shared-locks");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let first = PersonalTokens::lock_user(&root, tenant, user, true).unwrap();
+        let second = PersonalTokens::lock_user(&root, tenant, user, true).unwrap();
+        drop(first);
+        assert!(PersonalTokens::lock_user(&root, tenant, user, false).is_err());
+        drop(second);
+        let writer = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        drop(writer);
     }
 
     #[tokio::test]

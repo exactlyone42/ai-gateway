@@ -226,6 +226,13 @@ def main():
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
         def verify_capture():
+            markers = [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ['CANCEL_STREAM_PENDING', expected_reply]
+            reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
+            spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
+            if not spool_files:
+                raise RuntimeError('沒有可檢查的加密暫存檔')
+            for path in spool_files:
+                reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
             count = 1 if args.check_cancel else 2
             expected_state = 'incomplete' if args.check_cancel else 'complete'
@@ -237,6 +244,8 @@ def main():
                 time.sleep(0.2)
             else:
                 raise RuntimeError('加密保存數量或完成狀態不符：' + json.dumps(records))
+            if {path.stem for path in spool_files} != {record['capture_id'] for record in records}:
+                raise RuntimeError('未逐筆檢查所有保存暫存檔')
             saved = []
             for record in records:
                 content = {}
@@ -256,6 +265,10 @@ def main():
             usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=usage_query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             usage_records = json.loads(usage_result.stdout)
             runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_usage'](usage_records, records, args.check_cancel, codex)
+            dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
+            reject_plaintext(dump.stdout, markers)
+            reject_plaintext((runtime / 'gateway.log').read_bytes(), markers)
+            (runtime / 'plaintext-result.json').write_text(json.dumps({'spool_files': len(spool_files), 'capture_ids': sorted(path.stem for path in spool_files), 'database_dump_bytes': len(dump.stdout), 'gateway_log_bytes': (runtime / 'gateway.log').stat().st_size, 'markers': len(markers), 'plaintext_absent': True}, indent=2))
             (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
             (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
             checks[-1]['capture_records'] = records

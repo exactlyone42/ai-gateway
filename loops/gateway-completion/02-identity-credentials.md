@@ -157,3 +157,9 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 2026-11-05 原Codex CLI0.166.0經Gateway706e719的個人／群組API憑證隔離7項通過：三項成功各送上游一次，模型403及三項503皆無上游請求，Client均退出1。直接證據`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`，程序與兩個連接埠已停，見`/tmp/gateway-codex-identity-closeout.json`。不涵蓋CodexFile持有人實送、第二真人、跨主機、工具往返與保存，不標P1完成。
 
 2026-11-05 新增CodexFile持有人真正Responses路由驗證：由測試程式將供應商入口改到本機假上游，模型與Gateway金鑰均走隔離PostgreSQL；本人成功且上游權杖／帳號正確，另一位同租戶使用者及刪除供應商auth.json後皆503，上游總數保持1。正向`/tmp/gateway-codex-owner-http-positive.log`；故意移除持有人比對後另一人得到200，測試失敗，證據`/tmp/gateway-codex-owner-http-negative.log`，原比對已恢復。新測試未涵蓋原Codex程式、真實ChatGPT、Gateway金鑰撤銷或部署，P1仍未完成。官方依據OWASP Authorization Cheat Sheet的預設拒絕與逐請求檢查（2026-11-05下載`/tmp/gateway-codex-owner-authorization-reference.html`）；不改正式供應商入口，只在測試替換來源。
+
+2026-11-05 明文掃描切片all在held_token兩項測試失敗，均WouldBlock，原始/tmp/gateway-client-plaintext-all.log；單獨串行重跑10過1ignored，不能只靠重跑過就當修好。新增保留同一鎖描述符副本、drop原鎖再取排他鎖的確定性測試，原版/tmp/gateway-token-inherited-negative.log以WouldBlock失敗。TokenLock結束時明確unlock，個人／群組來源與會員鎖整條回傳型別及CredentialLease改持有該型別，無Clone。獨立shared reader分別開檔，新增drop一把仍拒絕writer、兩把結束才允許writer。修正後held_token12過1ignored，/tmp/gateway-token-inherited-positive.log；尚不能證明原全套兩筆失敗皆由繼承描述符引起，但此確定性缺陷已重現並修正。官方File文件https://doc.rust-lang.org/std/fs/struct.File.html已存/tmp/gateway-file-lock-reference.html；沿用帳本明確unlock做法。覆審未見提前解鎖，File欄位改私有，僅cfg(test)fixture建構函式。此最後介面縮小後待新版全套，正式與原Client未重驗，未提交。
+
+2026-11-05 憑證鎖修正版全套 `/tmp/gateway-token-unlock-all.log` 結束碼0（session20186）：主Rust473過0失敗7ignored，Python備份20skipped；包含最終私有File欄位與cfg(test)fixture建構。新核心原Client尚待固定binary後重驗。
+
+2026-11-05 新核心固定binary `/tmp/gateway-token-unlock-7deqmr_e/gateway`，BUILD_REVISION=099a3b8-token-unlock；build結束碼0（/tmp/gateway-token-unlock-build.log）。原Claude隔離7項kibmic6_、原Codex隔離7項ydpiynx3均過（runtime在/home/cash/.cache/tmp/gateway-client-identity-前綴）。隔離DB與Gateway程序清理讀回均空：/tmp/gateway-token-unlock-client-closeout.json。正式、真人與跨主機仍未驗，P1不標完成。

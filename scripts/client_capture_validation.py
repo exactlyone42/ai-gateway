@@ -38,3 +38,12 @@ def validate_usage(usage_records, records, cancel, codex):
             raise RuntimeError('非空請求缺少有效預估用量')
         if len(estimates) != 1 or any(estimates[0][key] != row['estimated_usage'].get(key, 0) for key in ('input_tokens', 'output_tokens')):
             raise RuntimeError('預估用量與帳本不一致')
+
+
+def reject_plaintext(data, markers):
+    if not markers or any(not marker for marker in markers):
+        raise RuntimeError('明文檢查缺少對照內容')
+    for marker in markers:
+        raw = marker.encode()
+        if raw in data or raw.hex().encode() in data.lower():
+            raise RuntimeError('保存或一般紀錄發現明文')

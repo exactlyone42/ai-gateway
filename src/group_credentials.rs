@@ -1,18 +1,18 @@
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::held_token::PersonalTokens;
+use crate::held_token::{PersonalTokens, TokenLock};
 
 pub(crate) struct CredentialLease {
-    files: Vec<File>,
+    files: Vec<TokenLock>,
     transaction: Option<Transaction<'static, Postgres>>,
 }
 
-impl From<File> for CredentialLease {
-    fn from(file: File) -> Self {
+impl From<TokenLock> for CredentialLease {
+    fn from(file: TokenLock) -> Self {
         Self {
             files: vec![file],
             transaction: None,
@@ -128,7 +128,7 @@ mod tests {
         assert!(store.lock_membership(tenant, user, false).await.is_err());
         drop(lease);
         let lock = store.lock_membership(tenant, user, false).await.unwrap();
-        lock.unlock().unwrap();
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

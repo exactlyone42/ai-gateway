@@ -56,3 +56,11 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 保存與用量補驗：純驗證抽至client_capture_validation.py，截斷兩份相同串流、移除原user但marker留tool結果、錯工具結果、重複attempt、預估輸入歸零及錯實際用量均拒絕；連既有fixture共11項測試通過，已接all。Codex工具嚴格保存22ag0n5u通過。取消保存Claude49xkhoua、Codex6_1dyw4y皆incomplete且4條讀回，Claude供應商實際1/0，Codex供應商未提供用量故無provider_reported，預估另列。後續強化拒絕重複attempt與零預估，對兩筆已保存的usage-result重新執行新純驗證均過，證據/tmp/gateway-cancel-strict-usage.log，未重跑Client。新版完整工具與用量：Claude vd0npfq9、Codex v2pgkbad，各2筆complete、8條讀回、每輪實際1/1；SQL帶attempt_id且核對請求集合與唯一列數。預估僅驗有效、來源與帳本一致，未獨立證明估算準確。所有runtime均/tmp/gateway-client-identity-前綴；服務已結束。資料庫密文明文掃描、本輪新版全套、正式與跨主機仍待驗；未提交。
 
 2026-11-05 保存驗收切片全套 `/tmp/gateway-original-client-capture-all.log` 結束碼0（session73919），包含新增11項fixture與保存/用量負向檢查。部署、正式資料、密文明文掃描及跨主機缺口維持，不標整體完成。
+
+2026-11-05 明文殘留補驗：reject_plaintext同時掃原文及hex，新增明文／hex洩漏拒絕與缺marker拒絕，連既有共15項測試通過。原Claude工具spjsx9r1、原Codex工具g0n156s_各掃到2份spool，再掃隔離DB data-only dump與一般Gateway log，nonce、原訊息marker與回覆marker均未找到。審查指出取消原請求缺marker，已補expected_reply；另以spool檔名集合核對全部capture id，不只要求至少1檔。新版取消Claude3eqt6yq9、Codexvjwlgio6皆通過請求／回應marker、1份spool逐筆核對、DB與log掃描；同時保存未完成狀態及用量仍過。runtime皆/tmp/gateway-client-identity-前綴，plaintext-result.json有掃描數量及大小。工具兩場景在新增檔名集合判準前執行（各2檔、2capture），不得宣稱新版集合判準已在工具實送跑過。本輪服務均結束；正式未動。只能證明指定ASCII測試內容在這些位置未以原文或hex出現，不證明所有編碼或任意主機位置；fixture及Client診斷檔是刻意保存的測試證據，不屬正式保存層。新版全套待跑，尚未提交。
+
+2026-11-05 新增檔名集合判準後，原Claude工具glfj00cx及原Codex工具0blxy45z皆重跑通過，兩份spool的capture id集合與2筆資料庫紀錄完全相符；plaintext-result.json保留capture_ids。保存、用量與明文掃描同步過。先前工具集合未實送缺口已補；本輪新版all仍在session32368，腳本未修改。
+
+2026-11-05 明文新版all結束碼101，469過2失敗7ignored；失敗為held_token WouldBlock，已回P1修正可重現的繼承描述符持鎖問題，詳02。未拿上版綠燈取代新版結果。
+
+2026-11-05 憑證鎖新核心099a3b8-token-unlock：原Claude工具fcbjipn8、原Codex工具9hgvzyco、原Claude取消ehqpzy9r、原Codex取消a2xts98n四場景全過；runtime在/tmp/gateway-client-identity-前綴。完整內容／逐筆spool id／DB及log明文掃描、工具實際用量1/1、取消Claude1/0及Codex無provider_reported均過；取消state=incomplete，工具各2筆complete。連同隔離兩場共六DB與Gateway程序已清空（/tmp/gateway-token-unlock-client-closeout.json）。新全套/tmp/gateway-token-unlock-all.log結束碼0；沒有正式或模型運算。原Client上游錯誤全流程仍待補，跨主機及正式缺口保留。

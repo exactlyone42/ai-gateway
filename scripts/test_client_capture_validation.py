@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext
 
 
 class CaptureValidationTest(unittest.TestCase):
@@ -75,6 +75,23 @@ class UsageValidationTest(unittest.TestCase):
         rows[0]['usage'][0]['output_tokens'] = 2
         with self.assertRaises(RuntimeError):
             validate_usage(rows, records, False, False)
+
+
+class PlaintextValidationTest(unittest.TestCase):
+    def test_ciphertext_control(self):
+        reject_plaintext(b'encrypted-fixture', ['secret-marker'])
+
+    def test_raw_plaintext_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            reject_plaintext(b'prefix secret-marker suffix', ['secret-marker'])
+
+    def test_hex_plaintext_in_database_dump_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            reject_plaintext(b'\\x' + b'secret-marker'.hex().encode(), ['secret-marker'])
+
+    def test_empty_markers_are_rejected(self):
+        with self.assertRaises(RuntimeError):
+            reject_plaintext(b'encrypted-fixture', [])
 
 
 if __name__ == '__main__':
