@@ -6,6 +6,7 @@ parser.add_argument('--gateway-bin', type=Path, required=True)
 parser.add_argument('--credential-environment', choices=('dev', 'prod'), default='dev')
 parser.add_argument('--check-protocol-streams', action='store_true')
 parser.add_argument('--check-database-privileges', action='store_true')
+parser.add_argument('--check-readonly-backup-role', action='store_true')
 parser.add_argument('--check-deletion', action='store_true')
 parser.add_argument('--check-truncated-spool', action='store_true')
 parser.add_argument('--check-wrong-journal', action='store_true')
@@ -24,6 +25,10 @@ parser.add_argument('--check-stream-drain', action='store_true')
 parser.add_argument('--check-backup-kill', action='store_true')
 parser.add_argument('--control-corrupt-ledger-conflict', action='store_true')
 arguments = parser.parse_args()
+if arguments.check_readonly_backup_role and not arguments.check_database_privileges:
+    parser.error('readonly backup validation requires --check-database-privileges')
+if arguments.check_readonly_backup_role and not arguments.check_remote_replay:
+    parser.error('readonly backup validation requires --check-remote-replay')
 if arguments.check_protocol_streams and not arguments.check_remote_replay:
     parser.error('protocol stream validation requires --check-remote-replay')
 if arguments.credential_environment == 'prod' and not (arguments.check_remote_witness or arguments.check_remote_replay):
@@ -361,6 +366,28 @@ try:
         permission = (project_root / 'tests/fixtures/capture-backup/grant-database-identity.sql').read_text()
         docker('exec', '-i', pg, 'psql', '-X', '-U', 'fixture_admin', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=permission)
         print('missing database identity permission rejected without output; granted only pg_control_system execution: ok', flush=True)
+    if arguments.check_readonly_backup_role:
+        fixture_root = project_root / 'tests/fixtures/capture-backup'
+        docker('exec', '-i', pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=(fixture_root / 'create-readonly-backup-role.sql').read_text())
+        docker('exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=(fixture_root / 'create-future-backup-schema.sql').read_text())
+        observed = docker('exec', '-i', pg, 'psql', '-X', '-U', 'fixture_backup', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', input=(fixture_root / 'read-future-backup-schema.sql').read_text())
+        if observed != '19':
+            raise RuntimeError('readonly backup role cannot read future schema contents')
+        for name in ('write-backup-probe.sql', 'advance-backup-sequence.sql'):
+            rejected = subprocess.run(['docker', 'exec', '-i', pg, 'psql', '-X', '-U', 'fixture_backup', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=verbose'], input=(fixture_root / name).read_text(), capture_output=True, text=True, timeout=10)
+            if rejected.returncode != 3 or '42501' not in rejected.stderr:
+                raise RuntimeError('readonly backup role did not reject write: ' + name)
+        gpg_env['CAPTURE_BACKUP_DATABASE_USER'] = 'fixture_backup'
+        docker('exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=(fixture_root / 'enable-backup-rls.sql').read_text())
+        probe = subprocess.run(['docker', 'exec', pg, 'pg_dump', '-U', 'fixture_backup', '-d', 'gateway', '-Fc'], capture_output=True, timeout=30)
+        if probe.returncode == 0 or b'row-level security' not in probe.stderr:
+            raise RuntimeError('readonly database dump did not reject inaccessible RLS data')
+        partial = Path(backup + '-rls-denied')
+        refused = subprocess.run(['python3', 'scripts/capture_backup.py', '--gateway', gw, '--postgres', pg, '--destination', str(partial), '--recipient', recipient, '--signer', signer], env=gpg_env, capture_output=True, text=True, timeout=60)
+        if refused.returncode != 1 or (partial / '.complete').exists():
+            raise RuntimeError('backup did not reject RLS data without publishing completion')
+        docker('exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=(fixture_root / 'disable-backup-rls.sql').read_text())
+        print('readonly backup role reads future schema, rejects writes and sequence advance; RLS blocks backup without completion: ok', flush=True)
     if arguments.check_expired_restore:
         expired_capture = str(uuid.uuid4())
         lock_command = ['docker', 'exec', '-i', pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', '-v', 'tenant=' + env['ADMIN_BOOTSTRAP_TENANT_ID'], '-v', 'user=' + str(uuid.uuid4()), '-v', 'capture=' + expired_capture, '-f', '-']
@@ -522,6 +549,9 @@ except urllib.error.HTTPError as error:
     if arguments.check_database_privileges:
         fixture = (project_root / 'tests/fixtures/capture-backup/create-database-role.sql').read_text()
         docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)
+    if arguments.check_readonly_backup_role:
+        fixture = (project_root / 'tests/fixtures/capture-backup/create-restored-backup-role.sql').read_text()
+        docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)
     target_volumes = ['capture-e2e-restored-' + suffix + '-' + x for x in ('spool', 'keys', 'anchors', 'ledger')]
     for v in target_volumes:
         created.append(('volume', v))
@@ -608,6 +638,12 @@ except urllib.error.HTTPError as error:
             raise RuntimeError('rolled back journal did not reject the independent latest position: ' + latest_check.stderr)
         print('rolled back journal accepts old position and rejects independent latest position: ok', flush=True)
         raise SystemExit(0)
+    if arguments.check_readonly_backup_role:
+        fixture = (project_root / 'tests/fixtures/capture-backup/read-restored-backup-role.sql').read_text()
+        observed = docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', input=fixture)
+        if observed != 'fixture_backup|19':
+            raise RuntimeError('readonly backup omitted future schema or reader permissions during restore')
+        print('readonly backup restored future schema contents and reader permissions: ok', flush=True)
     if arguments.check_database_privileges:
         fixture = (project_root / 'tests/fixtures/capture-backup/restrict-database-role.sql').read_text()
         docker('exec', '-i', restore_pg, 'psql', '-X', '-U', database_admin, '-d', 'gateway', '-v', 'ON_ERROR_STOP=1', input=fixture)

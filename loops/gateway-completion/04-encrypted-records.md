@@ -746,3 +746,9 @@ P2：沿用現有加密保存及備份，逐項核對事件、用量、同內容
 最終版把來源降權提前至初始化保存層及首次啟動之前；正在`gateway-capture-limited-startup-20261105`驗證，結束碼將寫`/tmp/gateway-capture-limited-startup-exit.json`。全套另在`/tmp/gateway-capture-limited-role-all.log`（session10606）執行；不改正在執行的腳本，不重疊建置與推送。參考PostgreSQL17官方ALTER ROLE與資訊函式文件（`https://www.postgresql.org/docs/17/sql-alterrole.html`、`https://www.postgresql.org/docs/17/functions-info.html`），實際權限及拒絕以隔離SQL輸出判定。
 
 2026-11-05 最終版首次啟動前降權的完整prod演練結束碼0（`/tmp/gateway-capture-limited-startup-exit.json`及對應temp-service日誌）；原始來源和恢復後Gateway均非superuser，兩協定串流與保存、備份、拒絕竄改、刪除不復活及新請求保存讀回全部通過。臨時程序、帶gateway.capture_e2e標籤的容器、卷與網路均空。獨立審查未見新假綠，仍保留schema owner及管理權限恢復邊界。新全套`/tmp/gateway-capture-limited-role-all.log`結束碼0；遠端a8fab43之CI41968919751已成功。本輪未動正式。
+
+2026-11-05 476bcba已成功推送。補獨立唯讀備份帳號：`capture_backup.py --database-user`或`CAPTURE_BACKUP_DATABASE_USER`選擇psql身分查詢及pg_dump帳號，保留Gateway來源核對，不回退到Gateway帳號。帳號格式在任何外部命令前驗證。相關38項測試通過（`/tmp/gateway-readonly-backup-tests.log`），包括指定帳號與錯誤帳號無回退。完整prod演練搭配既有backup.sh入口、雙協定串流、降權來源與恢復後服務、獨立見證及刪除，結束碼0（`/tmp/gateway-capture-readonly-backup-exit.json`及對應temp-service日誌）。備份角色只有讀取與身分函式權限；新增schema、表及序列沿用預設讀取授權。INSERT與nextval皆42501拒絕；啟用RLS使pg_dump拒絕，完整備份不發布.complete；移除測試RLS後正常備份與還原通過。所有臨時程序、容器、卷、網路已空；未動正式。
+
+審查補強：還原原由superuser讀回，現改NOLOGIN備份角色的實際SET ROLE讀回。已在本次真實還原容器用相同SQL驗得`fixture_backup|19`（`/tmp/gateway-readonly-backup-restored-acl.log`），確認資料及ACL皆保留；新版腳本已接入該SQL，但此額外自動呼叫未重跑整套prod演練，前述真實SQL單獨驗證通過。唯讀驗收強制remote-replay，避免witness或independent-position提前exit0而漏驗還原。新測試在舊版兩個組合均失敗（flags-negative.log），修正後通過（flags-positive.log），並納入check.sh all。新版全套在`/tmp/gateway-readonly-backup-all.log`（session27496）執行；正式角色與排程未配置、不標P2完成。官方依據PostgreSQL17 pg_dump及ALTER DEFAULT PRIVILEGES：`https://www.postgresql.org/docs/17/app-pgdump.html`、`https://www.postgresql.org/docs/17/sql-alterdefaultprivileges.html`。
+
+2026-11-05 唯讀備份新版全套`/tmp/gateway-readonly-backup-all.log`結束碼0，含早退旗標回歸測試；可提交此切片，整體P2仍保留正式資料與備份及原Client缺項。

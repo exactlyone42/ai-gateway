@@ -166,6 +166,22 @@ else:
         result = subprocess.run(["python3", str(SCRIPT), "--gateway", "synthetic", "--postgres", "synthetic-db", "--destination", str(destination), "--recipient", self.recipient, "--signer", self.signer], env=env, capture_output=True, text=True)
         return result, destination
 
+    def test_an_explicit_backup_role_is_used_for_dump_and_identity(self):
+        log = self.base / "readonly-backup-commands.log"
+        result, _ = self.run_backup("readonly-role", CAPTURE_BACKUP_DATABASE_USER="fixture_backup", TEST_DOCKER_LOG=str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = log.read_text().splitlines()
+        database = [line for line in commands if "pg_dump " in line or "psql " in line]
+        self.assertGreaterEqual(len(database), 3)
+        self.assertTrue(all("-U fixture_backup " in line for line in database), database)
+
+    def test_an_invalid_backup_role_is_rejected_without_falling_back(self):
+        log = self.base / "invalid-backup-role-commands.log"
+        result, destination = self.run_backup("invalid-backup-role", CAPTURE_BACKUP_DATABASE_USER="fixture backup", TEST_DOCKER_LOG=str(log))
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(destination.exists())
+        self.assertFalse(log.exists())
+
     def test_existing_backup_destination_is_preserved(self):
         destination = self.base / "existing-destination"
         destination.mkdir()

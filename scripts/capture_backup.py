@@ -260,7 +260,9 @@ def encrypt_stream(producer, output, recipient, lock, prefix):
             finish_backup_source(source, nonce)
 
 
-def backup(gateway, postgres, destination, recipient, signer, spool_dest, keys_dest, ledger_dest, erasure_dest, witness_dest):
+def backup(gateway, postgres, destination, recipient, signer, spool_dest, keys_dest, ledger_dest, erasure_dest, witness_dest, database_user=None):
+    if database_user is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", database_user):
+        raise BackupError("備份資料庫帳號名稱不正確")
     if not re.fullmatch(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}", recipient) or not re.fullmatch(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}", signer):
         raise BackupError("備份加密金鑰識別值不正確")
     require_local_docker()
@@ -270,6 +272,8 @@ def backup(gateway, postgres, destination, recipient, signer, spool_dest, keys_d
     validate_storage_environment(gateway_info, [spool_dest, keys_dest, ledger_dest, erasure_dest, witness_dest])
     gateway_id = gateway_info["Id"]
     db_user, db_name, postgres_id, postgres_started, postgres_port = database_target(gateway_info, gateway_id, postgres)
+    if database_user is not None:
+        db_user = database_user
     db_identity = database_identity(postgres_id, postgres_port, db_user, db_name)
     gateway_started = gateway_info["State"]["StartedAt"]
     spool, keys, ledger, erasure, witness = mounts
@@ -408,6 +412,7 @@ def main():
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--recipient", required=True)
     parser.add_argument("--signer", required=True)
+    parser.add_argument("--database-user", default=os.environ.get("CAPTURE_BACKUP_DATABASE_USER"))
     parser.add_argument("--spool-destination", default="/var/lib/agent-pool-gateway/capture-spool")
     parser.add_argument("--keys-destination", default="/var/lib/agent-pool-gateway/capture-keys")
     parser.add_argument("--ledger-destination", default="/var/lib/agent-pool-gateway/ledger-spool")
@@ -417,7 +422,7 @@ def main():
     try:
         backup(args.gateway, args.postgres, args.destination, args.recipient, args.signer,
                args.spool_destination, args.keys_destination, args.ledger_destination,
-               args.erasure_destination, args.witness_destination)
+               args.erasure_destination, args.witness_destination, args.database_user)
     except BackupError as error:
         print(f"備份失敗：{error}；原資料未變更，未完成的備份不可使用。", file=sys.stderr)
         return 1
