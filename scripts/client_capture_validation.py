@@ -17,15 +17,29 @@ def validate_owned_compact(saved, fields):
     return {'compact_requests': 1, 'resumed_requests': 1, 'preserved_fields': len(fields), 'summary_characters': len(summary)}
 
 
-def validate_owned_usage(saved, usage_records, records, expected_reply):
+def validate_owned_usage(saved, usage_records, records, expected_reply, codex=True):
     if not saved or len(saved) != len(records) or len(usage_records) != len(records) or len({row['id'] for row in usage_records}) != len(records) or {row['id'] for row in usage_records} != {record['capture_id'] for record in records}:
         raise RuntimeError('本人來源保存與用量數量不符')
     rows = {row['id']: row for row in usage_records}
     for index, (content, record) in enumerate(zip(saved, records)):
         row = rows[record['capture_id']]
         events = [json.loads(line[5:].lstrip()) for line in content['provider_response'].splitlines() if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]')]
-        completed = [event['response'] for event in events if event.get('type') == 'response.completed']
-        texts = [event.get('text') for event in events if event.get('type') == 'response.output_text.done']
+        if codex:
+            completed = [event['response'] for event in events if event.get('type') == 'response.completed']
+            texts = [event.get('text') for event in events if event.get('type') == 'response.output_text.done']
+        else:
+            completed = [event for event in events if event.get('type') == 'message_stop']
+            starts = [event['message']['usage'] for event in events if event.get('type') == 'message_start']
+            ends = [event['usage'] for event in events if event.get('type') == 'message_delta']
+            if len(starts) != 1 or len(ends) != 1:
+                raise RuntimeError('本人來源缺少唯一開始與結束用量')
+            native = starts[0] | ends[0]
+            completed = [{'usage': {
+                'input_tokens': native['input_tokens'] + native.get('cache_read_input_tokens', 0) + native.get('cache_creation_input_tokens', 0),
+                'output_tokens': native['output_tokens'],
+                'input_tokens_details': {'cached_tokens': native.get('cache_read_input_tokens', 0), 'cache_write_tokens': native.get('cache_creation_input_tokens', 0)},
+            }}] if len(completed) == 1 else []
+            texts = [''.join(event['delta']['text'] for event in events if event.get('type') == 'content_block_delta' and event.get('delta', {}).get('type') == 'text_delta')]
         if len(completed) != 1 or (index == len(saved) - 1 and texts != [expected_reply]):
             raise RuntimeError('本人來源缺少完整完成回應')
         usage = completed[0]['usage']
@@ -44,20 +58,24 @@ def validate_owned_usage(saved, usage_records, records, expected_reply):
             raise RuntimeError('本人來源預估用量未獨立記帳')
 
 
-def validate_owned_tools(saved, expected_value):
+def validate_owned_tools(saved, expected_value, codex=True):
     if len(saved) != 2:
         raise RuntimeError('本人來源工具往返不是兩次請求')
     events = [json.loads(line[5:].lstrip()) for line in saved[0]['provider_response'].splitlines() if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]')]
-    calls = [event['item'] for event in events if event.get('type') == 'response.output_item.done' and event.get('item', {}).get('type') == 'function_call']
+    calls = [event['item'] for event in events if event.get('type') == 'response.output_item.done' and event.get('item', {}).get('type') == 'function_call'] if codex else [event['content_block'] for event in events if event.get('type') == 'content_block_start' and event.get('content_block', {}).get('type') == 'tool_use']
     if len(calls) != 1:
         raise RuntimeError('本人來源未完成唯一工具呼叫')
     for leg in ('client_request', 'provider_request'):
-        original = [item for item in json.loads(saved[0][leg]).get('input', []) if item.get('role') == 'user']
-        following = json.loads(saved[1][leg]).get('input', [])
+        field = 'input' if codex else 'messages'
+        original = [item for item in json.loads(saved[0][leg]).get(field, []) if item.get('role') == 'user']
+        following = json.loads(saved[1][leg]).get(field, [])
         if not original or not all(item in following for item in original):
             raise RuntimeError('本人來源工具保存遺失原訊息')
-        outputs = [item for item in following if item.get('type') == 'function_call_output' and item.get('call_id') == calls[0]['call_id']]
-        if len(outputs) != 1 or expected_value not in json.dumps(outputs[0].get('output')):
+        if codex:
+            outputs = [item for item in following if item.get('type') == 'function_call_output' and item.get('call_id') == calls[0]['call_id']]
+        else:
+            outputs = [block for item in following if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_result' and block.get('tool_use_id') == calls[0]['id'] and not block.get('is_error')]
+        if len(outputs) != 1 or expected_value not in json.dumps(outputs[0].get('output' if codex else 'content')):
             raise RuntimeError('本人來源工具結果與呼叫未對應')
 
 

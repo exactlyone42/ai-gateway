@@ -727,6 +727,9 @@ fn extra_provider_profiles(
             let valid_operations = !operations.is_empty()
                 && operations.iter().all(|operation| match kind {
                     ProviderKind::Gemini => *operation == GatewayOperation::GeminiGenerateContent,
+                    ProviderKind::Ollama if operations == [GatewayOperation::AnthropicMessages] => {
+                        true
+                    }
                     ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => matches!(
                         operation,
                         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions
@@ -1512,6 +1515,20 @@ mod tests {
         assert!(valid_origin("http://127.0.0.1:5173", "dev"));
         assert!(valid_origin("http://[::1]:5173", "dev"));
         assert!(!valid_origin("http://192.168.1.10:5173", "dev"));
+    }
+
+    #[test]
+    fn ollama_native_messages_requires_a_separate_profile() {
+        let native = r#"[{"kind":"ollama","credential_ref":"none://ollama-messages","provider_key":"local-claude","base_url":"http://127.0.0.1:11434","operations":["anthropic_messages"]}]"#;
+        assert!(extra_provider_profiles(native.to_owned(), false).is_ok());
+        for operations in [
+            r#"["anthropic_messages","openai_responses"]"#,
+            r#"["anthropic_count_tokens"]"#,
+        ] {
+            let invalid = native.replace(r#"["anthropic_messages"]"#, operations);
+            assert!(extra_provider_profiles(invalid, false).is_err());
+        }
+        assert!(extra_provider_profiles(native.replace("ollama", "vllm"), false).is_err());
     }
 
     #[test]

@@ -43,8 +43,8 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
-    if args.check_local and (args.check_codex_held or args.client != 'codex' or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_cancel, args.check_error))):
-        parser.error('local source requires codex and source model, separately from fixture and subscription modes')
+    if args.check_local and (args.check_codex_held or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_cancel, args.check_error))):
+        parser.error('local source requires a source model separately from fixture and subscription modes')
     if args.check_owned_compact and (not (args.check_codex_held and args.check_capture) or args.check_owned_tools):
         parser.error('owned compact requires owned source and capture, separately from tools')
     if args.check_owned_tools and not (live_source and args.check_capture):
@@ -341,11 +341,13 @@ def main():
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
+            if not cancel:
+                (home / 'client-result.json').write_text(json.dumps({'exit': result.returncode, 'expected_success': success, 'expected_reply_matches': result.stdout.strip() == expected_reply}, indent=2))
             if live_source:
                 if success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
-                    raise RuntimeError(f'{label}: 原Codex未完成本人來源實送，紀錄位於{runtime}')
+                    raise RuntimeError(f'{label}: 原{args.client}未完成來源實送，紀錄位於{runtime}')
                 if not success and (result.returncode != 1 or result.stdout.strip() == expected_reply):
-                    raise RuntimeError(f'{label}: 原Codex應拒絕卻成功')
+                    raise RuntimeError(f'{label}: 原{args.client}未正常退出拒絕，退出碼{result.returncode}')
             elif args.check_compact and args.compact_failure:
                 if result.returncode != 1 or fixture.failure_marker not in diagnostic or result.stdout.strip() == expected_reply:
                     raise RuntimeError(f'原Client未正確回報壓縮失敗：{runtime}')
@@ -423,7 +425,7 @@ def main():
                     compact = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_compact'](saved, owned_fields)
                     (runtime / 'compact-result.json').write_text(json.dumps(compact, indent=2))
                 if args.check_owned_tools:
-                    runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_tools'](saved, expected_reply)
+                    runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_tools'](saved, expected_reply, codex)
                 for leg in ('client_request', 'provider_request'):
                     if not (args.check_owned_tools or args.check_owned_compact) and expected_reply not in saved[0][leg]:
                         raise RuntimeError('本人來源保存缺少原請求')
@@ -438,7 +440,7 @@ def main():
             validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
             if live_source:
                 (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
-                validation['validate_owned_usage'](saved, usage_records, records, expected_reply)
+                validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
             else:
                 validation['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
             dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
@@ -460,8 +462,10 @@ def main():
                 owned_file = runtime / 'owned-tool-input.txt'
                 owned_file.write_text(expected_reply)
                 owned_prompt = f'Use exactly one local shell command to read {owned_file}. Then reply with exactly the file contents and nothing else.'
-                if args.check_local:
+                if args.check_local and codex:
                     owned_prompt += ' Use the provided exec_command function with cmd set to cat followed by the exact path above. Do not use container.exec, exec or read_file; those tools are not available.'
+                if not codex:
+                    owned_prompt = f'Use exactly one Read tool call to read {owned_file}. Your final answer must contain only the exact file contents, excluding the Read line number. No acknowledgement, explanations, quotes, Markdown, code fences or follow-up questions.'
             client('alice', f'{model_prefix}-alice', True, 'held-owner', owned_prompt)
             if args.check_capture:
                 verify_capture()
@@ -558,9 +562,12 @@ def main():
                 for _ in range(250):
                     result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=(root / 'queries/test_client_capture_records.sql').read_text(), capture_output=True, text=True, timeout=5, check=True)
                     records = json.loads(result.stdout)
-                    if records and len(records) == len(list((runtime / 'encrypted-spool').glob('*.capture'))):
+                    usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=(root / 'queries/test_client_capture_usage.sql').read_text(), capture_output=True, text=True, timeout=5, check=True)
+                    usage_records = json.loads(usage_result.stdout)
+                    if {record['capture_id'] for record in records} == {row['id'] for row in usage_records} and (records or not list((runtime / 'encrypted-spool').glob('*.capture'))):
                         break
                     time.sleep(0.2)
+                (runtime / 'failure-usage.json').write_text(json.dumps(usage_records, indent=2))
                 content = []
                 for record in records:
                     legs = {leg: api(f'/admin/v1/request-captures/{record["capture_id"]}/content?leg={leg}', token=admin, raw_response=True) for leg in ('client_request', 'provider_request', 'provider_response', 'client_response')}

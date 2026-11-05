@@ -233,3 +233,5 @@ Claude Code 2.1.318 與 Codex CLI 0.166.0 各經本機 Gateway d7c7cfd 取得固
 整批檢查原本把 Claude 的模型清單請求誤算給 Codex；現在僅檢查 Codex 執行期間的 Gateway 日誌，仍確認 Codex 沒有查模型清單。未知模型提示保留，不捏造模型能力。新版本紀錄也納入欄位及金鑰隔離檢查；故意把未轉送金鑰的結果改為 false 時，檢查會失敗。真實供應商、多人、跨主機、工具結果與取消仍須各自驗收。
 
 本輪官方設定參考：[Claude Code 設定](https://code.claude.com/docs/en/settings)、[Codex 設定](https://developers.openai.com/codex/config-reference)，於2026-11-05核對；實際版本與行為以本機指令及去除內容的紀錄為準。
+
+2026-11-05 本機 Claude 路線：分支新增 Ollama 原生Messages設定，原Claude Code2.1.318搭配qwen3-coder:30b的短答成功。兩輪Read工具的原訊息、呼叫編號、工具結果及加密讀回用量另已核對；模型最終多加說明，未符合精確答覆要求。金鑰撤銷後Gateway持續拒絕401，但Client重試至逾時，未算完整隔離驗收通過。Client仍提示自訂模型使用預設200k上下文，未驗實際長上下文。正式環境未動。

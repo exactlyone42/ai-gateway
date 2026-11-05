@@ -410,6 +410,7 @@ pub enum LocalRuntime {
 
 pub struct LocalProvider {
     runtime: LocalRuntime,
+    dialect: ProviderDialect,
 }
 
 impl ProviderAdapter for AnthropicProviderAdapter {
@@ -841,7 +842,7 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn dialect(&self) -> ProviderDialect {
-        ProviderDialect::OpenAi
+        self.dialect
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -906,10 +907,16 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
-        (operation == CanonicalOperation::Generate).then_some(GatewayOperation::OpenAiResponses)
+        (operation == CanonicalOperation::Generate).then_some(match self.dialect {
+            ProviderDialect::Anthropic => GatewayOperation::AnthropicMessages,
+            _ => GatewayOperation::OpenAiResponses,
+        })
     }
 
     fn default_path(&self, operation: GatewayOperation) -> Option<&'static str> {
+        if self.dialect == ProviderDialect::Anthropic {
+            return (operation == GatewayOperation::AnthropicMessages).then_some("/v1/messages");
+        }
         match operation {
             GatewayOperation::OpenAiResponses => Some("/v1/responses"),
             GatewayOperation::OpenAiChatCompletions => Some("/v1/chat/completions"),
@@ -922,7 +929,11 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn allows_client_header(&self, name: &HeaderName) -> bool {
-        name == header::CONTENT_TYPE || name == header::ACCEPT
+        if self.dialect == ProviderDialect::Anthropic {
+            ANTHROPIC.allows_client_header(name)
+        } else {
+            name == header::CONTENT_TYPE || name == header::ACCEPT
+        }
     }
 
     fn encode_canonical(
@@ -931,6 +942,9 @@ impl ProviderAdapter for LocalProvider {
         target_operation: GatewayOperation,
         provider_model_id: &str,
     ) -> Result<Bytes, GatewayError> {
+        if self.dialect == ProviderDialect::Anthropic {
+            return ANTHROPIC.encode_canonical(request, target_operation, provider_model_id);
+        }
         if target_operation != GatewayOperation::OpenAiResponses {
             return Err(GatewayError::UnsupportedRequest);
         }
@@ -1218,10 +1232,27 @@ static GEMINI: GeminiProvider = GeminiProvider;
 static XAI: XaiProvider = XaiProvider;
 static VLLM: LocalProvider = LocalProvider {
     runtime: LocalRuntime::Vllm,
+    dialect: ProviderDialect::OpenAi,
 };
 static OLLAMA: LocalProvider = LocalProvider {
     runtime: LocalRuntime::Ollama,
+    dialect: ProviderDialect::OpenAi,
 };
+static OLLAMA_ANTHROPIC: LocalProvider = LocalProvider {
+    runtime: LocalRuntime::Ollama,
+    dialect: ProviderDialect::Anthropic,
+};
+
+pub fn for_profile(
+    profile: &ProviderProfile,
+) -> Result<&'static dyn ProviderAdapter, GatewayError> {
+    if profile.kind == ProviderKind::Ollama && profile.target_dialect == ProviderDialect::Anthropic
+    {
+        Ok(&OLLAMA_ANTHROPIC)
+    } else {
+        for_kind(profile.kind)
+    }
+}
 
 #[cfg(test)]
 pub fn for_dialect(dialect: ProviderDialect) -> &'static dyn ProviderAdapter {

@@ -84,6 +84,14 @@ impl ProviderKind {
             Self::OpenAi | Self::Xai | Self::Vllm | Self::Ollama => ProviderDialect::OpenAi,
         }
     }
+
+    fn profile_dialect(self, operations: &[GatewayOperation]) -> ProviderDialect {
+        if self == Self::Ollama && operations == [GatewayOperation::AnthropicMessages] {
+            ProviderDialect::Anthropic
+        } else {
+            self.dialect()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -540,8 +548,8 @@ impl ProviderProfile {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
+            target_dialect: kind.profile_dialect(&operations),
             operations,
-            target_dialect: kind.dialect(),
             kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::Bearer(secret.into()),
@@ -605,8 +613,8 @@ impl ProviderProfile {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
+            target_dialect: kind.profile_dialect(&operations),
             operations,
-            target_dialect: kind.dialect(),
             kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::None,
@@ -810,7 +818,7 @@ impl ProviderProfiles {
                 || profile.base_url.is_empty()
                 || profile.operations.is_empty()
                 || profile.allowed_tenants.is_empty()
-                || profile.target_dialect != profile.kind.dialect()
+                || profile.target_dialect != profile.kind.profile_dialect(&profile.operations)
                 || by_ref
                     .insert(profile.credential_ref.clone(), profile)
                     .is_some()

@@ -128,6 +128,31 @@ if __name__ == '__main__':
 
 
 class OwnedUsageValidationTest(unittest.TestCase):
+    def native_sample(self):
+        saved, rows, records = self.sample()
+        events = [
+            {'type': 'message_start', 'message': {'usage': {'input_tokens': 7, 'output_tokens': 0}}},
+            {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'OWNED_OK'}},
+            {'type': 'message_delta', 'usage': {'output_tokens': 2}},
+            {'type': 'message_stop'},
+        ]
+        saved[0]['provider_response'] = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
+        return saved, rows, records
+
+    def test_native_claude_usage_requires_complete_stream(self):
+        saved, rows, records = self.native_sample()
+        validate_owned_usage(saved, rows, records, 'OWNED_OK', False)
+        saved[0]['provider_response'] = saved[0]['provider_response'].replace('message_stop', 'message_pending')
+        with self.assertRaisesRegex(RuntimeError, '完整完成'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK', False)
+
+    def test_native_usage_cannot_be_replaced_by_matching_ledger_fields(self):
+        saved, rows, records = self.native_sample()
+        for value in (rows[0]['actual_usage'], rows[0]['usage'][0]):
+            value['input_tokens'] = 9
+        with self.assertRaisesRegex(RuntimeError, '供應商回應'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK', False)
+
     def sample(self):
         event = {'type': 'response.completed', 'response': {'output': [{'text': 'OWNED_OK'}], 'usage': {'input_tokens': 7, 'output_tokens': 2}}}
         saved = [{'provider_response': 'data: ' + json.dumps({'type': 'response.output_text.done', 'text': 'OWNED_OK'}) + '\n\ndata: ' + json.dumps(event) + '\n\n'}]
@@ -188,6 +213,32 @@ class OwnedUsageValidationTest(unittest.TestCase):
 
 
 class OwnedToolsValidationTest(unittest.TestCase):
+    def native_sample(self):
+        original = {'role': 'user', 'content': 'Read the isolated file.'}
+        event = {'type': 'content_block_start', 'content_block': {'type': 'tool_use', 'id': 'native-call', 'name': 'Read'}}
+        first = {'provider_response': 'data: ' + json.dumps(event) + '\n\n'}
+        result = {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'native-call', 'content': 'random-file-value'}]}
+        second = {}
+        for leg in ('client_request', 'provider_request'):
+            first[leg] = json.dumps({'messages': [original]})
+            second[leg] = json.dumps({'messages': [original, result]})
+        return [first, second]
+
+    def test_native_claude_tools_preserve_result_and_call(self):
+        saved = self.native_sample()
+        validate_owned_tools(saved, 'random-file-value', False)
+        saved[1]['provider_request'] = saved[1]['provider_request'].replace('native-call', 'wrong-call')
+        with self.assertRaisesRegex(RuntimeError, '未對應'):
+            validate_owned_tools(saved, 'random-file-value', False)
+
+    def test_native_tool_error_is_not_a_successful_result(self):
+        saved = self.native_sample()
+        body = json.loads(saved[1]['client_request'])
+        body['messages'][1]['content'][0]['is_error'] = True
+        saved[1]['client_request'] = json.dumps(body)
+        with self.assertRaisesRegex(RuntimeError, '未對應'):
+            validate_owned_tools(saved, 'random-file-value', False)
+
     def sample(self):
         original = {'role': 'user', 'content': 'Read the isolated file.'}
         event = {'type': 'response.output_item.done', 'item': {'type': 'function_call', 'call_id': 'owned-call', 'name': 'exec_command'}}

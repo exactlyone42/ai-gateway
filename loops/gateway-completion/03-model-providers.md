@@ -44,3 +44,11 @@ OpenAI 格式轉往 Anthropic 的延遲上游測試，修正前等待訊號測�
 2026-11-05 本機互通修正版全套 `/tmp/gateway-ollama-core-all.log` 結束碼0：Rust主庫476過、7 ignored，其餘整合測試通過；Client驗證38過，備份相關159項含20 skipped，守門陰性33/33過。差異自查確認產品改動限於關閉推理能力判斷及Ollama Responses串流標頭，未放寬內容解析與完成事件檢查；本輪未獨立審查，P3維持RUNNING。Claude本機路線下一步先驗既有Messages轉Responses路徑；官方Anthropic相容及Claude Code文件已讀，原件 `/tmp/gateway-ollama-anthropic-reference.md`、`/tmp/gateway-ollama-claude-reference.md`；文件不能代替0.34.0原Client實送。提交、新CI與正式驗收尚未完成。
 
 2026-11-05 Claude本機路線盤點：`src/adapters.rs::validate_cross_request` 明確拒絕Anthropic Messages串流轉Responses，因Responses終點才提供輸入用量，不能宣稱原Claude能走該轉換。現有LocalProvider只宣告OpenAI方言，EXTRA_PROVIDER_PROFILES_JSON也只允許Ollama的Responses／Chat，故原生Messages尚未接通；官方本機Anthropic相容接口提供Messages、工具與串流，不支援count_tokens。下一切片以獨立Ollama Messages設定沿用原生接口，不把串流緩衝至完成來偽裝互通；保留既有OpenAI路線及跨協定拒絕規則，先做設定與供應商正反對照，再原Claude實送。官方文件是研究來源，0.34.0實送仍待驗。
+
+2026-11-05 原生Messages切片：舊版設定測試拒絕Ollama Messages，陰性 `/tmp/gateway-native-messages-config-negative.log`；新增獨立Messages設定、依設定選供應商協定並保留Responses原路徑，不放寬跨協定串流拒絕。Ollama測試5過480未跑，轉接回歸57過428未跑；來源 https://docs.ollama.com/api/anthropic-compatibility 與tag v0.34.0/server/routes.go，原件 `/tmp/gateway-ollama-native-routes-0.34.0.go` 明確註冊/v1/messages。固定測試binary `/tmp/gateway-native-messages-20261105/gateway`，revision62e1e3c-native-messages。
+
+原Claude2.1.318短答 `/home/cash/.cache/tmp/gateway-client-identity-xfj8qwfe/held-owner/client-diagnostic.txt` 精確回W05_CLAUDE_CODE_OK；模型政策拒絕403亦退出1。撤銷後Gateway回401，Client持續重試至timeout，該組合失敗，不能稱越權成功或正常退出通過。首次工具 `/tmp/gateway-client-identity-2szun69s/` 真Read後回了額外說明，精確答覆失敗；失敗診斷以已匯入記錄數等於剩餘spool數會誤提早結束，改成以帳本request id集合逐筆核對，不把該診斷缺頁當產品資料遺失。第二次 `/tmp/gateway-client-identity-unwanrbj/` 提醒禁止Markdown後仍多加說明，不再重試同一路線。
+
+第二次failure-captures完整2筆，離線嚴格核對Read呼叫編號、工具結果及原user保留通過；failure-usage與兩份供應商完成事件逐筆核對，input17711、output120，實際供應商文字等於Client實際文字，`partial-tool-result.json` 明確記exact_requested_reply_passed=false。用量檢查採實際答覆只證明記帳，不拿來替代原要求精確答覆。驗證器36項過，含錯工具編號、工具錯誤、缺完成事件及錯用量拒絕。三個臨時服務及DB皆已回收，DB查詢count0；無正式寫入，未下載模型或改Ollama設定。新全套及獨立審查未完成。
+
+推送補記：62e1e3c序列推送 `/tmp/gateway-capacity-handshake-push.log` 檢查皆過但程序退出141，遠端仍3f4d824，不宣稱推送成功；SSH serveraliveinterval=0，連線保活為下次可逆嘗試，原因尚未證實。e3d53e7與62e1e3c保留本機提交，不繞過掛鉤。

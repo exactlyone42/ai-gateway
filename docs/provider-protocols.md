@@ -241,3 +241,9 @@ Sources, verified 2026-09-11: [Gemini generateContent and usage metadata](https:
 ## Ollama Responses 的串流標頭
 
 本機 Ollama 0.34.0 在純工具呼叫時，曾以 `application/x-ndjson` 標示完整 SSE 串流，造成 Gateway 誤以一般 JSON 解析並回 502。供應商轉接只在 Ollama 的 Responses 串流成功回應遇到此標頭時，改成 `text/event-stream`；回應內容的位元組、事件及用量不改，仍須通過 SSE 與完成事件檢查。真正的 NDJSON 不會因此成為有效 Responses 串流。其他供應商、Chat Completions、非串流與失敗狀態不套用。隔離重現與原 Client 實送證據見 `loops/gateway-completion/03-model-providers.md`；尚未部署。
+
+## Ollama 的原生 Claude 接口
+
+Ollama 0.34.0 提供 `/v1/messages`。在 `EXTRA_PROVIDER_PROFILES_JSON` 為 `kind=ollama` 設定單獨的 `operations=["anthropic_messages"]`，Gateway 會使用原生 Claude 協定；同一設定不可混合 Responses，也不宣告 Ollama 不支援的 `anthropic_count_tokens`。原有 Responses／Chat 設定維持 OpenAI 協定。Client 的 Gateway 金鑰不轉送；本機可不設供應商憑證，若設定供應商 bearer 憑證仍只由伺服器持有。只有工具結果的 user 訊息會補上接續文字，保留原工具編號與內容。
+
+此分支已用原 Claude Code 2.1.318 與本機 Qwen 驗到短答，以及工具兩輪的內容保存與用量對帳；工具後精確答覆仍未通過，撤銷金鑰後 Client 持續重試401也未通過正常退出驗收。尚未部署，不能視為完整 Claude 本機互通。來源：[Ollama Anthropic相容說明](https://docs.ollama.com/api/anthropic-compatibility)、[0.34.0接口註冊](https://github.com/ollama/ollama/blob/v0.34.0/server/routes.go)，2026-11-05核對；證據及邊界見03子檔。
