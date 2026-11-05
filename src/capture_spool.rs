@@ -1035,8 +1035,9 @@ mod tests {
 
     #[test]
     fn separate_process_holds_the_capacity_lock() {
+        use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let root = std::env::temp_dir().join(format!("capture-capacity-lock-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let lock_path = root.join(".capture-capacity.lock");
@@ -1044,26 +1045,26 @@ mod tests {
         let mut child = Command::new("flock")
             .arg("-x")
             .arg(&lock_path)
-            .arg("sleep")
-            .arg("1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .arg("sh")
+            .arg("-c")
+            .arg("printf 'ready\\n'; read -r release")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(2);
-        loop {
-            let probe = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .unwrap();
-            if probe.try_lock().is_err() {
-                break;
-            }
-            assert!(Instant::now() < until);
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let output = child.stdout.take().unwrap();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let ready = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(output).read_line(&mut line).unwrap();
+            ready_sender.send(line).unwrap();
+        });
+        assert_eq!(
+            ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "ready\n"
+        );
+        ready.join().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker_root = root.clone();
         let worker = std::thread::spawn(move || {
@@ -1071,6 +1072,7 @@ mod tests {
             sender.send(lock.is_ok()).unwrap();
         });
         assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        child.stdin.take().unwrap().write_all(b"release\n").unwrap();
         assert!(child.wait().unwrap().success());
         assert!(receiver.recv_timeout(Duration::from_secs(2)).unwrap());
         worker.join().unwrap();

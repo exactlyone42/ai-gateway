@@ -100,3 +100,7 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 真摘要新版全套 `/tmp/gateway-owned-compact-all.log`（session13760）結束碼0：主Rust473過7ignored、Client38項過，備份相關159項含20skipped；其餘整合及bans陰性33/33過。本輪只增驗收，正式環境未動；原f24ca6f已推送並讀回相同遠端SHA，CI41986370325仍pending。摘要實測與陰性範圍不擴張為整體驗收。
 
 2026-11-05 原Codex0.166.0／本機qwen3-coder:30b真工具往返、串流、8方向保存與逐筆記帳通過，權限403及撤銷401無額外上游；證據 `/tmp/gateway-client-identity-nwib6xcz/`，完整失敗、兩項產品修正與陰性見03。這補本機模型原Client工具缺口；Claude搭本機模型、跨主機、第二真人與正式驗收未完成，未標P3 DONE。新版全套待跑。
+
+2026-11-05 e3d53e7已本機提交但推送前測試失敗，遠端仍3f4d824。`/tmp/gateway-ollama-core-push.log` 顯示容量鎖跨程序測試在兩秒探測期間未觀測到只持續一秒的子程序鎖。測試改為flock取得鎖後經stdout通知、等待stdin釋放；正式保存程式未改。`/tmp/gateway-capacity-handshake-positive.log` 一項通過、482未跑；陰性以僅該測試程序PATH中的flock替身改成unlock，`/tmp/gateway-capacity-handshake-negative.log` 在阻擋斷言失敗退出101，未修改正式程式或編譯產物。新版全套 `/tmp/gateway-capacity-handshake-all.log` 正在執行；完成後才提交修正及序列推送，不能把前版all當新版通過。
+
+2026-11-05 容量鎖同步修正版全套 `/tmp/gateway-capacity-handshake-all.log` 結束碼0，Rust主庫476過7 ignored，其餘整合及守門陰性33/33通過；Client38過、備份159含20 skipped。差異自查僅測試握手及證據文件；未獨立審查，P3未DONE。接續提交及新推送；前次失敗不得改寫為成功。
