@@ -105,9 +105,16 @@ pub async fn admit(
         .await?;
         return Err(GatewayError::ModelForbidden);
     }
+    let subscription_only = candidates
+        .iter()
+        .any(|candidate| candidate.profile.is_codex_subscription());
+    if subscription_only {
+        candidates.retain(|candidate| candidate.profile.is_codex_subscription());
+    }
     let original_candidates = candidates.clone();
     let classification_started = std::time::Instant::now();
-    let task_decision = if operation != GatewayOperation::AnthropicCountTokens {
+    let task_decision = if !subscription_only && operation != GatewayOperation::AnthropicCountTokens
+    {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),
             task_classification::decide(
@@ -154,7 +161,8 @@ pub async fn admit(
     }
     let mut jev_attempted = false;
     let mut jev_elapsed_ms = None;
-    let routing_reason = if operation != GatewayOperation::AnthropicCountTokens
+    let routing_reason = if !subscription_only
+        && operation != GatewayOperation::AnthropicCountTokens
         && let Some(router) = &state.jev
     {
         jev_attempted = true;

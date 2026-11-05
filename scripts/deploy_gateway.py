@@ -208,6 +208,24 @@ def reload_caddy(caddy, config_file, previous, replacement):
         raise
 
 
+def credential_mounts(source, codex_directory=None):
+    result = []
+    for mount in source.get('Mounts', []):
+        if mount['Destination'] in ['/var/lib/agent-pool-gateway/ledger-spool', '/run/gateway-codex']:
+            continue
+        result.extend(['--mount', 'type=bind,src=' + mount['Source'] + ',dst=' + mount['Destination'] + ('' if mount['RW'] else ',readonly')])
+    if codex_directory:
+        directory = Path(codex_directory).resolve(strict=True)
+        if not directory.is_dir() or ',' in str(directory):
+            raise RuntimeError('訂閱憑證目錄無效')
+        result.extend(['--mount', 'type=bind,src=' + str(directory) + ',dst=/run/gateway-codex,readonly'])
+    else:
+        for mount in source.get('Mounts', []):
+            if mount['Destination'] == '/run/gateway-codex':
+                result.extend(['--mount', 'type=bind,src=' + mount['Source'] + ',dst=/run/gateway-codex,readonly'])
+    return result
+
+
 def deploy(args):
     evidence = Path(args.evidence)
     evidence.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -222,6 +240,14 @@ def deploy(args):
     (evidence / 'Caddyfile.before').write_text(previous)
     env = dict(item.split('=', 1) for item in source['Config']['Env'])
     stop_wait = shutdown_wait(env)
+    codex_directory = getattr(args, 'codex_auth_dir', None)
+    codex_account = getattr(args, 'codex_account_id', None)
+    if bool(codex_directory) != bool(codex_account):
+        raise RuntimeError('訂閱憑證目錄與帳號必須一起設定')
+    mounts = credential_mounts(source, codex_directory)
+    if codex_directory:
+        env['CODEX_AUTH_FILE'] = '/run/gateway-codex/auth.json'
+        env['CODEX_ACCOUNT_ID'] = codex_account
     if env.get('SCHEDULER_PASSTHROUGH') != 'true':
         raise RuntimeError('目前安全切換只支援原本已啟用直接轉送的服務；排隊模式不可並行，也不會自動修改模式')
     from urllib.parse import urlsplit
@@ -237,7 +263,7 @@ def deploy(args):
                    'ON_ERROR_STOP=1', '-U', database.username, '-d', database.path[1:],
                    '-Atc', "SELECT version, encode(checksum,'hex'), success FROM _sqlx_migrations ORDER BY version"]).decode()
     name = 'gateway-release-' + args.revision + '-' + uuid.uuid4().hex[:8]
-    run(['docker', 'create', '--name', name, '--network', next(iter(source['NetworkSettings']['Networks'])),
+    run(['docker', 'create', '--label', 'expire=' + time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)), '--name', name, '--network', next(iter(source['NetworkSettings']['Networks'])),
          '--cpus', '2', '--memory', '768m', '--restart', 'no', image['Id']])
     run(['docker', 'cp', name + ':/app/migrations.sha384', str(evidence / 'migrations.sha384')])
     manifest = migration_manifest((evidence / 'migrations.sha384').read_text())
@@ -249,9 +275,10 @@ def deploy(args):
     env_file = evidence / 'candidate.env'
     env_file.write_text('\n'.join(k + '=' + v for k, v in env.items()) + '\n')
     env_file.chmod(0o600)
-    run(['docker', 'run', '-d', '--name', candidate, '--network', next(iter(source['NetworkSettings']['Networks'])),
+    run(['docker', 'volume', 'create', '--label', 'expire=never', candidate + '-spool'])
+    run(['docker', 'run', '--label', 'expire=never', '-d', '--name', candidate, '--network', next(iter(source['NetworkSettings']['Networks'])),
          '--cpus', '2', '--memory', '768m', '--restart', 'no', '--stop-timeout', str(stop_wait), '--env-file', str(env_file),
-         '-p', f'127.0.0.1:{args.port}:8080', '-v', candidate + '-spool:/var/lib/agent-pool-gateway/ledger-spool', image['Id']])
+         '-p', f'127.0.0.1:{args.port}:8080', '-v', candidate + '-spool:/var/lib/agent-pool-gateway/ledger-spool', *mounts, image['Id']])
     deadline = time.monotonic() + 45
     while True:
         if not inspect(candidate)['State']['Running']:
@@ -294,6 +321,8 @@ def deploy(args):
 
 def main():
     parser = argparse.ArgumentParser(description='新版驗收後才切換入口；失敗保留舊版')
+    parser.add_argument('--codex-auth-dir')
+    parser.add_argument('--codex-account-id')
     parser.add_argument('--image', required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--source-container', required=True)

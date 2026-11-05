@@ -284,6 +284,15 @@ class DeploymentTests(unittest.TestCase):
                 self.assertNotIn('kill', value)
                 self.assertNotIn('rm', value)
 
+    def test_created_resources_have_expiry_labels(self):
+        deploy_gateway.deploy(self.args)
+        commands = [value for kind, value in self.events if kind == 'run']
+        created = [command for command in commands if command[:2] in [['docker', 'create'], ['docker', 'run']] or command[:3] == ['docker', 'volume', 'create']]
+        self.assertEqual(len(created), 3)
+        for command in created:
+            self.assertIn('--label', command)
+            self.assertTrue(command[command.index('--label') + 1].startswith('expire='))
+
     def test_wrong_database_is_rejected_before_container_creation(self):
         self.failure = 'database-host'
         with self.assertRaisesRegex(RuntimeError, '預檢資料庫'):
@@ -346,3 +355,13 @@ class DeploymentTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CredentialMountTests(unittest.TestCase):
+    def test_preserves_existing_credentials_and_replaces_only_spool(self):
+        source = {'Mounts': [{'Source': '/held', 'Destination': '/held', 'RW': True}, {'Source': '/old-spool', 'Destination': '/var/lib/agent-pool-gateway/ledger-spool', 'RW': True}]}
+        result = deploy_gateway.credential_mounts(source)
+        self.assertIn('type=bind,src=/held,dst=/held', result)
+        self.assertFalse(any('/old-spool' in item for item in result))
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIn('type=bind,src=' + root + ',dst=/run/gateway-codex,readonly', deploy_gateway.credential_mounts(source, root))

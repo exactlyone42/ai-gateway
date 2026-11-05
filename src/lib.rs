@@ -17,6 +17,7 @@ mod capture_remote_witness;
 mod capture_secret_guard;
 mod capture_session;
 mod capture_spool;
+mod codex_auth;
 mod config;
 mod db;
 mod error;
