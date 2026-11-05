@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--gateway-bin', type=Path, required=True)
+parser.add_argument('--credential-environment', choices=('dev', 'prod'), default='dev')
+parser.add_argument('--check-protocol-streams', action='store_true')
 parser.add_argument('--check-deletion', action='store_true')
 parser.add_argument('--check-truncated-spool', action='store_true')
 parser.add_argument('--check-wrong-journal', action='store_true')
@@ -21,6 +23,10 @@ parser.add_argument('--check-stream-drain', action='store_true')
 parser.add_argument('--check-backup-kill', action='store_true')
 parser.add_argument('--control-corrupt-ledger-conflict', action='store_true')
 arguments = parser.parse_args()
+if arguments.check_protocol_streams and not arguments.check_remote_replay:
+    parser.error('protocol stream validation requires --check-remote-replay')
+if arguments.credential_environment == 'prod' and not (arguments.check_remote_witness or arguments.check_remote_replay):
+    parser.error('production validation requires --check-deletion and --check-remote-witness or --check-remote-replay')
 if arguments.control_corrupt_ledger_conflict and not arguments.check_ledger_conflict:
     parser.error('corrupt ledger control requires --check-ledger-conflict')
 if arguments.check_ledger_conflict and any((arguments.check_deletion, arguments.check_expired_restore, arguments.check_remote_witness, arguments.check_remote_replay, arguments.control_remote_rollback)):
@@ -57,6 +63,7 @@ mock = 'capture-e2e-mock-' + suffix
 volumes = ['capture-e2e-' + suffix + '-' + x for x in ('spool', 'keys', 'anchors', 'ledger', 'erasure', 'witness')]
 paths = ['/var/lib/agent-pool-gateway/capture-spool', '/var/lib/agent-pool-gateway/capture-keys', '/var/lib/agent-pool-gateway/capture-anchors', '/var/lib/agent-pool-gateway/ledger-spool', '/var/lib/agent-pool-gateway/capture-erasure', '/var/lib/agent-pool-gateway/capture-witness']
 created = []
+protocol_captures = []
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **kwargs).stdout.strip()
@@ -89,6 +96,22 @@ except urllib.error.HTTPError as error:
     print(error.code)
 '''
     return int(docker('exec', gw, 'python', '-c', code, path, token, method))
+
+def wire_api(path, method, token, body=None):
+    code = '''import json,sys,urllib.error,urllib.request
+p,m,t,b=sys.argv[1:]
+request=urllib.request.Request("http://127.0.0.1:8080"+p,data=None if not b else b.encode(),headers={"authorization":"Bearer "+t,"content-type":"application/json"},method=m)
+try:
+    response=urllib.request.urlopen(request,timeout=15)
+except urllib.error.HTTPError as error:
+    response=error
+with response:
+    body=response.read(131073)
+    if len(body)>131072:
+        raise RuntimeError("fixture response exceeds limit")
+    print(json.dumps({"status":response.status,"body":body.decode()}))
+'''
+    return json.loads(docker('exec', gw, 'python', '-c', code, path, method, token, '' if body is None else json.dumps(body)))
 
 def probe(token, request_id):
     code = '''import json, sys, urllib.error, urllib.request
@@ -164,8 +187,13 @@ try:
     else:
         raise RuntimeError('database not ready')
     created.append(('container', mock))
-    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', mock, '--network', network, '--mount', f'type=bind,source={project_root / "tests/fixtures/capture-backup/mock.py"},target=/mock.py,readonly', '--entrypoint', 'python', 'python:3.13-slim', '/mock.py')
+    protocol_mounts = ['--mount', f'type=volume,source={volumes[0]},target=/capture-spool,readonly', '--mount', f'type=bind,source={project_root / "tests/fixtures/client-roundtrip"},target=/fixtures,readonly', '-e', 'REQUIRE_CAPTURED_REQUEST=1'] if arguments.check_protocol_streams else []
+    docker('run', '-d', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--name', mock, '--network', network, '--mount', f'type=bind,source={project_root / "tests/fixtures/capture-backup/mock.py"},target=/mock.py,readonly', *protocol_mounts, '--entrypoint', 'python', 'python:3.13-slim', '/mock.py')
     env = {'DATABASE_URL': f'postgres://gateway:fixture-password@{pg}:5432/gateway', 'DATABASE_MAX_CONNECTIONS': '6', 'ADMIN_DATABASE_MAX_CONNECTIONS': '1', 'CREDENTIAL_HASH_KEY': 'fixture-hash-key-with-at-least-32-bytes', 'CREDENTIAL_ENVIRONMENT': 'dev', 'CONTENT_CAPTURE_ENABLED': 'true', 'CONTENT_CAPTURE_SPOOL_DIR': paths[0], 'CONTENT_CAPTURE_KEY_DIR': paths[1], 'CONTENT_CAPTURE_ANCHOR_DIR': paths[2], 'LEDGER_SPOOL_DIR': paths[3], 'ADMIN_BOOTSTRAP_TOKEN': 'fixture-bootstrap-token-at-least-32-bytes', 'ADMIN_BOOTSTRAP_TENANT_ID': '00000000-0000-0000-0000-000000000001', 'LISTEN_ADDRESS': '0.0.0.0:8080', 'OPENAI_BASE_URL': f'http://{mock}:8090', 'OPENAI_API_KEY': 'fixture-provider-key', 'ALLOWED_MODELS': 'company-default'}
+    env['CREDENTIAL_ENVIRONMENT'] = arguments.credential_environment
+    if arguments.check_protocol_streams:
+        env['ANTHROPIC_BASE_URL'] = f'http://{mock}:8090'
+        env['ANTHROPIC_API_KEY'] = 'fixture-provider-key'
     env['CONTENT_CAPTURE_ERASURE_DIR'] = paths[4]
     env['CONTENT_CAPTURE_TEST_ALLOW_LOCAL_WITNESS'] = '1'
     env['CONTENT_CAPTURE_WITNESS_DIR'] = paths[5]
@@ -206,8 +234,9 @@ try:
     session = api('/admin/v1/sessions', 'POST', boot['login_token'])['access_token']
     user = api('/admin/v1/users', 'POST', session, {'display_name': 'test user'})['resource']['id']
     key = api('/admin/v1/credentials', 'POST', session, {'display_name': 'test client', 'user_id': user})['secret']
-    provider = api('/admin/v1/providers', 'POST', session, {'provider_key': 'openai', 'display_name': 'fixture', 'provider_type': 'openai', 'base_url': f'http://{mock}:8090', 'credential_ref': 'env://OPENAI_API_KEY', 'supported_operations': ['openai_chat_completions']})['resource']['id']
-    model = api('/admin/v1/models', 'POST', session, {'provider_id': provider, 'public_model_id': 'company-default', 'provider_model_id': 'company-default', 'supported_operations': ['openai_chat_completions'], 'supports_streaming': True})['resource']['id']
+    operations = ['openai_chat_completions', 'openai_responses'] if arguments.check_protocol_streams else ['openai_chat_completions']
+    provider = api('/admin/v1/providers', 'POST', session, {'provider_key': 'openai', 'display_name': 'fixture', 'provider_type': 'openai', 'base_url': f'http://{mock}:8090', 'credential_ref': 'env://OPENAI_API_KEY', 'supported_operations': operations})['resource']['id']
+    model = api('/admin/v1/models', 'POST', session, {'provider_id': provider, 'public_model_id': 'company-default', 'provider_model_id': 'company-default', 'supported_operations': operations, 'supports_streaming': True})['resource']['id']
     api(f'/admin/v1/providers/{provider}/lifecycle', 'POST', session, {'version': 1, 'state': 'active'})
     api(f'/admin/v1/models/{model}/lifecycle', 'POST', session, {'version': 1, 'state': 'active'})
     result = api('/v1/chat/completions', 'POST', key, {'model': 'company-default', 'messages': [{'role': 'user', 'content': 'backup-e2e-original'}]})
@@ -225,6 +254,46 @@ try:
     if 'backup-e2e-original' not in json.dumps(old):
         raise RuntimeError('source capture mismatch')
     print('source gateway encrypted capture read: ok', flush=True)
+    if arguments.check_protocol_streams:
+        anthropic = api('/admin/v1/providers', 'POST', session, {'provider_key': 'anthropic', 'display_name': 'fixture', 'provider_type': 'anthropic', 'base_url': f'http://{mock}:8090', 'credential_ref': 'env://ANTHROPIC_API_KEY', 'supported_operations': ['anthropic_messages']})['resource']['id']
+        anthropic_model = api('/admin/v1/models', 'POST', session, {'provider_id': anthropic, 'public_model_id': 'claude-capture', 'provider_model_id': 'claude-test', 'supported_operations': ['anthropic_messages'], 'supports_streaming': True})['resource']['id']
+        api(f'/admin/v1/providers/{anthropic}/lifecycle', 'POST', session, {'version': 1, 'state': 'active'})
+        api(f'/admin/v1/models/{anthropic_model}/lifecycle', 'POST', session, {'version': 1, 'state': 'active'})
+        for endpoint, payload, fixture in (
+            ('/v1/responses', {'model': 'company-default', 'input': 'backup-e2e-responses', 'stream': True}, 'openai-response.sse'),
+            ('/v1/messages', {'model': 'claude-capture', 'messages': [{'role': 'user', 'content': 'backup-e2e-messages'}], 'max_tokens': 16, 'stream': True}, 'anthropic-response.sse'),
+        ):
+            previous = docker('exec', '-i', pg, 'psql', '-U', 'gateway', '-d', 'gateway', '-Atq', input=query)
+            received = wire_api(endpoint, 'POST', key, payload)
+            expected = (project_root / 'tests/fixtures/client-roundtrip' / fixture).read_text()
+            if received != {'status': 200, 'body': expected}:
+                raise RuntimeError(endpoint + ': fixture stream differs')
+            for _ in range(300):
+                latest = docker('exec', '-i', pg, 'psql', '-U', 'gateway', '-d', 'gateway', '-Atq', input=query)
+                if latest and latest != previous:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError(endpoint + ': stream capture not imported')
+            for leg in ('provider_response', 'client_response'):
+                saved = wire_api(f'/admin/v1/request-captures/{latest}/content?leg={leg}', 'GET', session)
+                if saved != received:
+                    raise RuntimeError(endpoint + ': encrypted stream read differs')
+            protocol_captures.append((latest, received))
+            counts = json.loads(docker('exec', mock, 'python', '-c', 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8090/count",timeout=5).read().decode())'))
+            if counts['captured_requests'] != counts['requests']:
+                raise RuntimeError(endpoint + ': provider did not verify saved request')
+            docker('exec', '--user', '0', gw, 'chmod', '500', paths[0])
+            try:
+                denied = wire_api(endpoint, 'POST', key, payload)
+                if denied['status'] != 503 or json.loads(denied['body'])['error']['code'] != 'capture_unavailable':
+                    raise RuntimeError(endpoint + ': failed storage was not rejected')
+            finally:
+                docker('exec', '--user', '0', gw, 'chmod', '700', paths[0])
+            after = json.loads(docker('exec', mock, 'python', '-c', 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8090/count",timeout=5).read().decode())'))
+            if after != counts:
+                raise RuntimeError(endpoint + ': failed storage still called provider')
+            print(endpoint + ': stream, encrypted read, capture-before-provider and failed-storage denial: ok', flush=True)
     if arguments.check_ledger_conflict:
         install = (project_root / 'tests/fixtures/capture-backup/install-ledger-conflict.sql').read_text()
         remove = (project_root / 'tests/fixtures/capture-backup/remove-ledger-conflict.sql').read_text()
@@ -601,6 +670,13 @@ except urllib.error.HTTPError as error:
         print('restored gateway reads old capture: ok', flush=True)
     if arguments.check_ledger_conflict and not arguments.control_corrupt_ledger_conflict and conflict_info(gw) != [expected_conflict]:
         raise RuntimeError('restored gateway conflict record changed before new request')
+    for saved_id, expected in protocol_captures:
+        for leg in ('provider_response', 'client_response'):
+            restored = wire_api(f'/admin/v1/request-captures/{saved_id}/content?leg={leg}', 'GET', session)
+            if restored != expected:
+                raise RuntimeError('restored encrypted stream differs')
+    if protocol_captures:
+        print('restored Messages and Responses stream captures match: ok', flush=True)
     previous_latest = docker('exec', '-i', restore_pg, 'psql', '-U', 'gateway', '-d', 'gateway', '-Atq', input=query)
     new = api('/v1/chat/completions', 'POST', key, {'model': 'company-default', 'messages': [{'role': 'user', 'content': 'backup-e2e-after-restore'}]}, 'backup-e2e-restored-ledger' if arguments.check_ledger_conflict else '')
     if new['choices'][0]['message']['content'] != 'fixture reply':

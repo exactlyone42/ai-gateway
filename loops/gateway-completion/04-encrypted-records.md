@@ -722,3 +722,13 @@
 ## 2026-11-05 執行優先序
 
 P2：沿用現有加密保存及備份，逐項核對事件、用量、同內容重播、異內容拒絕、整批回滾及隔離恢復；正式備份授權缺口仍保留。詳見母檔與 07，本輪已啟動 goal；上述為驗收要求，尚未宣稱通過。
+
+2026-11-05 續作P2的無外部依賴驗證，P1真人及跨主機缺項仍保留。核對保存每段均同步落盤，但正式請求仍被request_policy及串流入口的開發環境限制拒絕；不直接移除。既有完整備份還原演練原本固定dev，新增`--credential-environment prod`，只允許搭配刪除與獨立見證測試，以隔離容器驗正式設定，禁止以測試用本機見證替代。缺獨立見證參數時在建立資源前拒絕，證據`/tmp/gateway-capture-prod-preflight-negative.log`；正式環境未動，完整prod演練尚未執行。
+
+2026-11-05 prod首輪實跑在正常請求回capture_unavailable，證據`/home/cash/.agents/temp-services/logs/gateway-capture-prod-20261105.log`。改用啟動已驗證的capture_erasure作為保存就緒條件，兩個串流入口沿用此前置檢查，移除重複dev限制；啟動的金鑰、錨點、獨立見證及刪除位置檢查保留。新版665a86d6的prod隔離演練已驗請求、加密讀回、真備份、竄改拒絕、刪除、遠端見證前進及還原後舊日誌拒絕，證據`/home/cash/.agents/temp-services/logs/gateway-capture-prod-v2-20261105.log`，測試資源已空。此路徑刻意以拒絕舊日誌結束，不能當作正常還原服務已通過；另一個remote-replay演練正在跑。獨立唯讀審查未發現新增安全問題，但Messages／Responses的prod串流與失敗前不送上游仍待補。
+
+同輪推送檢查遇startup_recovery_waits_for_backup_lock_before_touching_spool偶發BackupBusy，未繞過。新增保留複製檔案描述符的確定性測試，原版失敗（`/tmp/gateway-backup-unlock-negative.log`）；租約Drop改為明確unlock並記錄失敗後通過（`/tmp/gateway-backup-unlock-positive.log`），原啟動案例也通過（`/tmp/gateway-backup-startup-lock-restored.log`）。依Rust File的try_clone／unlock文件（2026-11-05下載`/tmp/gateway-file-lock-reference.html`）；新版本gate通過，全套與推送尚待重驗。
+
+2026-11-05 正常prod還原演練exit0（`/tmp/gateway-capture-prod-replay-exit.json`），還原後刪除仍有效且可保存並讀回新請求。追加雙協定串流演練也exit0（`/tmp/gateway-capture-prod-streams-exit.json`及對應temp-service日誌）：Messages／Responses原始串流、provider與client兩方向解密讀回及備份還原後讀回逐字相同；上游處理前確認兩段加密請求已存在；將保存目錄設為不可寫時兩端點皆503 capture_unavailable，上游計數不變。檔案可見性結合原程式逐段sync_all，不當作斷電測試。資源與程序均已清空，收尾`/tmp/gateway-capture-prod-streams-closeout.json`。
+
+審查發現protocol-streams搭配remote-witness會以預期拒絕提前成功退出，漏驗還原；現已要求remote-replay，既有互斥也禁止同帶witness。兩個錯誤組合在讀binary或建資源前exit2，證據`/tmp/gateway-capture-protocol-flags-negative.json`，獨立唯讀複核確認封住。完整檢查`/tmp/gateway-capture-prod-all.log`結束碼0，Rust主測試470通過／7略過，前端22通過，Python仍有20略過；新旗標拒絕另測通過。尚未涵蓋最低資料庫權限、正式資料與備份、斷電、原Client工具及取消，不標P2完成。

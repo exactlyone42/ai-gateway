@@ -254,10 +254,6 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     )
     .await?;
     let is_stream = canonical.stream;
-    if is_stream && capture.is_some() && !cfg!(test) && state.config.credential_environment != "dev"
-    {
-        return Err(GatewayError::CaptureUnavailable);
-    }
     let mut reservation = state
         .ledger
         .reserve_with_quota(

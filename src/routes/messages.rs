@@ -231,10 +231,6 @@ pub(super) async fn proxy(
     )
     .await?;
     let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
-    if is_stream && capture.is_some() && !cfg!(test) && state.config.credential_environment != "dev"
-    {
-        return Err(GatewayError::CaptureUnavailable);
-    }
     let mut reservation = state
         .ledger
         .reserve_with_quota(

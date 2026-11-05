@@ -13,6 +13,14 @@ pub(crate) struct CaptureBarrierLease {
     _file: std::fs::File,
 }
 
+impl Drop for CaptureBarrierLease {
+    fn drop(&mut self) {
+        if let Err(error) = self._file.unlock() {
+            tracing::error!(error = %error, error.type = "capture_backup_unlock_failed", "capture backup lock release failed");
+        }
+    }
+}
+
 fn open(root: &Path) -> Result<std::fs::File, CaptureBarrierError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -66,6 +74,20 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use uuid::Uuid;
+
+    #[test]
+    fn dropping_a_lease_releases_the_lock_with_an_inherited_descriptor() {
+        let root = std::env::temp_dir().join(format!("capture-inherited-lock-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let lease = try_exclusive(&root).unwrap();
+        let inherited = lease._file.try_clone().unwrap();
+        assert!(matches!(try_shared(&root), Err(CaptureBarrierError::Busy)));
+        drop(lease);
+        let next = try_shared(&root).unwrap();
+        drop(next);
+        drop(inherited);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[sqlx::test]
     async fn backup_excludes_new_sessions_and_maintenance_until_release(pool: PgPool) {

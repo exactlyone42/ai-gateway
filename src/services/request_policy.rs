@@ -87,7 +87,7 @@ pub async fn prepare(
         }
         #[cfg(not(test))]
         {
-            state.config.credential_environment == "dev"
+            state.capture_erasure.is_some()
         }
     };
     if policy.content_capture == crate::policy::ContentCaptureMode::Full && !capture_ready {
