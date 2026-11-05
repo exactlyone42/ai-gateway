@@ -450,6 +450,14 @@ struct Spool {
     checkpoint_async_idle: Notify,
 }
 
+impl Drop for Spool {
+    fn drop(&mut self) {
+        if let Err(error) = self._instance_lock.unlock() {
+            tracing::error!(error = %error, error.type = "ledger_spool_unlock_failed", "ledger spool lock release failed");
+        }
+    }
+}
+
 struct SpoolState {
     slots_used: usize,
     slots_max: usize,
@@ -3943,6 +3951,36 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read(&target).unwrap(), data);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_dropped_spool_unlocks_with_an_inherited_descriptor() {
+        let directory = test_directory("spool-inherited-lock");
+        let spool = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let inherited = spool._instance_lock.try_clone().unwrap();
+        assert!(matches!(
+            Spool::open(
+                directory.clone(),
+                MIN_ENTRY_MAX_BYTES * 3,
+                MIN_ENTRY_MAX_BYTES
+            ),
+            Err(LedgerError::SpoolBusy)
+        ));
+        drop(spool);
+        let reopened = Spool::open(
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        drop(reopened);
+        drop(inherited);
         fs::remove_dir_all(directory).unwrap();
     }
 

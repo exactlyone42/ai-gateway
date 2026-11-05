@@ -732,3 +732,9 @@ P2：沿用現有加密保存及備份，逐項核對事件、用量、同內容
 2026-11-05 正常prod還原演練exit0（`/tmp/gateway-capture-prod-replay-exit.json`），還原後刪除仍有效且可保存並讀回新請求。追加雙協定串流演練也exit0（`/tmp/gateway-capture-prod-streams-exit.json`及對應temp-service日誌）：Messages／Responses原始串流、provider與client兩方向解密讀回及備份還原後讀回逐字相同；上游處理前確認兩段加密請求已存在；將保存目錄設為不可寫時兩端點皆503 capture_unavailable，上游計數不變。檔案可見性結合原程式逐段sync_all，不當作斷電測試。資源與程序均已清空，收尾`/tmp/gateway-capture-prod-streams-closeout.json`。
 
 審查發現protocol-streams搭配remote-witness會以預期拒絕提前成功退出，漏驗還原；現已要求remote-replay，既有互斥也禁止同帶witness。兩個錯誤組合在讀binary或建資源前exit2，證據`/tmp/gateway-capture-protocol-flags-negative.json`，獨立唯讀複核確認封住。完整檢查`/tmp/gateway-capture-prod-all.log`結束碼0，Rust主測試470通過／7略過，前端22通過，Python仍有20略過；新旗標拒絕另測通過。尚未涵蓋最低資料庫權限、正式資料與備份、斷電、原Client工具及取消，不標P2完成。
+
+2026-11-05 P2切片提交838b385；推送前測試又在failed_database_flush_stays_durable_and_recovers_once遇SpoolBusy，推送未成功，證據`/tmp/gateway-capture-prod-push-clean.log`。同樣以保留描述符建立確定性測試：原Spool釋放後不能重開，`/tmp/gateway-ledger-spool-unlock-negative.log`；新增Spool Drop明確解鎖後通過（positive.log），整組帳本47項通過／431未跑（`/tmp/gateway-ledger-spool-unlock-ledger-tests.log`）。獨立審查確認最後一個Arc持有者結束才解鎖，活躍writer仍受保護。新全套正在`/tmp/gateway-ledger-spool-unlock-all.log`執行，尚未再次提交或推送。
+
+補跑先前略過的真Docker身分測試：資料庫／叢集區分1項及重建磁碟區識別變更1項均通過（`/tmp/gateway-capture-database-identity-live.log`、`/tmp/gateway-capture-storage-identity-live.log`）；對應容器及磁碟區已空。這兩項不代表最低權限或正式身份已驗收。
+
+2026-11-05 帳本鎖修正後完整檢查結束碼0（`/tmp/gateway-ledger-spool-unlock-all.log`）；尚未驗證的最低權限、正式備份及原Client項目維持未完成。
