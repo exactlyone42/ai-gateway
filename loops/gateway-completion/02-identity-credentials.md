@@ -163,3 +163,5 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 2026-11-05 憑證鎖修正版全套 `/tmp/gateway-token-unlock-all.log` 結束碼0（session20186）：主Rust473過0失敗7ignored，Python備份20skipped；包含最終私有File欄位與cfg(test)fixture建構。新核心原Client尚待固定binary後重驗。
 
 2026-11-05 新核心固定binary `/tmp/gateway-token-unlock-7deqmr_e/gateway`，BUILD_REVISION=099a3b8-token-unlock；build結束碼0（/tmp/gateway-token-unlock-build.log）。原Claude隔離7項kibmic6_、原Codex隔離7項ydpiynx3均過（runtime在/home/cash/.cache/tmp/gateway-client-identity-前綴）。隔離DB與Gateway程序清理讀回均空：/tmp/gateway-token-unlock-client-closeout.json。正式、真人與跨主機仍未驗，P1不標完成。
+
+2026-11-05 原Codex0.166.0經Gateway099a3b8-token-unlock向本人ChatGPT訂閱gpt-6-luna完成短答。其他同租戶使用者503、撤銷Gateway金鑰401，兩者原Client退出1；全資料庫僅1次上游、1筆本人完成及1筆供應商用量（輸入13176、輸出9）。本人登入檔位元組未變，Client僅持Gateway金鑰。證據：`/home/cash/.cache/tmp/gateway-client-identity-1l7aaokf/result.json`。隔離服務已結束；不涵蓋真來源工具、加密讀回、第二真人、跨主機或正式部署。新增驗收程式全套`/tmp/gateway-owned-codex-all.log`結束碼0：主Rust473過7ignored，Python備份20skipped；拒絕判準只接受退出1，逾時不算拒絕成功。待提交；P1仍RUNNING。

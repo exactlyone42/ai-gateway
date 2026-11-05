@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,9 @@ def main():
     parser.add_argument('--gateway-binary', required=True, type=Path)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
+    parser.add_argument('--check-codex-held', action='store_true')
+    parser.add_argument('--codex-auth-file', type=Path)
+    parser.add_argument('--source-model')
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
@@ -40,6 +44,15 @@ def main():
         parser.error('error success control requires --check-error')
     if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error):
         parser.error('capture validation requires tools, cancel or error')
+    if args.check_codex_held:
+        if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error, args.check_capture)):
+            parser.error('owned Codex source requires codex, auth file and source model, separately from fixture modes')
+        source_bytes = args.codex_auth_file.read_bytes()
+        source_auth = json.loads(source_bytes)
+        if source_auth.get('auth_mode') != 'chatgpt' or not source_auth.get('tokens', {}).get('account_id'):
+            parser.error('owned Codex source requires a ChatGPT login')
+    elif args.codex_auth_file or args.source_model:
+        parser.error('auth file and source model require --check-codex-held')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
@@ -49,7 +62,7 @@ def main():
     if not version.startswith(required):
         raise RuntimeError('Client版本不符')
     codex = args.client == 'codex'
-    provider_key = 'openai' if codex else 'anthropic'
+    provider_key = 'codex-subscription' if args.check_codex_held else ('openai' if codex else 'anthropic')
     operation = 'openai_responses' if codex else 'anthropic_messages'
     model_prefix = 'company' if codex else 'claude'
     client_key = 'codex-cli' if codex else 'claude-code'
@@ -106,6 +119,9 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
+    if args.check_codex_held:
+        environment.update({'CODEX_AUTH_FILE': str(args.codex_auth_file.resolve()), 'CODEX_ACCOUNT_ID': source_auth['tokens']['account_id'], 'CODEX_OWNER_USER_ID': str(uuid.uuid4()), 'PROVIDER_ALLOWED_TENANT_IDS': environment['ADMIN_BOOTSTRAP_TENANT_ID']})
+        fixture.provider_credentials.update((source_auth['tokens']['access_token'], source_auth['tokens']['account_id']))
     checks = []
 
     def api(path, method='GET', body=None, token=None, expected=200, raw_response=False):
@@ -143,28 +159,40 @@ def main():
         def activate(kind, resource):
             api(f'/admin/v1/{kind}/{resource["id"]}/lifecycle', 'POST', {'version': resource['version'], 'state': 'active'}, admin)
 
-        provider = create('providers', {'provider_key': provider_key, 'display_name': '假供應商', 'provider_type': provider_key, 'base_url': environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY', 'supported_operations': [operation]})['resource']
+        provider = create('providers', {'provider_key': provider_key, 'display_name': '本人來源' if args.check_codex_held else '假供應商', 'provider_type': 'openai' if codex else 'anthropic', 'base_url': 'https://chatgpt.com/backend-api/codex' if args.check_codex_held else environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://CODEX_AUTH_FILE' if args.check_codex_held else ('env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY'), 'supported_operations': [operation]})['resource']
         activate('providers', provider)
         users = {}
+        credential_versions = {}
         for name in ('alice', 'bob', 'missing'):
             model = model_prefix + '-' + name
-            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': model, 'supported_operations': [operation], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': True})['resource']
+            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': args.source_model if args.check_codex_held else model, 'supported_operations': [operation], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': True})['resource']
             activate('models', resource)
             user = create('users', {'display_name': name})['resource']
-            credential = create('credentials', {'display_name': name, 'user_id': user['id']})['secret']
+            created_credential = create('credentials', {'display_name': name, 'user_id': user['id']})
+            credential = created_credential['secret']
+            credential_versions[name] = (created_credential['resource']['id'], created_credential['resource']['version'])
             fixture.client_credentials.add(credential)
             users[name] = (user['id'], credential)
             policy = create('policies', {'policy_key': name, 'revision': 1, 'user_id': user['id'], 'configuration': {'constraints': {'allowed_models': [model]}}})['resource']
             activate('policies', policy)
-            if name != 'missing':
+            if name != 'missing' and not args.check_codex_held:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_codex_held:
+            gateway.terminate()
+            gateway.wait(timeout=7)
+            environment['CODEX_OWNER_USER_ID'] = users['alice'][0]
+            gateway = subprocess.Popen(['timeout', '--kill-after=5s', '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+            time.sleep(2)
+            if gateway.poll() is not None or api('/health')['revision'] != args.revision:
+                raise RuntimeError('持有人綁定後Gateway重啟失敗')
 
         def client(name, model, success, label, tool_prompt=None, cancel=False, error=False):
             before = len(fixture.request_paths[client_key])
             capture_start = len(fixture.captured_requests)
             denial_status = None
             if not success:
-                denial_status = 403 if label == 'model-denied' else 503
+                denial_status = 401 if label == 'gateway-key-revoked' else (403 if label == 'model-denied' else 503)
                 body = {'model': model, 'input': 'fixture', 'max_output_tokens': 1} if codex else {'model': model, 'max_tokens': 1, 'messages': [{'role': 'user', 'content': 'fixture'}]}
                 api(response_path, 'POST', body, users[name][1], denial_status)
             home = runtime / label
@@ -222,7 +250,12 @@ def main():
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
-            if success or error:
+            if args.check_codex_held:
+                if success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
+                    raise RuntimeError(f'{label}: 原Codex未完成本人來源實送，紀錄位於{runtime}')
+                if not success and (result.returncode != 1 or result.stdout.strip() == expected_reply):
+                    raise RuntimeError(f'{label}: 原Codex應拒絕卻成功')
+            elif success or error:
                 if error and (result.returncode != 1 or fixture.error_marker not in diagnostic or not 1 <= after - before <= 6):
                     raise RuntimeError(f'{label}: 原Client未正確回報上游錯誤，退出{result.returncode}、上游{after - before}次')
                 if not error and not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
@@ -232,7 +265,26 @@ def main():
                     raise RuntimeError(f'{label}: 憑證隔離失敗')
             elif after != before or result.stdout.strip() == expected_reply:
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
-            checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
+            checks.append({'case': label, 'passed': True, 'upstream_requests': None if args.check_codex_held else after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
+
+        if args.check_codex_held:
+            client('alice', f'{model_prefix}-alice', True, 'held-owner')
+            client('bob', f'{model_prefix}-bob', False, 'held-other-user')
+            credential_id, credential_version = credential_versions['alice']
+            api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
+            client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
+            query = root / 'queries/test_codex_held_result.sql'
+            result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
+            ledger = json.loads(result.stdout)
+            if ledger['attempts'] != 1 or ledger['completed_owner'] != 1 or ledger['other_attempts'] != 0 or ledger['reported_records'] != 1 or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] or ledger['providers'] != ['codex-subscription']:
+                raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
+            for index, check in enumerate(checks):
+                check['upstream_requests'] = 1 if index == 0 else 0
+            if args.codex_auth_file.read_bytes() != source_bytes:
+                raise RuntimeError('來源登入檔在驗收期間改變，未宣稱未變更')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_auth_unchanged': True, 'source_sha256': hashlib.sha256(source_bytes).hexdigest(), 'checks': checks, 'ledger': ledger}, indent=2))
+            print(f'原Codex本人訂閱來源與拒絕驗收通過；證據：{runtime}')
+            return
 
         def verify_capture():
             markers = [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])

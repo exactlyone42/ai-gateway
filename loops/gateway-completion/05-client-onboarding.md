@@ -70,3 +70,5 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 HTTP400新版all（session78160）結束碼101，Rust468過5失敗7ignored；5項全在SQLx testing setup connect PoolTimedOut，尚未進功能斷言，詳/tmp/gateway-original-client-error-all.log。資料庫log同時有多次測試建庫引發的checkpoint同步7.997秒及10.169秒；主機負載8.19，現況DB CPU0.67%，不能只據時間認定唯一成因。不增加逾時、不略過斷言，下一次以RUST_TEST_THREADS=2降低跨測試建庫競爭，測試內部原有並行與陰性不變。
 
 2026-11-05 低並行新版全套/tmp/gateway-original-client-error-bounded-all.log結束碼0（session77065）：RUST_TEST_THREADS=2，主Rust473過0失敗7ignored，Python備份20skipped，原5項setup逾時均過，未修改逾時與功能斷言。不能據此證明先前逾時唯一成因。HTTP400已符合原門檻泛稱的錯誤驗收；429/5xx等未驗範圍保留，不自行擴成所有錯誤矩陣的新增發布阻擋。下一優先為本人CodexFile原Client實送、壓縮接續及測試環境；第二真人、跨主機、正式備份位置／見證授權與自家Agent跨repo驗收缺口維持。
+
+2026-11-05 壓縮驗收前置研究：已讀原Codex0.166.0相符官方來源`https://raw.githubusercontent.com/openai/codex/rust-v0.166.0/codex-rs/core/src/compact.rs`與`config/mod.rs`，原件`/tmp/gateway-codex-compact-reference.rs`、`/tmp/gateway-codex-config-reference.rs`。設定含model_auto_compact_token_limit及compact_prompt；Client會另送Prompt並以摘要替換歷史。下一步以獨立假來源提高回報用量、設定低門檻與唯一摘要標記，必須觀察實際壓縮請求及後續請求帶摘要，並以缺標記陰性對照拒絕；不能拿兩輪工具往返當已壓縮。尚未實作／實測，不宣稱摘要品質或壓縮完成。
