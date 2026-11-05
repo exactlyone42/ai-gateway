@@ -38,3 +38,15 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 錯誤結果原Codex陰性補強：`gateway-client-identity-bho0j0s_/tool-result.json`明確記原user仍在、real_tool_result=false及missing_real_tool_result_or_call。Client共7次上游（重試），受到30秒命令期限約束，不能誤報陰性也只有2次。正向兩個runtime的tool-result.json均2次且兩項true。收尾讀回`/tmp/gateway-original-client-tools-closeout.json`確認三個本輪測試DB為0、對應Gateway程序為空；temp-service也空。新版全套正在`/tmp/gateway-original-client-tools-all.log`（session4521），未提交；審查未見新問題，證據仍只涵蓋單次工具往返及該原user訊息，不證明全部系統上下文。
 
 2026-11-05 工具往返新版全套`/tmp/gateway-original-client-tools-all.log`結束碼0（session4521），含3項雙協定fixture對照。原Client正向及錯結果陰性已完成；取消、工具內容保存、遠端及正式仍待驗，不勾整體完成。
+
+2026-11-05 工具切片4bedd23首次push回Repository not found；只讀核對新舊GitHub路徑均回相同repo id1315634736，canonical為ifandonlyif42/agent-pool-gateway，管理權限ADMIN。更新本機origin為該相同儲存庫canonical SSH網址後推送成功，遠端讀回4bedd234227c088b88510ad9d59388be40a72fe4。未改正式服務。
+
+接續取消：`--check-cancel`用不送完成事件的假串流，開始後先確認連線仍開且原Client仍執行，再向其獨立程序群組送SIGINT。Client須在5秒內結束、上游關閉，再以隔離DB核對唯一cancelled紀錄和一次attempt；查DB最多30次且SQL錯誤立即失敗，不重試連線錯誤。capture關閉。最初GNU timeout包裝導致兩Client退出137卻誤判通過；兩筆舊結果kxjy_qn_及xrejoyhg撤回為正常取消證據，只能證明程序被終止後收尾。已去除包裝器，超時或TERM/KILL僅清理且不會轉成功。
+
+原Claude2.1.318直接SIGINT退出0，`gateway-client-identity-hu_k_2wi/result.json`：上游1、cancelled1、attempt1、usage_records2。原Codex0.166.0直接SIGINT退出1，`gateway-client-identity-4cpuv0z8/result.json`：上游1、cancelled1、attempt1、usage_records1。Codex1僅在JSON有thread.started與turn.started，且無error、turn.failed或turn.completed時接受；不是通用接受失敗碼。官方版本原始碼`https://raw.githubusercontent.com/openai/codex/rust-v0.166.0/codex-rs/exec/src/lib.rs`確認Interrupted最終exit1，`event_processor_with_jsonl_output.rs`確認中斷無完成或失敗事件；下載檔存/tmp/gateway-codex166-*。實際強殺陰性`--control-force-client-kill`已被-9拒絕，證據`gateway-client-identity-48goar1l/cancel-result.json`及對應temp-service日誌。
+
+新版全套`/tmp/gateway-original-client-cancel-all.log`正在執行，session46386。未做取消後用量內容正確性核對，只核對紀錄數與狀態；未驗工具加密保存、取消capture、完整system上下文、跨主機及正式。測試服務均已結束，最終DB/程序讀回待補；本輪尚未提交。
+
+取消收尾讀回`/tmp/gateway-original-client-cancel-closeout.json`：本輪cancel測試DB為0、對應Gateway程序空，temp-service空。獨立審查未見新強殺假綠，Codex中斷判準依官方0.166.0來源且結合訊號前存活、上游斷線及帳本，不單靠JSON無完成事件作結論。
+
+2026-11-05 取消切片新版全套 `/tmp/gateway-original-client-cancel-all.log` 已結束碼0（session46386讀回）；正常取消與強殺陰性均保留。用量數值、加密保存與正式驗收仍未完成。

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -23,9 +24,15 @@ def main():
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
+    parser.add_argument('--check-cancel', action='store_true')
+    parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     if args.control_wrong_tool_result and not args.check_tools:
         parser.error('wrong tool result control requires --check-tools')
+    if args.check_cancel and args.check_tools:
+        parser.error('cancel and tool validation must run separately')
+    if args.control_force_client_kill and not args.check_cancel:
+        parser.error('forced kill control requires --check-cancel')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
@@ -49,6 +56,8 @@ def main():
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
+    if args.check_cancel:
+        fixture = runpy.run_path(str(root / 'scripts/client_cancel_fixture.py'))['handler'](fixture)
     fixture.fixture_dir = root / 'tests/fixtures/client-roundtrip'
     fixture.capture_dir = captures
     fixture.request_paths = {'claude-code': [], 'codex-cli': []}
@@ -128,7 +137,7 @@ def main():
             if name != 'missing':
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
 
-        def client(name, model, success, label, tool_prompt=None):
+        def client(name, model, success, label, tool_prompt=None, cancel=False):
             before = len(fixture.request_paths[client_key])
             capture_start = len(fixture.captured_requests)
             denial_status = None
@@ -141,7 +150,7 @@ def main():
             prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
             if codex:
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', prompt]
+                command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', *(['--json'] if cancel else []), prompt]
                 client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
             else:
                 command = ['claude', '-p', '--model', model, '--max-turns', '3' if tool_prompt else '1', *(['--allowedTools=Read'] if tool_prompt else []), prompt]
@@ -150,14 +159,49 @@ def main():
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                     'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
                 }
-            result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
+            if cancel:
+                process = subprocess.Popen(command, env=client_environment, cwd=runtime, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    if not fixture.stream_started.wait(10):
+                        raise RuntimeError('原Client未開始上游串流')
+                    if fixture.peer_closed.wait(0.25):
+                        raise RuntimeError('取消前上游已中斷')
+                    if process.poll() is not None:
+                        raise RuntimeError('取消前原Client已退出')
+                    os.killpg(process.pid, signal.SIGKILL if args.control_force_client_kill else signal.SIGINT)
+                    stdout, stderr = process.communicate(timeout=5)
+                    fixture.client_exit = process.returncode
+                    diagnostic = stdout + '\n' + stderr
+                    for secret in fixture.client_credentials | fixture.provider_credentials:
+                        diagnostic = diagnostic.replace(secret, '[credential]')
+                    (home / 'client-diagnostic.txt').write_text(diagnostic)
+                    codex_interrupted = False
+                    if codex and process.returncode == 1:
+                        events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+                        kinds = {event.get('type') for event in events}
+                        codex_interrupted = {'thread.started', 'turn.started'}.issubset(kinds) and not kinds.intersection({'error', 'turn.failed', 'turn.completed'})
+                    if process.returncode not in (0, 130, -signal.SIGINT) and not codex_interrupted:
+                        raise RuntimeError(f'原Client未以正常取消方式結束：{process.returncode}')
+                    if not fixture.peer_closed.wait(5):
+                        raise RuntimeError('取消原Client後上游連線未關閉')
+                    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            process.wait()
+            else:
+                result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
             after = len(fixture.request_paths[client_key])
             diagnostic = result.stdout + '\n' + result.stderr
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
             if success:
-                if result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before:
+                if not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
                     raise RuntimeError(f'{label}: 原Client未完成假串流')
                 observed = fixture.captured_requests[capture_start:]
                 if not observed or any(capture['model'] != model or not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
@@ -166,6 +210,23 @@ def main():
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
+        if args.check_cancel:
+            client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
+            if fixture.cancel_requests != 1:
+                raise RuntimeError('取消測試產生非預期的上游重送')
+            query = root / 'queries/test_client_cancel_ledger.sql'
+            for _ in range(30):
+                ledger = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
+                observed = json.loads(ledger.stdout)
+                if observed['requests'] == 1 and observed['cancelled'] == 1 and observed['attempts'] == 1:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError('原Client取消未正確持久記帳：' + json.dumps(observed))
+            checks[-1].update({'cancelled_by_sigint': True, 'upstream_closed': True, 'ledger': observed})
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            print(f'原Client串流取消通過；證據：{runtime}')
+            return
         if not args.check_tools:
             client('alice', f'{model_prefix}-alice', True, 'alice-personal')
             client('bob', f'{model_prefix}-bob', True, 'bob-personal')
@@ -200,6 +261,10 @@ def main():
         (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
         print(f'原Client身分隔離通過：{len(checks)}項；證據：{runtime}')
     finally:
+        if args.check_cancel:
+            fixture.stop_stream.set()
+            (runtime / 'cancel-result.json').write_text(json.dumps({'client_exit': fixture.client_exit, 'upstream_requests': fixture.cancel_requests, 'upstream_closed': fixture.peer_closed.is_set()}, indent=2))
+            print(f'取消測試證據：{runtime}')
         if args.check_tools:
             (runtime / 'tool-result.json').write_text(json.dumps({'tool_requests': fixture.tool_requests, 'real_tool_result': fixture.tool_result_received, 'original_context_preserved': fixture.context_preserved, 'rejection': fixture.tool_rejection}, indent=2))
             print(f'工具測試證據：{runtime}')
