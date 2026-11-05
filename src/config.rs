@@ -580,15 +580,6 @@ fn routing_config() -> Result<RoutingConfig, ConfigError> {
         cost_aware: scheduler_bool("ROUTING_COST_AWARE", defaults.cost_aware)?,
         quota_aware: scheduler_bool("ROUTING_QUOTA_AWARE", defaults.quota_aware)?,
         auto_quality: scheduler_bool("ROUTING_AUTO_QUALITY", defaults.auto_quality)?,
-        failure_cooldown: chrono::Duration::milliseconds(
-            i64::try_from(scheduler_u64(
-                "ROUTING_FAILURE_COOLDOWN_MS",
-                defaults.failure_cooldown.num_milliseconds() as u64,
-            )?)
-            .map_err(|_| {
-                ConfigError::InvalidScheduler("routing cooldown is too large".to_owned())
-            })?,
-        ),
     })
 }
 

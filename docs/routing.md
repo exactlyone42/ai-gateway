@@ -26,12 +26,11 @@ an older request completing late cannot overwrite a newer result.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `ROUTING_HEALTH_AWARE` | `true` | Prefer fewer transient failures, then lower measured latency |
+| `ROUTING_HEALTH_AWARE` | `true` | Prefer lower measured latency |
 | `ROUTING_LOAD_AWARE` | `true` | Prefer fewer active requests |
 | `ROUTING_COST_AWARE` | `false` | Prefer lower declared token rates; unknown price sorts last |
 | `ROUTING_QUOTA_AWARE` | `true` | Permit soft-quota routing; hard quota always remains enforced |
 | `ROUTING_AUTO_QUALITY` | `true` | Permit passive signals to cross quality tiers |
-| `ROUTING_FAILURE_COOLDOWN_MS` | `30000` | Half-open one failed route for reevaluation after this interval |
 
 These switches affect ordering independently. Disabling quota-aware routing does
 not disable quota enforcement; it changes a soft-limit outcome from routing to

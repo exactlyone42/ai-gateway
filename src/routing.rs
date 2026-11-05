@@ -15,7 +15,6 @@ pub struct RoutingConfig {
     pub cost_aware: bool,
     pub quota_aware: bool,
     pub auto_quality: bool,
-    pub failure_cooldown: chrono::Duration,
 }
 
 impl Default for RoutingConfig {
@@ -26,7 +25,6 @@ impl Default for RoutingConfig {
             cost_aware: false,
             quota_aware: true,
             auto_quality: true,
-            failure_cooldown: chrono::Duration::seconds(30),
         }
     }
 }
@@ -42,11 +40,8 @@ struct ProviderState {
     active: usize,
     next_generation: u64,
     latest_applied_generation: u64,
-    consecutive_transient_failures: u32,
     latency_ewma_ms: u64,
     last_completed_at: Option<DateTime<Utc>>,
-    failure_until: Option<DateTime<Utc>>,
-    half_open_claimed: bool,
 }
 
 pub struct RankedCandidates {
@@ -54,7 +49,6 @@ pub struct RankedCandidates {
     preferred_provider: String,
     preferred_model: String,
     preferred_reason: &'static str,
-    half_open_claim: Option<HalfOpenClaim>,
 }
 
 impl RankedCandidates {
@@ -69,17 +63,6 @@ impl RankedCandidates {
             "registry"
         }
     }
-
-    pub fn take_claim_for(&mut self, selection: &ModelSelection) -> Option<HalfOpenClaim> {
-        self.half_open_claim
-            .take_if(|claim| claim.provider == selection.provider_key)
-    }
-}
-
-pub struct HalfOpenClaim {
-    engine: RoutingEngine,
-    provider: String,
-    active: bool,
 }
 
 pub struct RoutingLease {
@@ -87,7 +70,6 @@ pub struct RoutingLease {
     provider: String,
     started_at: DateTime<Utc>,
     generation: u64,
-    half_open: bool,
     active: bool,
 }
 
@@ -108,37 +90,16 @@ impl RoutingEngine {
     }
 
     pub fn rank(&self, candidates: Vec<ModelSelection>) -> Result<RankedCandidates, GatewayError> {
-        self.rank_at(candidates, Utc::now())
-    }
-
-    fn rank_at(
-        &self,
-        candidates: Vec<ModelSelection>,
-        now: DateTime<Utc>,
-    ) -> Result<RankedCandidates, GatewayError> {
         let original = candidates
             .first()
             .cloned()
             .ok_or(GatewayError::ModelForbidden)?;
-        let original_provider = original.provider_key.clone();
-        let original_model = original.provider_model_id.clone();
         let original_quality = original.selector.quality().map(ToOwned::to_owned);
-        let mut state = self
+        let state = self
             .state
             .lock()
             .map_err(|_| GatewayError::InvalidConfiguration)?;
         let mut indexed = candidates.into_iter().enumerate().collect::<Vec<_>>();
-        if self.config.health_aware {
-            indexed.retain(|(_, candidate)| {
-                state
-                    .get(&candidate.provider_key)
-                    .copied()
-                    .is_some_and(|provider| provider_is_eligible(provider, now))
-            });
-        }
-        if indexed.is_empty() {
-            return Err(GatewayError::ProviderUnavailable);
-        }
         indexed.sort_by(|(left_index, left), (right_index, right)| {
             let left_score = score(
                 self.config,
@@ -146,7 +107,6 @@ impl RoutingEngine {
                 left,
                 original_quality.as_deref(),
                 *left_index,
-                now,
             );
             let right_score = score(
                 self.config,
@@ -154,7 +114,6 @@ impl RoutingEngine {
                 right,
                 original_quality.as_deref(),
                 *right_index,
-                now,
             );
             left_score.cmp(&right_score)
         });
@@ -163,36 +122,17 @@ impl RoutingEngine {
             .map(|(_, candidate)| candidate)
             .collect::<Vec<_>>();
         let preferred = candidates.first().ok_or(GatewayError::ModelForbidden)?;
-        let preferred_reason = if preferred.provider_key == original_provider
-            && preferred.provider_model_id == original_model
+        let preferred_reason = if preferred.provider_key == original.provider_key
+            && preferred.provider_model_id == original.provider_model_id
         {
             "registry"
         } else {
-            changed_reason(self.config, &state, &original, preferred, now)
-        };
-        let half_open_claim = if self.config.health_aware
-            && state
-                .get(&preferred.provider_key)
-                .copied()
-                .is_some_and(|provider| provider_is_half_open(provider, now))
-        {
-            let provider = state
-                .get_mut(&preferred.provider_key)
-                .ok_or(GatewayError::InvalidConfiguration)?;
-            provider.half_open_claimed = true;
-            Some(HalfOpenClaim {
-                engine: self.clone(),
-                provider: preferred.provider_key.clone(),
-                active: true,
-            })
-        } else {
-            None
+            changed_reason(self.config, &state, &original, preferred)
         };
         Ok(RankedCandidates {
             preferred_provider: preferred.provider_key.clone(),
             preferred_model: preferred.provider_model_id.clone(),
             preferred_reason,
-            half_open_claim,
             candidates,
         })
     }
@@ -201,7 +141,6 @@ impl RoutingEngine {
         &self,
         provider: &str,
         started_at: DateTime<Utc>,
-        mut half_open_claim: Option<HalfOpenClaim>,
     ) -> Result<RoutingLease, GatewayError> {
         let mut state = self
             .state
@@ -210,18 +149,6 @@ impl RoutingEngine {
         let provider_state = state
             .get_mut(provider)
             .ok_or(GatewayError::InvalidConfiguration)?;
-        let half_open = if let Some(claim) = half_open_claim.as_mut() {
-            if !claim.active || claim.provider != provider {
-                return Err(GatewayError::InvalidConfiguration);
-            }
-            claim.active = false;
-            true
-        } else {
-            false
-        };
-        if provider_state.consecutive_transient_failures > 0 && !half_open {
-            return Err(GatewayError::ProviderUnavailable);
-        }
         provider_state.active = provider_state
             .active
             .checked_add(1)
@@ -232,19 +159,13 @@ impl RoutingEngine {
             provider: provider.to_owned(),
             started_at,
             generation: provider_state.next_generation,
-            half_open,
             active: true,
         })
     }
 }
 
 impl RoutingLease {
-    pub fn conclude(
-        &mut self,
-        completed_at: DateTime<Utc>,
-        success: bool,
-        error_type: Option<&str>,
-    ) {
+    pub fn conclude(&mut self, completed_at: DateTime<Utc>) {
         let Ok(mut state) = self.engine.state.lock() else {
             return;
         };
@@ -252,9 +173,6 @@ impl RoutingLease {
             return;
         };
         release_active(provider, &mut self.active);
-        if self.half_open {
-            provider.half_open_claimed = false;
-        }
         if self.generation < provider.latest_applied_generation {
             return;
         }
@@ -270,15 +188,6 @@ impl RoutingLease {
                 .saturating_add(latency_ms)
                 / 4
         };
-        if success || (self.half_open && !error_type.is_some_and(is_transient)) {
-            provider.consecutive_transient_failures = 0;
-            provider.failure_until = None;
-        } else if error_type.is_some_and(is_transient) {
-            provider.consecutive_transient_failures =
-                provider.consecutive_transient_failures.saturating_add(1);
-            provider.failure_until =
-                completed_at.checked_add_signed(self.engine.config.failure_cooldown);
-        }
     }
 }
 
@@ -291,23 +200,6 @@ impl Drop for RoutingLease {
             && let Some(provider) = state.get_mut(&self.provider)
         {
             release_active(provider, &mut self.active);
-            if self.half_open {
-                provider.half_open_claimed = false;
-            }
-        }
-    }
-}
-
-impl Drop for HalfOpenClaim {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if let Ok(mut state) = self.engine.state.lock()
-            && let Some(provider) = state.get_mut(&self.provider)
-        {
-            provider.half_open_claimed = false;
-            self.active = false;
         }
     }
 }
@@ -322,7 +214,6 @@ fn release_active(provider: &mut ProviderState, active: &mut bool) {
 #[derive(Eq, PartialEq)]
 struct CandidateScore {
     quality_group: u8,
-    failures: u32,
     latency_ms: u64,
     active: usize,
     cost: u128,
@@ -333,7 +224,6 @@ impl Ord for CandidateScore {
     fn cmp(&self, other: &Self) -> Ordering {
         (
             self.quality_group,
-            self.failures,
             self.latency_ms,
             self.active,
             self.cost,
@@ -341,7 +231,6 @@ impl Ord for CandidateScore {
         )
             .cmp(&(
                 other.quality_group,
-                other.failures,
                 other.latency_ms,
                 other.active,
                 other.cost,
@@ -362,19 +251,20 @@ fn score(
     candidate: &ModelSelection,
     original_quality: Option<&str>,
     original_index: usize,
-    now: DateTime<Utc>,
 ) -> CandidateScore {
     let provider = state
         .get(&candidate.provider_key)
         .copied()
         .unwrap_or_default();
-    let (failures, latency_ms) = health_score(provider, now);
     CandidateScore {
         quality_group: u8::from(
             !config.auto_quality && candidate.selector.quality() != original_quality,
         ),
-        failures: if config.health_aware { failures } else { 0 },
-        latency_ms: if config.health_aware { latency_ms } else { 0 },
+        latency_ms: if config.health_aware {
+            latency_score(provider)
+        } else {
+            0
+        },
         active: if config.load_aware {
             provider.active
         } else {
@@ -394,7 +284,6 @@ fn changed_reason(
     state: &HashMap<String, ProviderState>,
     original: &ModelSelection,
     selected: &ModelSelection,
-    now: DateTime<Utc>,
 ) -> &'static str {
     let original_state = state
         .get(&original.provider_key)
@@ -404,9 +293,7 @@ fn changed_reason(
         .get(&selected.provider_key)
         .copied()
         .unwrap_or_default();
-    let original_health = health_score(original_state, now);
-    let selected_health = health_score(selected_state, now);
-    if config.health_aware && selected_health < original_health {
+    if config.health_aware && latency_score(selected_state) < latency_score(original_state) {
         "health"
     } else if config.load_aware && selected_state.active < original_state.active {
         "load"
@@ -421,27 +308,10 @@ fn changed_reason(
     }
 }
 
-fn health_score(provider: ProviderState, now: DateTime<Utc>) -> (u32, u64) {
-    if provider_is_half_open(provider, now) {
-        return (0, 0);
-    }
-    (
-        provider.consecutive_transient_failures,
-        provider
-            .last_completed_at
-            .map_or(u64::MAX, |_| provider.latency_ewma_ms),
-    )
-}
-
-fn provider_is_half_open(provider: ProviderState, now: DateTime<Utc>) -> bool {
-    provider.consecutive_transient_failures > 0
-        && !provider.half_open_claimed
-        && provider.active == 0
-        && provider.failure_until.is_some_and(|until| until <= now)
-}
-
-fn provider_is_eligible(provider: ProviderState, now: DateTime<Utc>) -> bool {
-    provider.consecutive_transient_failures == 0 || provider_is_half_open(provider, now)
+fn latency_score(provider: ProviderState) -> u64 {
+    provider
+        .last_completed_at
+        .map_or(u64::MAX, |_| provider.latency_ewma_ms)
 }
 
 fn cost_score(metadata: &serde_json::Value) -> u128 {
@@ -477,21 +347,6 @@ fn cost_score(metadata: &serde_json::Value) -> u128 {
     )
 }
 
-fn is_transient(error_type: &str) -> bool {
-    matches!(
-        error_type,
-        "408"
-            | "500"
-            | "502"
-            | "503"
-            | "504"
-            | "upstream_unavailable"
-            | "upstream_body_error"
-            | "provider_response_failed"
-            | "provider_stream_error"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
@@ -504,75 +359,15 @@ mod tests {
     };
 
     #[test]
-    fn transient_failure_routes_only_the_next_request() {
-        let engine = RoutingEngine::new(RoutingConfig::default(), providers());
-        let candidates = vec![
-            candidate("primary", QualityTier::Advanced, 4),
-            candidate("secondary", QualityTier::Standard, 5),
-        ];
-        assert_eq!(
-            engine.rank(candidates.clone()).unwrap().candidates[0].provider_key,
-            "primary"
-        );
-        let started = Utc::now();
-        let mut only_attempt = engine.begin("primary", started, None).unwrap();
-        only_attempt.conclude(started + Duration::milliseconds(20), false, Some("503"));
-
-        let next = engine.rank(candidates).unwrap();
-        assert_eq!(next.candidates[0].provider_key, "secondary");
-        assert_eq!(next.reason_for(&next.candidates[0], true), "health");
-        let mut half_open = engine
-            .rank_at(
-                vec![
-                    candidate("primary", QualityTier::Advanced, 4),
-                    candidate("secondary", QualityTier::Standard, 5),
-                ],
-                started + Duration::seconds(31),
-            )
-            .unwrap();
-        assert_eq!(half_open.candidates[0].provider_key, "primary");
-        let concurrent = engine
-            .rank_at(
-                vec![
-                    candidate("primary", QualityTier::Advanced, 4),
-                    candidate("secondary", QualityTier::Standard, 5),
-                ],
-                started + Duration::seconds(31),
-            )
-            .unwrap();
-        assert_eq!(concurrent.candidates[0].provider_key, "secondary");
-        let claim = half_open.take_claim_for(&half_open.candidates[0].clone());
-        let _probe = engine
-            .begin("primary", started + Duration::seconds(31), claim)
-            .unwrap();
-    }
-
-    #[test]
-    fn provider_rate_limit_does_not_open_the_gateway_circuit() {
-        let engine = RoutingEngine::new(RoutingConfig::default(), ["primary".to_owned()]);
-        let started = Utc::now();
-        let mut attempt = engine.begin("primary", started, None).unwrap();
-        attempt.conclude(started + Duration::milliseconds(1), false, Some("429"));
-
-        let ranked = engine
-            .rank_at(
-                vec![candidate("primary", QualityTier::Advanced, 4)],
-                started + Duration::milliseconds(2),
-            )
-            .unwrap();
-        assert_eq!(ranked.candidates[0].provider_key, "primary");
-    }
-
-    #[test]
     fn later_started_result_wins_when_requests_complete_out_of_order() {
         let engine = RoutingEngine::new(RoutingConfig::default(), providers());
         let started = Utc::now();
-        let mut old = engine.begin("primary", started, None).unwrap();
+        let mut old = engine.begin("primary", started).unwrap();
         let mut newer = engine
-            .begin("primary", started + Duration::milliseconds(1), None)
+            .begin("primary", started + Duration::milliseconds(1))
             .unwrap();
-        newer.conclude(started + Duration::milliseconds(2), true, None);
-        old.conclude(started + Duration::milliseconds(3), false, Some("503"));
+        newer.conclude(started + Duration::milliseconds(2));
+        old.conclude(started + Duration::milliseconds(3));
         let ranked = engine
             .rank(vec![
                 candidate("primary", QualityTier::Advanced, 4),
@@ -583,58 +378,18 @@ mod tests {
     }
 
     #[test]
-    fn half_open_allows_one_probe_and_rejects_parallel_claims() {
+    fn failed_provider_is_never_excluded() {
         let engine = RoutingEngine::new(RoutingConfig::default(), ["primary".to_owned()]);
         let started = Utc::now();
-        let mut failed = engine.begin("primary", started, None).unwrap();
-        failed.conclude(started + Duration::milliseconds(1), false, Some("503"));
-
-        let probe_at = started + Duration::seconds(31);
-        let mut probe = engine
-            .rank_at(
-                vec![candidate("primary", QualityTier::Advanced, 4)],
-                probe_at,
-            )
-            .unwrap();
-        assert!(matches!(
-            engine.rank_at(
-                vec![candidate("primary", QualityTier::Advanced, 4)],
-                probe_at,
-            ),
-            Err(crate::error::GatewayError::ProviderUnavailable)
-        ));
-        let selected = probe.candidates[0].clone();
-        let claim = probe.take_claim_for(&selected);
-        let _lease = engine.begin("primary", probe_at, claim).unwrap();
-        assert!(matches!(
-            engine.rank_at(
-                vec![candidate("primary", QualityTier::Advanced, 4)],
-                probe_at,
-            ),
-            Err(crate::error::GatewayError::ProviderUnavailable)
-        ));
-    }
-
-    #[test]
-    fn explicit_stream_failure_penalizes_the_provider() {
-        let engine = RoutingEngine::new(RoutingConfig::default(), providers());
-        let started = Utc::now();
-        let mut stream = engine.begin("primary", started, None).unwrap();
-        stream.conclude(
-            started + Duration::milliseconds(1),
-            false,
-            Some("provider_stream_error"),
-        );
-        let ranked = engine
-            .rank_at(
-                vec![
-                    candidate("primary", QualityTier::Advanced, 4),
-                    candidate("secondary", QualityTier::Standard, 5),
-                ],
-                started + Duration::milliseconds(2),
-            )
-            .unwrap();
-        assert_eq!(ranked.candidates[0].provider_key, "secondary");
+        let mut failed = engine.begin("primary", started).unwrap();
+        failed.conclude(started + Duration::milliseconds(1));
+        for _ in 0..3 {
+            let ranked = engine
+                .rank(vec![candidate("primary", QualityTier::Advanced, 4)])
+                .unwrap();
+            assert_eq!(ranked.candidates[0].provider_key, "primary");
+            let _lease = engine.begin("primary", Utc::now()).unwrap();
+        }
     }
 
     #[test]
@@ -647,11 +402,10 @@ mod tests {
                 cost_aware: false,
                 quota_aware: false,
                 auto_quality: true,
-                failure_cooldown: Duration::seconds(30),
             },
             providers(),
         );
-        let _active = load_engine.begin("primary", started, None).unwrap();
+        let _active = load_engine.begin("primary", started).unwrap();
         let candidates = vec![
             candidate("primary", QualityTier::Advanced, 1),
             candidate("secondary", QualityTier::Standard, 9),
@@ -668,7 +422,6 @@ mod tests {
                 cost_aware: true,
                 quota_aware: false,
                 auto_quality: true,
-                failure_cooldown: Duration::seconds(30),
             },
             providers(),
         );
@@ -700,11 +453,10 @@ mod tests {
                 cost_aware: true,
                 quota_aware: false,
                 auto_quality: false,
-                failure_cooldown: Duration::seconds(30),
             },
             providers(),
         );
-        let _active = quality_guard.begin("primary", started, None).unwrap();
+        let _active = quality_guard.begin("primary", started).unwrap();
         assert_eq!(
             quality_guard.rank(candidates).unwrap().candidates[0].provider_key,
             "primary"
@@ -715,8 +467,8 @@ mod tests {
     fn measured_health_change_and_reason_use_the_same_score() {
         let engine = RoutingEngine::new(RoutingConfig::default(), providers());
         let started = Utc::now();
-        let mut secondary = engine.begin("secondary", started, None).unwrap();
-        secondary.conclude(started + Duration::milliseconds(5), true, None);
+        let mut secondary = engine.begin("secondary", started).unwrap();
+        secondary.conclude(started + Duration::milliseconds(5));
         let ranked = engine
             .rank(vec![
                 candidate("primary", QualityTier::Advanced, 4),
