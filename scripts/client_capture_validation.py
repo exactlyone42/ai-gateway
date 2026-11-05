@@ -22,11 +22,13 @@ def validate_tools(saved, fixture, codex):
                     raise RuntimeError('保存未保留真實工具結果：' + leg)
 
 
-def validate_usage(usage_records, records, cancel, codex):
+def validate_usage(usage_records, records, cancel, codex, error=False):
     if len(usage_records) != len(records) or len({row['id'] for row in usage_records}) != len(records) or {row['id'] for row in usage_records} != {row['capture_id'] for row in records}:
         raise RuntimeError('用量與保存請求不一致')
-    expected_actual = None if cancel and codex else (1, 0 if cancel else 1)
+    expected_actual = None if error or (cancel and codex) else (1, 0 if cancel else 1)
     for row in usage_records:
+        if error and row['status'] != 'failed':
+            raise RuntimeError('上游錯誤未記為失敗請求')
         reported = [usage for usage in row['usage'] or [] if usage['source'] == 'provider_reported']
         if expected_actual is None:
             if reported or any(row['actual_usage'].values()):
@@ -47,3 +49,10 @@ def reject_plaintext(data, markers):
         raw = marker.encode()
         if raw in data or raw.hex().encode() in data.lower():
             raise RuntimeError('保存或一般紀錄發現明文')
+
+
+def validate_errors(saved, payloads):
+    if not payloads or len(set(payloads)) != len(payloads):
+        raise RuntimeError('錯誤來源缺少獨立回應識別')
+    if sorted(content['provider_response'] for content in saved) != sorted(payloads):
+        raise RuntimeError('錯誤保存與實際上游回應未逐筆相符')

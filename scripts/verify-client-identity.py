@@ -26,16 +26,20 @@ def main():
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
     parser.add_argument('--check-capture', action='store_true')
+    parser.add_argument('--check-error', action='store_true')
+    parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     if args.control_wrong_tool_result and not args.check_tools:
         parser.error('wrong tool result control requires --check-tools')
-    if args.check_cancel and args.check_tools:
-        parser.error('cancel and tool validation must run separately')
+    if sum((args.check_cancel, args.check_tools, args.check_error)) > 1:
+        parser.error('cancel, tool and error validation must run separately')
     if args.control_force_client_kill and not args.check_cancel:
         parser.error('forced kill control requires --check-cancel')
-    if args.check_capture and not (args.check_tools or args.check_cancel):
-        parser.error('capture validation requires tools or cancel')
+    if args.control_error_as_success and not args.check_error:
+        parser.error('error success control requires --check-error')
+    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error):
+        parser.error('capture validation requires tools, cancel or error')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
@@ -61,6 +65,9 @@ def main():
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
     if args.check_cancel:
         fixture = runpy.run_path(str(root / 'scripts/client_cancel_fixture.py'))['handler'](fixture)
+    if args.check_error:
+        fixture = runpy.run_path(str(root / 'scripts/client_error_fixture.py'))['handler'](fixture)
+        fixture.success_control = args.control_error_as_success
     fixture.fixture_dir = root / 'tests/fixtures/client-roundtrip'
     fixture.capture_dir = captures
     fixture.request_paths = {'claude-code': [], 'codex-cli': []}
@@ -152,7 +159,7 @@ def main():
             if name != 'missing':
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
 
-        def client(name, model, success, label, tool_prompt=None, cancel=False):
+        def client(name, model, success, label, tool_prompt=None, cancel=False, error=False):
             before = len(fixture.request_paths[client_key])
             capture_start = len(fixture.captured_requests)
             denial_status = None
@@ -165,7 +172,7 @@ def main():
             prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
             if codex:
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', *(['--json'] if cancel else []), prompt]
+                command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', *(['--json'] if cancel or error else []), prompt]
                 client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
             else:
                 command = ['claude', '-p', '--model', model, '--max-turns', '3' if tool_prompt else '1', *(['--allowedTools=Read'] if tool_prompt else []), prompt]
@@ -215,8 +222,10 @@ def main():
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
-            if success:
-                if not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
+            if success or error:
+                if error and (result.returncode != 1 or fixture.error_marker not in diagnostic or not 1 <= after - before <= 6):
+                    raise RuntimeError(f'{label}: 原Client未正確回報上游錯誤，退出{result.returncode}、上游{after - before}次')
+                if not error and not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
                     raise RuntimeError(f'{label}: 原Client未完成假串流')
                 observed = fixture.captured_requests[capture_start:]
                 if not observed or any(capture['model'] != model or not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
@@ -226,7 +235,7 @@ def main():
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
         def verify_capture():
-            markers = [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ['CANCEL_STREAM_PENDING', expected_reply]
+            markers = [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -234,7 +243,7 @@ def main():
             for path in spool_files:
                 reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
-            count = 1 if args.check_cancel else 2
+            count = fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
@@ -258,13 +267,21 @@ def main():
                 saved.append(content)
             if args.check_tools:
                 runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_tools'](saved, fixture, codex)
+            elif args.check_error:
+                runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_errors'](saved, fixture.error_payloads)
+                for content in saved:
+                    for leg in ('client_request', 'provider_request'):
+                        if expected_reply not in content[leg]:
+                            raise RuntimeError('錯誤保存未保留原請求')
             else:
                 if 'CANCEL_STREAM_PENDING' not in saved[0]['provider_response'] or 'response.completed' in saved[0]['provider_response'] or 'message_stop' in saved[0]['provider_response']:
                     raise RuntimeError('中斷保存內容不符')
             usage_query = root / 'queries/test_client_capture_usage.sql'
             usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=usage_query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             usage_records = json.loads(usage_result.stdout)
-            runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_usage'](usage_records, records, args.check_cancel, codex)
+            if args.check_error and {row['request_id'] for row in usage_records} != set(checks[-1]['ingress_request_ids']):
+                raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
+            runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
             dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
             reject_plaintext(dump.stdout, markers)
             reject_plaintext((runtime / 'gateway.log').read_bytes(), markers)
@@ -273,6 +290,18 @@ def main():
             (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
             checks[-1]['capture_records'] = records
 
+        if args.check_error:
+            client('alice', f'{model_prefix}-alice', True, 'upstream-error', error=True)
+            ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == 400]
+            ingress_ids = {event['request_id'] for event in ingress}
+            if len(ingress) != fixture.error_requests or len(ingress_ids) != len(ingress):
+                raise RuntimeError('入口錯誤請求與上游嘗試數量不符')
+            checks[-1]['ingress_request_ids'] = sorted(ingress_ids)
+            if args.check_capture:
+                verify_capture()
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            print(f'原Client上游錯誤通過；證據：{runtime}')
+            return
         if args.check_cancel:
             client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
             if fixture.cancel_requests != 1:
@@ -328,6 +357,9 @@ def main():
         (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
         print(f'原Client身分隔離通過：{len(checks)}項；證據：{runtime}')
     finally:
+        if args.check_error:
+            (runtime / 'error-result.json').write_text(json.dumps({'upstream_requests': fixture.error_requests, 'observations': fixture.error_observations, 'error_payloads': fixture.error_payloads}, indent=2))
+            print(f'錯誤測試證據：{runtime}')
         if args.check_cancel:
             fixture.stop_stream.set()
             (runtime / 'cancel-result.json').write_text(json.dumps({'client_exit': fixture.client_exit, 'upstream_requests': fixture.cancel_requests, 'upstream_closed': fixture.peer_closed.is_set()}, indent=2))

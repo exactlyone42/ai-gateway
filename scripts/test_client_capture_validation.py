@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors
 
 
 class CaptureValidationTest(unittest.TestCase):
@@ -69,6 +69,22 @@ class UsageValidationTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             validate_usage(rows, records, False, False)
 
+    def test_error_has_no_reported_usage(self):
+        rows, records = self.sample()
+        rows[0]['status'] = 'failed'
+        rows[0]['actual_usage'] = {}
+        rows[0]['usage'].pop(0)
+        validate_usage(rows, records, False, False, True)
+        rows[0]['usage'].append({'source': 'provider_reported', 'input_tokens': 1, 'output_tokens': 1})
+        with self.assertRaises(RuntimeError):
+            validate_usage(rows, records, False, False, True)
+
+    def test_error_cannot_be_recorded_as_success(self):
+        rows, records = self.sample()
+        rows[0]['status'] = 'completed'
+        with self.assertRaises(RuntimeError):
+            validate_usage(rows, records, False, False, True)
+
     def test_wrong_actual_usage_is_rejected(self):
         rows, records = self.sample()
         rows[0]['actual_usage']['output_tokens'] = 2
@@ -92,6 +108,19 @@ class PlaintextValidationTest(unittest.TestCase):
     def test_empty_markers_are_rejected(self):
         with self.assertRaises(RuntimeError):
             reject_plaintext(b'encrypted-fixture', [])
+
+
+class ErrorValidationTest(unittest.TestCase):
+    def test_each_unique_error_is_saved(self):
+        validate_errors([{'provider_response': 'error-2'}, {'provider_response': 'error-1'}], ['error-1', 'error-2'])
+
+    def test_duplicate_cannot_replace_an_unsaved_error(self):
+        with self.assertRaises(RuntimeError):
+            validate_errors([{'provider_response': 'error-1'}, {'provider_response': 'error-1'}], ['error-1', 'error-2'])
+
+    def test_sources_must_be_distinguishable(self):
+        with self.assertRaises(RuntimeError):
+            validate_errors([{'provider_response': 'error-1'}, {'provider_response': 'error-1'}], ['error-1', 'error-1'])
 
 
 if __name__ == '__main__':

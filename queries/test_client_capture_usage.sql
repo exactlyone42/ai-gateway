@@ -1,6 +1,6 @@
 SELECT COALESCE(json_agg(record ORDER BY created_at, id), '[]'::json)
 FROM (
-    SELECT r.id, a.id AS attempt_id, r.status, r.created_at, a.actual_usage, a.estimated_usage,
+    SELECT r.id, r.request_id, a.id AS attempt_id, r.status, r.created_at, a.actual_usage, a.estimated_usage,
         (SELECT json_agg(json_build_object('source', u.source, 'input_tokens', u.input_tokens, 'output_tokens', u.output_tokens))
          FROM usage_records u WHERE u.provider_attempt_id = a.id) AS usage
     FROM gateway_requests r

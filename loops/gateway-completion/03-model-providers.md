@@ -30,3 +30,5 @@ OpenAI 格式轉往 Anthropic 的延遲上游測試，修正前等待訊號測�
 目前環境及正式 Gateway 未發現 OpenAI、Gemini、xAI API 金鑰，亦未發現 vLLM 服務，不能宣稱這些來源已真實連線。隔離資料庫及模擬 Gemini、xAI 測試確認兩位使用者各自的個人金鑰、一般回應與串流回應；未持有該來源金鑰的人在一般及串流請求都被拒絕，供應商沒有收到額外請求，回應不含供應商金鑰。測試與靜態檢查通過；真實帳號及原 Client 實送仍未驗收。
 
 以原 Codex CLI 0.164.0、隔離 Gateway 與真實本機 `gpt-oss:20b` 執行簡短任務：六核心限制下約 227 秒完成，CLI 回傳一則非空答案；隔離帳本有 1 筆完成請求與 1 次上游嘗試。測試只確認有可讀回覆，未核對答案是否完全符合題目，也未驗工具操作或可接受速度。隔離模型、Gateway 與資料庫已停止，既有服務未修改。
+
+2026-11-05 本人Codex現成來源唯讀盤點：/home/cash/.codex/auth.json為chatgpt模式，access token與account id均存在（值未輸出）；使用該登入對官方https://chatgpt.com/backend-api/codex/models?client_version=0.166.0唯讀GET，HTTP200，模型清單含gpt-6-luna，證據/tmp/gateway-owned-codex-models.json。正式容器掛/run/gateway-codex但未讀出憑證。這不證明模型實送、原Client或CodexFile持有人路徑完成；下一步重用verify-client-identity既有隔離建立流程，以CodexFile本人來源、合成測試資料及單次短答驗證，並核對其他使用者與撤銷Gateway金鑰拒絕，不修改原登入檔。容量估算仍由其他session處理。
