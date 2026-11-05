@@ -85,6 +85,7 @@ pub struct PreparedProviderRequest {
     plan: ProviderRequestPlan,
     headers: HeaderMap,
     body: Bytes,
+    ollama_responses_stream: bool,
 }
 
 impl PreparedProviderRequest {
@@ -326,6 +327,7 @@ fn prepare_request(
         plan,
         headers,
         body,
+        ollama_responses_stream: false,
     })
 }
 
@@ -885,7 +887,10 @@ impl ProviderAdapter for LocalProvider {
         profile: &ProviderProfile,
         input: ProviderRequestInput<'_>,
     ) -> Result<PreparedProviderRequest, GatewayError> {
-        prepare_request(self, plan, body, profile, input)
+        let mut request = prepare_request(self, plan, body, profile, input)?;
+        request.ollama_responses_stream = matches!(self.runtime, LocalRuntime::Ollama)
+            && request.plan.operation == GatewayOperation::OpenAiResponses;
+        Ok(request)
     }
 
     fn estimate_cost(
@@ -1314,16 +1319,22 @@ pub async fn send(
 ) -> Result<reqwest::Response, GatewayError> {
     let codex_stream =
         base_url == crate::codex_auth::BASE_URL && request.path_and_query() == "/responses";
+    let ollama_responses_stream = request.ollama_responses_stream;
     let mut response = client
         .post(format!("{}{}", base_url, request.path_and_query()))
         .headers(request.headers)
         .body(request.body)
         .send()
         .await?;
-    if codex_stream
-        && response.status().is_success()
-        && !response.headers().contains_key(header::CONTENT_TYPE)
-    {
+    let missing_codex_type = codex_stream && !response.headers().contains_key(header::CONTENT_TYPE);
+    let mislabeled_ollama_type = ollama_responses_stream
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim() == "application/x-ndjson");
+    if response.status().is_success() && (missing_codex_type || mislabeled_ollama_type) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream"),
@@ -1934,6 +1945,97 @@ mod tests {
                 .unwrap(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn ollama_responses_stream_normalizes_ndjson_header_without_changing_bytes() {
+        let wire = include_bytes!("../../tests/fixtures/client-roundtrip/openai-response.sse");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(move || async move {
+                    ([("content-type", "application/x-ndjson")], wire.as_slice())
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let headers = HeaderMap::new();
+        for (kind, operation, streaming, expected) in [
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "text/event-stream",
+            ),
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiResponses,
+                false,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiChatCompletions,
+                true,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::Vllm,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::OpenAi,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "application/x-ndjson",
+            ),
+        ] {
+            let adapter = for_kind(kind).unwrap();
+            let profile = profile(kind, kind == ProviderKind::OpenAi);
+            let plan = adapter
+                .plan_for_target(
+                    operation,
+                    operation,
+                    "provider-model",
+                    streaming,
+                    &input(&headers),
+                )
+                .unwrap();
+            let prepared = if streaming {
+                adapter.stream(
+                    plan,
+                    Bytes::from_static(b"{\"stream\":true}"),
+                    &profile,
+                    input(&headers),
+                )
+            } else {
+                adapter.send(
+                    plan,
+                    Bytes::from_static(b"{\"stream\":false}"),
+                    &profile,
+                    input(&headers),
+                )
+            }
+            .unwrap();
+            let response = super::send(
+                &client,
+                &format!("http://{address}"),
+                prepared,
+                kind.as_str(),
+                "provider-model",
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.headers()["content-type"], expected);
+            assert_eq!(response.bytes().await.unwrap().as_ref(), wire.as_slice());
+        }
         task.abort();
     }
 

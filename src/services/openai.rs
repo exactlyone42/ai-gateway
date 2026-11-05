@@ -1203,6 +1203,14 @@ mod tests {
     }
 
     #[test]
+    fn responses_rejects_ndjson_even_when_its_object_claims_completion() {
+        let mut observer = ResponsesObserver::default();
+        let result = observer
+            .observe(b"{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n");
+        assert!(result.is_err() || observer.finish().is_err());
+    }
+
+    #[test]
     fn chat_accepts_done_or_eof_after_finish_reason_and_keeps_late_usage() {
         let mut observer = ChatObserver::new(1);
         let finish = observer

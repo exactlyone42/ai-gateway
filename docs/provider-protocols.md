@@ -237,3 +237,7 @@ Sources, verified 2026-09-11: [Gemini generateContent and usage metadata](https:
 [vLLM OpenAI-compatible server](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/),
 [vLLM stream usage](https://docs.vllm.ai/en/latest/features/per_request_metrics/), and
 [Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility).
+
+## Ollama Responses 的串流標頭
+
+本機 Ollama 0.34.0 在純工具呼叫時，曾以 `application/x-ndjson` 標示完整 SSE 串流，造成 Gateway 誤以一般 JSON 解析並回 502。供應商轉接只在 Ollama 的 Responses 串流成功回應遇到此標頭時，改成 `text/event-stream`；回應內容的位元組、事件及用量不改，仍須通過 SSE 與完成事件檢查。真正的 NDJSON 不會因此成為有效 Responses 串流。其他供應商、Chat Completions、非串流與失敗狀態不套用。隔離重現與原 Client 實送證據見 `loops/gateway-completion/03-model-providers.md`；尚未部署。

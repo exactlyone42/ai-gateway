@@ -241,9 +241,9 @@ impl CapabilityRequirements {
                 || contains_phrase(&text, TOOL_PHRASES),
             reasoning: request.reasoning.as_ref().is_some_and(|reasoning| {
                 reasoning.enabled == Some(true)
-                    || reasoning.effort.is_some()
                     || reasoning.budget_tokens.is_some()
-                    || reasoning.summary.is_some()
+                    || (reasoning.effort.as_deref() != Some("none")
+                        && (reasoning.effort.is_some() || reasoning.summary.is_some()))
             }) || contains_phrase(&text, REASONING_PHRASES),
             images: has_content(|content| matches!(content, CanonicalContent::Image { .. }))
                 || contains_phrase(&text, IMAGE_PHRASES),
@@ -2063,5 +2063,26 @@ mod tests {
             CapabilityRequirements::from_canonical(&request),
             CapabilityRequirements::default()
         );
+    }
+
+    #[test]
+    fn disabled_reasoning_does_not_require_reasoning_capability() {
+        let cases = [
+            (
+                GatewayOperation::OpenAiResponses,
+                r#"{"model":"public","stream":true,"reasoning":{"effort":"none","summary":"auto"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":"hello"}"#,
+            ),
+            (
+                GatewayOperation::OpenAiChatCompletions,
+                r#"{"model":"public","stream":true,"reasoning_effort":"none","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+        ];
+        for (operation, body) in cases {
+            let request = canonical_from(operation, body);
+            let required = CapabilityRequirements::from_canonical(&request);
+            assert!(!required.reasoning);
+            assert!(required.tools);
+            assert!(required.streaming);
+        }
     }
 }

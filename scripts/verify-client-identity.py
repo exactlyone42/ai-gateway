@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     parser.add_argument('--check-codex-held', action='store_true')
+    parser.add_argument('--check-local', action='store_true')
     parser.add_argument('--check-owned-tools', action='store_true')
     parser.add_argument('--check-owned-compact', action='store_true')
     parser.add_argument('--codex-auth-file', type=Path)
@@ -41,9 +42,12 @@ def main():
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
+    live_source = args.check_codex_held or args.check_local
+    if args.check_local and (args.check_codex_held or args.client != 'codex' or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_cancel, args.check_error))):
+        parser.error('local source requires codex and source model, separately from fixture and subscription modes')
     if args.check_owned_compact and (not (args.check_codex_held and args.check_capture) or args.check_owned_tools):
         parser.error('owned compact requires owned source and capture, separately from tools')
-    if args.check_owned_tools and not (args.check_codex_held and args.check_capture):
+    if args.check_owned_tools and not (live_source and args.check_capture):
         parser.error('owned tools require owned source and capture')
     if args.claude_auto_compact and (not args.check_compact or args.client != 'claude'):
         parser.error('Claude automatic compaction requires Claude compact mode')
@@ -65,7 +69,7 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or args.check_codex_held):
+    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or live_source):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
         if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
@@ -74,18 +78,25 @@ def main():
         source_auth = json.loads(source_bytes)
         if source_auth.get('auth_mode') != 'chatgpt' or not source_auth.get('tokens', {}).get('account_id'):
             parser.error('owned Codex source requires a ChatGPT login')
-    elif args.codex_auth_file or args.source_model:
+    elif args.codex_auth_file or (args.source_model and not args.check_local):
         parser.error('auth file and source model require --check-codex-held')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
         raise RuntimeError('需要本機隔離測試資料庫')
+    local_capabilities = []
+    if args.check_local:
+        request = Request('http://127.0.0.1:11434/api/show', data=json.dumps({'model': args.source_model}).encode(), headers={'content-type': 'application/json'})
+        with urlopen(request, timeout=8) as response:
+            local_capabilities = json.load(response).get('capabilities', [])
+        if 'completion' not in local_capabilities or (args.check_owned_tools and 'tools' not in local_capabilities):
+            raise RuntimeError('本機模型未宣告所需的文字或工具能力')
     version = subprocess.check_output([args.client, '--version'], text=True).strip()
     required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.318 '
     if not version.startswith(required):
         raise RuntimeError('Client版本不符')
     codex = args.client == 'codex'
-    provider_key = 'codex-subscription' if args.check_codex_held else ('openai' if codex else 'anthropic')
+    provider_key = 'local-ollama' if args.check_local else 'codex-subscription' if args.check_codex_held else ('openai' if codex else 'anthropic')
     operation = 'openai_responses' if codex else 'anthropic_messages'
     model_prefix = 'company' if codex else 'claude'
     client_key = 'codex-cli' if codex else 'claude-code'
@@ -153,6 +164,8 @@ def main():
     if args.check_codex_held:
         environment.update({'CODEX_AUTH_FILE': str(args.codex_auth_file.resolve()), 'CODEX_ACCOUNT_ID': source_auth['tokens']['account_id'], 'CODEX_OWNER_USER_ID': str(uuid.uuid4()), 'PROVIDER_ALLOWED_TENANT_IDS': environment['ADMIN_BOOTSTRAP_TENANT_ID']})
         fixture.provider_credentials.update((source_auth['tokens']['access_token'], source_auth['tokens']['account_id']))
+    if args.check_local:
+        environment['EXTRA_PROVIDER_PROFILES_JSON'] = json.dumps([{'kind': 'ollama', 'credential_ref': 'env://LOCAL_OLLAMA', 'provider_key': provider_key, 'base_url': 'http://127.0.0.1:11434', 'operations': [operation]}])
     checks = []
 
     def api(path, method='GET', body=None, token=None, expected=200, raw_response=False):
@@ -174,7 +187,7 @@ def main():
         return json.loads(raw) if raw else None
 
     log = (runtime / 'gateway.log').open('wb')
-    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '900s' if args.check_local else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
     try:
         time.sleep(2)
         if gateway.poll() is not None:
@@ -190,13 +203,13 @@ def main():
         def activate(kind, resource):
             api(f'/admin/v1/{kind}/{resource["id"]}/lifecycle', 'POST', {'version': resource['version'], 'state': 'active'}, admin)
 
-        provider = create('providers', {'provider_key': provider_key, 'display_name': '本人來源' if args.check_codex_held else '假供應商', 'provider_type': 'openai' if codex else 'anthropic', 'base_url': 'https://chatgpt.com/backend-api/codex' if args.check_codex_held else environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://CODEX_AUTH_FILE' if args.check_codex_held else ('env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY'), 'supported_operations': [operation]})['resource']
+        provider = create('providers', {'provider_key': provider_key, 'display_name': '本機模型' if args.check_local else '本人來源' if args.check_codex_held else '假供應商', 'provider_type': 'local' if args.check_local else 'openai' if codex else 'anthropic', 'base_url': 'http://127.0.0.1:11434' if args.check_local else 'https://chatgpt.com/backend-api/codex' if args.check_codex_held else environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://LOCAL_OLLAMA' if args.check_local else 'env://CODEX_AUTH_FILE' if args.check_codex_held else ('env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY'), 'supported_operations': [operation]})['resource']
         activate('providers', provider)
         users = {}
         credential_versions = {}
         for name in ('alice', 'bob', 'missing'):
             model = model_prefix + '-' + name
-            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': args.source_model if args.check_codex_held else model, 'supported_operations': [operation], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': True})['resource']
+            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': args.source_model if live_source else model, 'supported_operations': [operation], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': not args.check_local or 'thinking' in local_capabilities, **({'max_output_tokens': 512, 'context_window': 32768} if args.check_local else {})})['resource']
             activate('models', resource)
             user = create('users', {'display_name': name})['resource']
             created_credential = create('credentials', {'display_name': name, 'user_id': user['id']})
@@ -206,7 +219,7 @@ def main():
             users[name] = (user['id'], credential)
             policy = create('policies', {'policy_key': name, 'revision': 1, 'user_id': user['id'], 'configuration': {'constraints': {'allowed_models': [model]}}})['resource']
             activate('policies', policy)
-            if name != 'missing' and not args.check_codex_held:
+            if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
 
         if args.check_codex_held:
@@ -230,7 +243,11 @@ def main():
             home.mkdir()
             prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
             if codex:
-                (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
+                reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
+                (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
+                if args.check_local:
+                    with (home / 'config.toml').open('a') as config:
+                        config.write('stream_max_retries = 0\nrequest_max_retries = 0\nstream_idle_timeout_ms = 600000\n')
                 if args.check_compact:
                     config = home / 'config.toml'
                     extra = 'model_auto_compact_token_limit = 1000\nmodel_context_window = 32768\ncompact_prompt = "GATEWAY_COMPACT_REQUEST"\n'
@@ -288,7 +305,7 @@ def main():
                             os.killpg(process.pid, signal.SIGKILL)
                             process.wait()
             else:
-                result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
+                result = subprocess.run(['timeout', '--kill-after=5s', '600s' if args.check_local and success else '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=610 if args.check_local and success else 40)
                 if args.check_owned_compact and success:
                     initial_diagnostic = result.stdout + '\n' + result.stderr
                     for secret in fixture.client_credentials | fixture.provider_credentials:
@@ -324,7 +341,7 @@ def main():
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
-            if args.check_codex_held:
+            if live_source:
                 if success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
                     raise RuntimeError(f'{label}: 原Codex未完成本人來源實送，紀錄位於{runtime}')
                 if not success and (result.returncode != 1 or result.stdout.strip() == expected_reply):
@@ -345,7 +362,7 @@ def main():
                     raise RuntimeError(f'{label}: 憑證隔離失敗')
             elif after != before or result.stdout.strip() == expected_reply:
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
-            checks.append({'case': label, 'passed': True, 'upstream_requests': None if args.check_codex_held else after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
+            checks.append({'case': label, 'passed': True, 'upstream_requests': None if live_source else after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
         if args.check_compact:
             client('alice', f'{model_prefix}-alice', True, 'compact-continuation')
@@ -363,7 +380,7 @@ def main():
             return
 
         def verify_capture():
-            markers = owned_fields if args.check_owned_compact else [expected_reply] if args.check_codex_held else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            markers = owned_fields if args.check_owned_compact else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -401,7 +418,7 @@ def main():
                     for leg in ('client_request', 'provider_request'):
                         if expected_reply not in content[leg]:
                             raise RuntimeError('錯誤保存未保留原請求')
-            elif args.check_codex_held:
+            elif live_source:
                 if args.check_owned_compact:
                     compact = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_compact'](saved, owned_fields)
                     (runtime / 'compact-result.json').write_text(json.dumps(compact, indent=2))
@@ -419,7 +436,7 @@ def main():
             if args.check_error and {row['request_id'] for row in usage_records} != set(checks[-1]['ingress_request_ids']):
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
             validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
-            if args.check_codex_held:
+            if live_source:
                 (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
                 validation['validate_owned_usage'](saved, usage_records, records, expected_reply)
             else:
@@ -432,7 +449,7 @@ def main():
             (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
             checks[-1]['capture_records'] = records
 
-        if args.check_codex_held:
+        if live_source:
             owned_prompt = None
             if args.check_owned_compact:
                 owned_fields = [name + '-' + uuid.uuid4().hex for name in ('goal', 'decision', 'constraint', 'next')]
@@ -443,10 +460,15 @@ def main():
                 owned_file = runtime / 'owned-tool-input.txt'
                 owned_file.write_text(expected_reply)
                 owned_prompt = f'Use exactly one local shell command to read {owned_file}. Then reply with exactly the file contents and nothing else.'
+                if args.check_local:
+                    owned_prompt += ' Use the provided exec_command function with cmd set to cat followed by the exact path above. Do not use container.exec, exec or read_file; those tools are not available.'
             client('alice', f'{model_prefix}-alice', True, 'held-owner', owned_prompt)
             if args.check_capture:
                 verify_capture()
-            client('bob', f'{model_prefix}-bob', False, 'held-other-user')
+            if args.check_local:
+                client('alice', f'{model_prefix}-bob', False, 'model-denied')
+            else:
+                client('bob', f'{model_prefix}-bob', False, 'held-other-user')
             credential_id, credential_version = credential_versions['alice']
             api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
             client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
@@ -454,14 +476,14 @@ def main():
             result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             ledger = json.loads(result.stdout)
             expected_attempts = 3 if args.check_owned_compact else 2 if args.check_owned_tools else 1
-            if ledger['attempts'] != expected_attempts or ledger['completed_owner'] != expected_attempts or ledger['other_attempts'] != 0 or ledger['reported_records'] != expected_attempts or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] * expected_attempts or ledger['providers'] != ['codex-subscription'] * expected_attempts:
+            if ledger['attempts'] != expected_attempts or ledger['completed_owner'] != expected_attempts or ledger['other_attempts'] != 0 or ledger['reported_records'] != expected_attempts or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] * expected_attempts or ledger['providers'] != [provider_key] * expected_attempts:
                 raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
             for index, check in enumerate(checks):
                 check['upstream_requests'] = expected_attempts if index == 0 else 0
-            if args.codex_auth_file.read_bytes() != source_bytes:
+            if args.check_codex_held and args.codex_auth_file.read_bytes() != source_bytes:
                 raise RuntimeError('來源登入檔在驗收期間改變，未宣稱未變更')
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_auth_unchanged': True, 'source_sha256': hashlib.sha256(source_bytes).hexdigest(), 'checks': checks, 'ledger': ledger}, indent=2))
-            print(f'原Codex本人訂閱來源與拒絕驗收通過；證據：{runtime}')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_kind': 'ollama' if args.check_local else 'chatgpt', 'source_capabilities': local_capabilities if args.check_local else None, 'source_auth_unchanged': True if args.check_codex_held else None, 'source_sha256': hashlib.sha256(source_bytes).hexdigest() if args.check_codex_held else None, 'checks': checks, 'ledger': ledger}, indent=2))
+            print(f'原Codex真實來源與拒絕驗收通過；證據：{runtime}')
             return
 
         if args.check_error:
@@ -530,6 +552,23 @@ def main():
         client('alice', f'{model_prefix}-alice', False, 'membership-revoked')
         (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
         print(f'原Client身分隔離通過：{len(checks)}項；證據：{runtime}')
+    except Exception:
+        if args.check_local and args.check_capture and 'admin' in locals() and 'alice' in users:
+            try:
+                for _ in range(250):
+                    result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=(root / 'queries/test_client_capture_records.sql').read_text(), capture_output=True, text=True, timeout=5, check=True)
+                    records = json.loads(result.stdout)
+                    if records and len(records) == len(list((runtime / 'encrypted-spool').glob('*.capture'))):
+                        break
+                    time.sleep(0.2)
+                content = []
+                for record in records:
+                    legs = {leg: api(f'/admin/v1/request-captures/{record["capture_id"]}/content?leg={leg}', token=admin, raw_response=True) for leg in ('client_request', 'provider_request', 'provider_response', 'client_response')}
+                    content.append({'record': record, 'legs': legs})
+                (runtime / 'failure-captures.json').write_text(json.dumps(content, indent=2))
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                (runtime / 'failure-capture-error.txt').write_text(type(error).__name__)
+        raise
     finally:
         if args.check_error:
             (runtime / 'error-result.json').write_text(json.dumps({'upstream_requests': fixture.error_requests, 'observations': fixture.error_observations, 'error_payloads': fixture.error_payloads}, indent=2))

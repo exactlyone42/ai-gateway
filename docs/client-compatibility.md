@@ -70,6 +70,8 @@ bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發�
 
 ## Codex CLI
 
+本分支已隔離實測 Ollama 0.34.0 的 `qwen3-coder:30b`。不支援推理的模型須在 Client 設定 `model_reasoning_effort = "none"`，模型清單也要如實標示 `supports_reasoning=false`；Gateway 不會替使用者開啟推理。這不代表所有本機模型均可用，`gpt-oss:20b` 的本輪精確回答與工具驗收未過。新版尚未部署。
+
 | 欄位 | 值 |
 | --- | --- |
 | client | Codex CLI |
@@ -79,7 +81,7 @@ bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發�
 | protocol | OpenAI Responses；`wire_api` 唯一支援值為 `responses` |
 | authentication | gateway 用 `env_key` 或可定期更新 bearer 的 `auth` command，且保持 `requires_openai_auth = false`；`requires_openai_auth = true` 會改用 OpenAI 登入，見下方政策 |
 | streaming | supported；可設 `stream_idle_timeout_ms`、`stream_max_retries` |
-| tools | request serialization verified：隔離組態送出非空 typed tools 且含 `function`；tool-call／tool-result response 往返 unknown |
+| tools | 0.166.0 已以本人 ChatGPT 及本機 qwen3-coder:30b 實測工具呼叫、讀取隨機檔案與結果回傳；隔離驗收範圍見 loops/gateway-completion/05-client-onboarding.md |
 | reasoning | request serialization verified：實測送出 `reasoning.effort` 與 `reasoning.encrypted_content` include；reasoning response 往返 unknown |
 | seat_subscription_behavior | OpenAI 路徑以 ChatGPT 登入時使用 ChatGPT plan；自己的 OpenAI API key 使用 API pricing。自訂 gateway credential 由 gateway／上游帳戶計費；官方文件沒有說明此模式是否仍影響 Client 端的 ChatGPT plan meter |
 | configuration_example | 見下方 `config.toml` |
