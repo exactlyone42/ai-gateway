@@ -21,7 +21,11 @@ def main():
     parser.add_argument('--gateway-binary', required=True, type=Path)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
+    parser.add_argument('--check-tools', action='store_true')
+    parser.add_argument('--control-wrong-tool-result', action='store_true')
     args = parser.parse_args()
+    if args.control_wrong_tool_result and not args.check_tools:
+        parser.error('wrong tool result control requires --check-tools')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
@@ -43,6 +47,8 @@ def main():
     captures = runtime / 'captures'
     captures.mkdir()
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
+    if args.check_tools:
+        fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
     fixture.fixture_dir = root / 'tests/fixtures/client-roundtrip'
     fixture.capture_dir = captures
     fixture.request_paths = {'claude-code': [], 'codex-cli': []}
@@ -122,7 +128,7 @@ def main():
             if name != 'missing':
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
 
-        def client(name, model, success, label):
+        def client(name, model, success, label, tool_prompt=None):
             before = len(fixture.request_paths[client_key])
             capture_start = len(fixture.captured_requests)
             denial_status = None
@@ -132,13 +138,13 @@ def main():
                 api(response_path, 'POST', body, users[name][1], denial_status)
             home = runtime / label
             home.mkdir()
-            prompt = f'Reply with exactly {expected_reply} and nothing else.'
+            prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
             if codex:
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
                 command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', prompt]
                 client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
             else:
-                command = ['claude', '-p', '--model', model, '--max-turns', '1', prompt]
+                command = ['claude', '-p', '--model', model, '--max-turns', '3' if tool_prompt else '1', *(['--allowedTools=Read'] if tool_prompt else []), prompt]
                 client_environment = {
                     'PATH': os.environ['PATH'], 'CLAUDE_CONFIG_DIR': str(home), 'ANTHROPIC_BASE_URL': base,
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
@@ -160,8 +166,25 @@ def main():
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
-        client('alice', f'{model_prefix}-alice', True, 'alice-personal')
-        client('bob', f'{model_prefix}-bob', True, 'bob-personal')
+        if not args.check_tools:
+            client('alice', f'{model_prefix}-alice', True, 'alice-personal')
+            client('bob', f'{model_prefix}-bob', True, 'bob-personal')
+        if args.check_tools:
+            fixture.context_marker = 'context-' + uuid.uuid4().hex
+            fixture.expected_value = 'tool-value-' + uuid.uuid4().hex
+            fixture.nonce_path = str(runtime / 'tool-input.txt')
+            Path(fixture.nonce_path).write_text(fixture.expected_value)
+            if args.control_wrong_tool_result:
+                fixture.expected_value = 'wrong-tool-value-' + uuid.uuid4().hex
+            fixture.tool_mode = True
+            client('alice', f'{model_prefix}-alice', True, 'tool-roundtrip', f'Read {fixture.nonce_path} using your local tool. Preserve {fixture.context_marker}. Then reply with exactly {expected_reply} and nothing else.')
+            fixture.tool_mode = False
+            if fixture.tool_requests != 2 or not fixture.tool_result_received:
+                raise RuntimeError('原Client沒有完成工具要求、結果與上下文往返')
+            checks[-1].update({'tool_requests': fixture.tool_requests, 'real_tool_result': fixture.tool_result_received, 'original_context_preserved': fixture.context_preserved, 'tool_name': fixture.tool_name})
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            print(f'原Client工具往返通過；證據：{runtime}')
+            return
         client('alice', f'{model_prefix}-bob', False, 'model-denied')
         client('missing', f'{model_prefix}-missing', False, 'missing-credential')
         alice = users['alice'][0]
@@ -177,6 +200,9 @@ def main():
         (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
         print(f'原Client身分隔離通過：{len(checks)}項；證據：{runtime}')
     finally:
+        if args.check_tools:
+            (runtime / 'tool-result.json').write_text(json.dumps({'tool_requests': fixture.tool_requests, 'real_tool_result': fixture.tool_result_received, 'original_context_preserved': fixture.context_preserved, 'rejection': fixture.tool_rejection}, indent=2))
+            print(f'工具測試證據：{runtime}')
         gateway.terminate()
         try:
             gateway.wait(timeout=7)

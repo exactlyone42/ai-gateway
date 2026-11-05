@@ -28,3 +28,13 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 2026-11-05 原Client版本複核：Claude Code2.1.318、Codex0.166.0經Gateway d7c7cfd到本機假供應商，完整傳輸腳本通過，兩個精確回覆與版本化去內容紀錄相符。故意將未轉送Gateway金鑰的結果改成false，檢查實際失敗；環境注入Bedrock／Vertex路由後仍只走本機。審查抓出的Client環境繼承、無強制停止期限及不等待子程序均已修正並重跑通過。程序參數及連接埠讀回確認停止（/tmp/gateway-client-process-closeout.json），詳docs/client-roundtrip-evidence.md。這只覆蓋傳輸與請求格式，沒有開啟保存，也未驗最新版工具往返、取消、個人／群組隔離或真實供應商；既有工具探針可從本檔歷史位置查找後重用，不把舊版結果算作新版通過。
 
 2026-11-05 原Codex CLI0.166.0經Gateway706e719的個人／群組API憑證隔離7項通過：三項成功各送上游一次，模型403及三項503皆無上游請求，Client均退出1。直接證據`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`，程序與兩個連接埠已停，見`/tmp/gateway-codex-identity-closeout.json`。不涵蓋CodexFile持有人實送、第二真人、跨主機、工具往返與保存，不標P1完成。
+
+2026-11-05 P3開始無外部依賴驗證，P1真人／跨主機及P2正式資料缺項仍保留，不提前完成整體。原Claude2.1.318與Codex0.166.0，經a3aa441-tools測試binary到本機假供應商，各完成兩輪工具往返（Read／exec_command）。供應商首輪要求讀取隨機檔，該內容未放進prompt；第二輪必須包含同tool id、真實檔案內容及原使用者完整訊息，才回最終文字。證據`/home/cash/.cache/tmp/gateway-client-identity-aapzls0n/result.json`與`gateway-client-identity-l8v697kt/result.json`，均Client退出0且上游2次。
+
+新增`verify-client-identity.py --check-tools`只跑工具場景，不重跑既有7項隔離；`--control-wrong-tool-result`可作錯誤內容陰性。初版審查發現只在整份JSON尋找context標記可能假綠，已改原user完整role/content相同比對；故意恢復寬鬆判準後，刪原user而把標記放工具結果的兩協定測試均失敗（`/tmp/gateway-tool-context-negative.log`）。恢復嚴格版3項測試（各2協定）通過（`/tmp/gateway-tool-fixture-tests.log`），已納入all。官方協定參考：`https://platform.claude.com/docs/en/agents-and-tools/tool-use/implement-tool-use`、`https://developers.openai.com/api/docs/guides/function-calling`。
+
+全部未運算模型、未動正式，capture仍關閉；未覆蓋工具內容保存、取消、真人來源、遠端及自家Agent摘要，不能宣稱P3完成。臨時服務已停且測試資料庫由on-stop回收；程序／連接埠與DB的最後讀回仍待補。新版腳本全套尚未跑，尚未提交。
+
+2026-11-05 錯誤結果原Codex陰性補強：`gateway-client-identity-bho0j0s_/tool-result.json`明確記原user仍在、real_tool_result=false及missing_real_tool_result_or_call。Client共7次上游（重試），受到30秒命令期限約束，不能誤報陰性也只有2次。正向兩個runtime的tool-result.json均2次且兩項true。收尾讀回`/tmp/gateway-original-client-tools-closeout.json`確認三個本輪測試DB為0、對應Gateway程序為空；temp-service也空。新版全套正在`/tmp/gateway-original-client-tools-all.log`（session4521），未提交；審查未見新問題，證據仍只涵蓋單次工具往返及該原user訊息，不證明全部系統上下文。
+
+2026-11-05 工具往返新版全套`/tmp/gateway-original-client-tools-all.log`結束碼0（session4521），含3項雙協定fixture對照。原Client正向及錯結果陰性已完成；取消、工具內容保存、遠端及正式仍待驗，不勾整體完成。
