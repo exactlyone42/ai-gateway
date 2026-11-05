@@ -43,3 +43,5 @@ Claude對503會繼續重試；腳本30秒後停止該次Client並明列退出碼
 
 
 2026-11-05 追加 `--client codex`，以原Codex CLI 0.166.0、自訂供應商及Responses路徑執行相同七項；預設仍為Claude。Gateway版本706e719，七項全部通過，三個成功案例各送出一次上游請求，四個拒絕案例上游均為零且Client退出碼1。結果位於`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`；兩個連接埠與Gateway程序已停止，收尾證據`/tmp/gateway-codex-identity-closeout.json`。本輪僅驗個人及群組API金鑰，不涵蓋ChatGPT的CodexFile帳號持有人綁定、工具往返、內容保存或正式部署。
+
+CodexFile持有人另有`routes::tests::codex_owner::codex_file_owner_is_enforced_by_the_responses_route`：模型、身分、政策及請求經真正HTTP路由，供應商為本機假服務。本人成功、同租戶其他人與刪除供應商憑證檔後均拒絕，後兩者不增加上游請求。故意移除owner比對會使測試失敗。這個測試不啟動原Codex程式、不連ChatGPT，也不代表Gateway金鑰撤銷。

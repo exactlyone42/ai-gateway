@@ -155,3 +155,5 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 審查抓出的只看最後一筆、混帶憑證、過鬆資料庫名稱及漏查已撤銷憑證均已修正；4項檢查器測試納入clients gate且通過，含混帶、重複標頭、body洩漏及先錯後對。最新版完整7項重新通過，服務與連接埠停止證據`/tmp/gateway-client-identity-closeout.json`。只用隔離DB及假供應商，未做模型運算或改正式環境；Codex身分隔離、第二真人及跨主機仍未驗。
 
 2026-11-05 原Codex CLI0.166.0經Gateway706e719的個人／群組API憑證隔離7項通過：三項成功各送上游一次，模型403及三項503皆無上游請求，Client均退出1。直接證據`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`，程序與兩個連接埠已停，見`/tmp/gateway-codex-identity-closeout.json`。不涵蓋CodexFile持有人實送、第二真人、跨主機、工具往返與保存，不標P1完成。
+
+2026-11-05 新增CodexFile持有人真正Responses路由驗證：由測試程式將供應商入口改到本機假上游，模型與Gateway金鑰均走隔離PostgreSQL；本人成功且上游權杖／帳號正確，另一位同租戶使用者及刪除供應商auth.json後皆503，上游總數保持1。正向`/tmp/gateway-codex-owner-http-positive.log`；故意移除持有人比對後另一人得到200，測試失敗，證據`/tmp/gateway-codex-owner-http-negative.log`，原比對已恢復。新測試未涵蓋原Codex程式、真實ChatGPT、Gateway金鑰撤銷或部署，P1仍未完成。官方依據OWASP Authorization Cheat Sheet的預設拒絕與逐請求檢查（2026-11-05下載`/tmp/gateway-codex-owner-authorization-reference.html`）；不改正式供應商入口，只在測試替換來源。
