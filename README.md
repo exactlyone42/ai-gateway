@@ -108,6 +108,7 @@ for which problem, so you do not have to load everything.
 - `docs/engineering-standards.md` — quality gates and rules, machine-checkable
 - `docs/task-ledger.md` — time and token cost per segment, plus trade-offs
 - `docs/architecture.md` — three planes, request path, failure model
+- [連線與業務拆分草案](docs/gateway-connection-logic-split-plan.md) — 評估分開部署、容器擴充與多副本驗收時閱讀；尚未實作
 - `docs/security-and-compliance.md` — credential and subscription boundary
 - `docs/admin.md` — Admin authentication, RBAC and control-plane API contract
 - `docs/admin-web.md` — Admin report definitions, operator questions and browser security

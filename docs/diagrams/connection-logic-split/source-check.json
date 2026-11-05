@@ -1,0 +1,26 @@
+[
+  {
+    "name": "axum-body",
+    "url": "https://docs.rs/axum/0.8.6/axum/body/struct.Body.html",
+    "status": 200,
+    "bytes": 149528
+  },
+  {
+    "name": "reqwest-stream",
+    "url": "https://docs.rs/reqwest/0.12.24/reqwest/struct.Response.html",
+    "status": 200,
+    "bytes": 101433
+  },
+  {
+    "name": "ecs-autoscaling",
+    "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html",
+    "status": 200,
+    "bytes": 24751
+  },
+  {
+    "name": "postgres-locks",
+    "url": "https://www.postgresql.org/docs/17/explicit-locking.html",
+    "status": 200,
+    "bytes": 46799
+  }
+]
