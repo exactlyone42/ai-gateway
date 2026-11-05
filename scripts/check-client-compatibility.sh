@@ -70,6 +70,7 @@ for artifact in "${artifacts[@]}"; do
 done
 
 if ! python3 scripts/check-client-captures.py; then failed=1; fi
+if ! python3 -m unittest scripts/test_client_roundtrip_mock.py; then failed=1; fi
 
 if [ ! -x scripts/verify-client-roundtrip.sh ] || \
    [ ! -x scripts/client-roundtrip-mock.py ] || \

@@ -149,3 +149,7 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 進行中操作的畫面切換已補PUT／DELETE×群組／供應商／種類×舊請求成功／失敗共12組；前端完整檢查22項通過（/tmp/gateway-group-ui-matrix-frontend.log）。原Client實送、第二真人及跨主機仍未驗；不能據此標P1整體完成。
 
 續補API種類後，在另一個空白隔離DB重跑真正瀏覽器1項通過（/tmp/gateway-group-browser-real-v3.log）：訂閱與API分別設定／撤銷，兩種其他角色的讀／寫／撤銷合計12次403；每個角色遭拒後管理者讀回仍為啟用且一致，API設定時訂閱保持已撤銷。DB讀回兩筆各32-byte摘要且均停用，更新及撤銷的attempt／success各2筆（/tmp/gateway-group-browser-db-v3-readback.log）。這證明當輪管理流程，不替代供應商實送；隔離服務已停止。
+
+2026-11-05 原Claude Code2.1.318身分隔離7項通過，Gateway版本829be2f：Alice／Bob各用自己的假API金鑰、模型白名單403、未設定503、個人撤銷503、同帳號群組後備及移除成員503。四種拒絕均沒有新增上游請求；正向逐筆核模型、唯一認證標頭與不夾帶他人或Gateway憑證。結果`/home/cash/.cache/tmp/gateway-client-identity-s661_nca/result.json`，重現腳本`scripts/verify-client-identity.py`。503時Claude會重試，三項由30秒期限停止（exit124），不能宣稱Client正常退出；直接API狀態與沒有上游是獨立證據。
+
+審查抓出的只看最後一筆、混帶憑證、過鬆資料庫名稱及漏查已撤銷憑證均已修正；4項檢查器測試納入clients gate且通過，含混帶、重複標頭、body洩漏及先錯後對。最新版完整7項重新通過，服務與連接埠停止證據`/tmp/gateway-client-identity-closeout.json`。只用隔離DB及假供應商，未做模型運算或改正式環境；Codex身分隔離、第二真人及跨主機仍未驗。
