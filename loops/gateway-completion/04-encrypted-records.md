@@ -752,3 +752,9 @@ P2：沿用現有加密保存及備份，逐項核對事件、用量、同內容
 審查補強：還原原由superuser讀回，現改NOLOGIN備份角色的實際SET ROLE讀回。已在本次真實還原容器用相同SQL驗得`fixture_backup|19`（`/tmp/gateway-readonly-backup-restored-acl.log`），確認資料及ACL皆保留；新版腳本已接入該SQL，但此額外自動呼叫未重跑整套prod演練，前述真實SQL單獨驗證通過。唯讀驗收強制remote-replay，避免witness或independent-position提前exit0而漏驗還原。新測試在舊版兩個組合均失敗（flags-negative.log），修正後通過（flags-positive.log），並納入check.sh all。新版全套在`/tmp/gateway-readonly-backup-all.log`（session27496）執行；正式角色與排程未配置、不標P2完成。官方依據PostgreSQL17 pg_dump及ALTER DEFAULT PRIVILEGES：`https://www.postgresql.org/docs/17/app-pgdump.html`、`https://www.postgresql.org/docs/17/sql-alterdefaultprivileges.html`。
 
 2026-11-05 唯讀備份新版全套`/tmp/gateway-readonly-backup-all.log`結束碼0，含早退旗標回歸測試；可提交此切片，整體P2仍保留正式資料與備份及原Client缺項。
+
+2026-11-05 本人Codex真來源加密對帳驗收仍未通過：首次完成事件未帶全文，改分別核response.output_text.done文字與response.completed用量後，第三次真來源短答與文字核對過，但帳本比較失敗，原件`/home/cash/.agents/temp-services/logs/gateway-owned-capture-done-20261105.log`。親讀src/adapters/provider.rs的normalize_openai_usage及src/services/openai.rs確認正式用量拆分一般輸入／快取／快取寫入及一般輸出／推理；不能直接拿一般輸入對供應商總輸入。新增獨立驗收：各細分類相等、一般輸入+快取+快取寫入=供應商總輸入、一般輸出+推理=供應商總輸出，並有快取重複計入及兩帳本欄位同錯陰性。相關驗證器24項過；未改正式記帳程式。官方文字完成事件來源https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/responses/response_text_done_event.py原件/tmp/gateway-owned-text-done-reference.py。修正後仍待真來源驗收與全套，不宣稱保存對帳完成；未動正式環境。
+
+2026-11-05 本人Codex0.166.0對gpt-6-luna真來源短答、加密讀回與用量對帳通過：`/tmp/gateway-client-identity-3yikkzz2/result.json`、capture-result.json、usage-result.json、plaintext-result.json。完整保存1筆、四方向讀回、provider/client串流相等；供應商完成事件用量與一般輸入13162+快取3712=總輸入16874、一般輸出9+推理0=總輸出9相符。預估59831另列且帳本一致，不證明估算準確。掃全部1份spool、隔離DB data-only dump與Gateway.log，指定W06_CODEX_OK的raw／hex未出現，不涵蓋任意內容或所有編碼。非持有人503、撤銷金鑰401，原Client均退出1、無額外上游；來源登入檔位元組未變。正式環境未動，臨時服務與DB回收。修正驗收器24項測試過，仍待新版全套與提交；真來源工具往返仍未驗。
+
+2026-11-05 本人Codex真來源工具與加密對帳新版全套 `/tmp/gateway-owned-tools-all.log` 結束碼0，主Rust473過7ignored，Client33項過，備份相關159項含20skipped。這只補整合版自動檢查，不替代正式備份位置、獨立見證、真人或跨主機驗收；正式環境未動。

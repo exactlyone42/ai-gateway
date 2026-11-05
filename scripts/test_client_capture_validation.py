@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools
 
 
 class CaptureValidationTest(unittest.TestCase):
@@ -125,3 +125,92 @@ class ErrorValidationTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OwnedUsageValidationTest(unittest.TestCase):
+    def sample(self):
+        event = {'type': 'response.completed', 'response': {'output': [{'text': 'OWNED_OK'}], 'usage': {'input_tokens': 7, 'output_tokens': 2}}}
+        saved = [{'provider_response': 'data: ' + json.dumps({'type': 'response.output_text.done', 'text': 'OWNED_OK'}) + '\n\ndata: ' + json.dumps(event) + '\n\n'}]
+        rows = [{'id': 'capture-1', 'status': 'completed', 'actual_usage': {'input_tokens': 7, 'output_tokens': 2}, 'estimated_usage': {'input_tokens': 5, 'output_tokens': 3}, 'usage': [{'source': 'provider_reported', 'input_tokens': 7, 'output_tokens': 2}, {'source': 'estimated', 'input_tokens': 5, 'output_tokens': 3}]}]
+        for value in (rows[0]['actual_usage'], rows[0]['usage'][0]):
+            value.update({'cached_input_tokens': 0, 'cache_write_input_tokens': 0, 'reasoning_tokens': 0})
+        return saved, rows, [{'capture_id': 'capture-1'}]
+
+    def test_provider_completion_matches_ledger(self):
+        validate_owned_usage(*self.sample(), 'OWNED_OK')
+
+    def test_matching_ledger_fields_cannot_replace_provider_usage(self):
+        saved, rows, records = self.sample()
+        rows[0]['actual_usage']['output_tokens'] = 8
+        rows[0]['usage'][0]['output_tokens'] = 8
+        with self.assertRaisesRegex(RuntimeError, '供應商回應'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+    def test_truncated_provider_stream_is_rejected(self):
+        saved, rows, records = self.sample()
+        saved[0]['provider_response'] = 'data: {"type":"response.created"}\n\n'
+        with self.assertRaisesRegex(RuntimeError, '完整完成'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+
+    def test_sse_optional_space_is_supported(self):
+        saved, rows, records = self.sample()
+        saved[0]['provider_response'] = saved[0]['provider_response'].replace('data: ', 'data:')
+        validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+
+    def test_completed_event_need_not_repeat_final_text(self):
+        saved, rows, records = self.sample()
+        events = [json.loads(line[6:]) for line in saved[0]['provider_response'].splitlines() if line.startswith('data: ')]
+        events[-1]['response']['output'] = []
+        saved[0]['provider_response'] = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
+        validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+    def test_wrong_final_text_is_rejected(self):
+        saved, rows, records = self.sample()
+        saved[0]['provider_response'] = saved[0]['provider_response'].replace('OWNED_OK', 'WRONG')
+        with self.assertRaisesRegex(RuntimeError, '完整完成'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+
+    def test_cache_and_reasoning_are_counted_once(self):
+        saved, rows, records = self.sample()
+        events = [json.loads(line[6:]) for line in saved[0]['provider_response'].splitlines() if line.startswith('data: ')]
+        events[-1]['response']['usage'].update({'input_tokens_details': {'cached_tokens': 2}, 'output_tokens_details': {'reasoning_tokens': 1}})
+        saved[0]['provider_response'] = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
+        for value in (rows[0]['actual_usage'], rows[0]['usage'][0]):
+            value.update({'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 2, 'reasoning_tokens': 1})
+        validate_owned_usage(saved, rows, records, 'OWNED_OK')
+        for value in (rows[0]['actual_usage'], rows[0]['usage'][0]):
+            value['input_tokens'] = 7
+        with self.assertRaisesRegex(RuntimeError, '供應商回應'):
+            validate_owned_usage(saved, rows, records, 'OWNED_OK')
+
+
+class OwnedToolsValidationTest(unittest.TestCase):
+    def sample(self):
+        original = {'role': 'user', 'content': 'Read the isolated file.'}
+        event = {'type': 'response.output_item.done', 'item': {'type': 'function_call', 'call_id': 'owned-call', 'name': 'exec_command'}}
+        first = {'provider_response': 'data: ' + json.dumps(event) + '\n\n'}
+        second = {}
+        for leg in ('client_request', 'provider_request'):
+            first[leg] = json.dumps({'input': [original]})
+            second[leg] = json.dumps({'input': [original, {'type': 'function_call_output', 'call_id': 'owned-call', 'output': 'random-file-value'}]})
+        return [first, second]
+
+    def test_real_result_and_original_message_are_preserved(self):
+        validate_owned_tools(self.sample(), 'random-file-value')
+
+    def test_wrong_tool_call_id_is_rejected(self):
+        saved = self.sample()
+        saved[1]['provider_request'] = saved[1]['provider_request'].replace('owned-call', 'different-call')
+        with self.assertRaisesRegex(RuntimeError, '未對應'):
+            validate_owned_tools(saved, 'random-file-value')
+
+    def test_tool_value_cannot_replace_original_message(self):
+        saved = self.sample()
+        body = json.loads(saved[1]['client_request'])
+        body['input'] = [body['input'][1]]
+        saved[1]['client_request'] = json.dumps(body)
+        with self.assertRaisesRegex(RuntimeError, '遺失原訊息'):
+            validate_owned_tools(saved, 'random-file-value')

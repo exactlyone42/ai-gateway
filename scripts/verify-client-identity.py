@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     parser.add_argument('--check-codex-held', action='store_true')
+    parser.add_argument('--check-owned-tools', action='store_true')
     parser.add_argument('--codex-auth-file', type=Path)
     parser.add_argument('--source-model')
     parser.add_argument('--check-compact', action='store_true')
@@ -39,6 +40,8 @@ def main():
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
+    if args.check_owned_tools and not (args.check_codex_held and args.check_capture):
+        parser.error('owned tools require owned source and capture')
     if args.claude_auto_compact and (not args.check_compact or args.client != 'claude'):
         parser.error('Claude automatic compaction requires Claude compact mode')
     if args.client == 'claude' and args.compact_failure and not args.claude_auto_compact:
@@ -59,10 +62,10 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error):
+    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or args.check_codex_held):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
-        if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error, args.check_capture)):
+        if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
             parser.error('owned Codex source requires codex, auth file and source model, separately from fixture modes')
         source_bytes = args.codex_auth_file.read_bytes()
         source_auth = json.loads(source_bytes)
@@ -342,27 +345,8 @@ def main():
             print(f'原{args.client} {outcome}驗收通過；證據：{runtime}')
             return
 
-        if args.check_codex_held:
-            client('alice', f'{model_prefix}-alice', True, 'held-owner')
-            client('bob', f'{model_prefix}-bob', False, 'held-other-user')
-            credential_id, credential_version = credential_versions['alice']
-            api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
-            client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
-            query = root / 'queries/test_codex_held_result.sql'
-            result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
-            ledger = json.loads(result.stdout)
-            if ledger['attempts'] != 1 or ledger['completed_owner'] != 1 or ledger['other_attempts'] != 0 or ledger['reported_records'] != 1 or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] or ledger['providers'] != ['codex-subscription']:
-                raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
-            for index, check in enumerate(checks):
-                check['upstream_requests'] = 1 if index == 0 else 0
-            if args.codex_auth_file.read_bytes() != source_bytes:
-                raise RuntimeError('來源登入檔在驗收期間改變，未宣稱未變更')
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_auth_unchanged': True, 'source_sha256': hashlib.sha256(source_bytes).hexdigest(), 'checks': checks, 'ledger': ledger}, indent=2))
-            print(f'原Codex本人訂閱來源與拒絕驗收通過；證據：{runtime}')
-            return
-
         def verify_capture():
-            markers = [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            markers = [expected_reply] if args.check_codex_held else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -370,7 +354,7 @@ def main():
             for path in spool_files:
                 reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
-            count = fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
+            count = fixture.error_requests if args.check_error else (2 if args.check_tools or args.check_owned_tools else 1)
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
@@ -400,6 +384,12 @@ def main():
                     for leg in ('client_request', 'provider_request'):
                         if expected_reply not in content[leg]:
                             raise RuntimeError('錯誤保存未保留原請求')
+            elif args.check_codex_held:
+                if args.check_owned_tools:
+                    runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_tools'](saved, expected_reply)
+                for leg in ('client_request', 'provider_request'):
+                    if not args.check_owned_tools and expected_reply not in saved[0][leg]:
+                        raise RuntimeError('本人來源保存缺少原請求')
             else:
                 if 'CANCEL_STREAM_PENDING' not in saved[0]['provider_response'] or 'response.completed' in saved[0]['provider_response'] or 'message_stop' in saved[0]['provider_response']:
                     raise RuntimeError('中斷保存內容不符')
@@ -408,7 +398,12 @@ def main():
             usage_records = json.loads(usage_result.stdout)
             if args.check_error and {row['request_id'] for row in usage_records} != set(checks[-1]['ingress_request_ids']):
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
-            runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
+            validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
+            if args.check_codex_held:
+                (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
+                validation['validate_owned_usage'](saved, usage_records, records, expected_reply)
+            else:
+                validation['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
             dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
             reject_plaintext(dump.stdout, markers)
             reject_plaintext((runtime / 'gateway.log').read_bytes(), markers)
@@ -416,6 +411,34 @@ def main():
             (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
             (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
             checks[-1]['capture_records'] = records
+
+        if args.check_codex_held:
+            owned_prompt = None
+            if args.check_owned_tools:
+                expected_reply = 'owned-tool-' + uuid.uuid4().hex
+                owned_file = runtime / 'owned-tool-input.txt'
+                owned_file.write_text(expected_reply)
+                owned_prompt = f'Use exactly one local shell command to read {owned_file}. Then reply with exactly the file contents and nothing else.'
+            client('alice', f'{model_prefix}-alice', True, 'held-owner', owned_prompt)
+            if args.check_capture:
+                verify_capture()
+            client('bob', f'{model_prefix}-bob', False, 'held-other-user')
+            credential_id, credential_version = credential_versions['alice']
+            api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
+            client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
+            query = root / 'queries/test_codex_held_result.sql'
+            result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
+            ledger = json.loads(result.stdout)
+            expected_attempts = 2 if args.check_owned_tools else 1
+            if ledger['attempts'] != expected_attempts or ledger['completed_owner'] != expected_attempts or ledger['other_attempts'] != 0 or ledger['reported_records'] != expected_attempts or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] * expected_attempts or ledger['providers'] != ['codex-subscription'] * expected_attempts:
+                raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
+            for index, check in enumerate(checks):
+                check['upstream_requests'] = expected_attempts if index == 0 else 0
+            if args.codex_auth_file.read_bytes() != source_bytes:
+                raise RuntimeError('來源登入檔在驗收期間改變，未宣稱未變更')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_auth_unchanged': True, 'source_sha256': hashlib.sha256(source_bytes).hexdigest(), 'checks': checks, 'ledger': ledger}, indent=2))
+            print(f'原Codex本人訂閱來源與拒絕驗收通過；證據：{runtime}')
+            return
 
         if args.check_error:
             client('alice', f'{model_prefix}-alice', True, 'upstream-error', error=True)
