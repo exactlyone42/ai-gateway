@@ -26,3 +26,5 @@
 P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、最終答覆往返，分別記串流、取消、錯誤及帳務；模擬來源與真實供應商分開。詳見母檔與 07，本輪已啟動 goal；上述為驗收要求，尚未宣稱通過。
 
 2026-11-05 原Client版本複核：Claude Code2.1.318、Codex0.166.0經Gateway d7c7cfd到本機假供應商，完整傳輸腳本通過，兩個精確回覆與版本化去內容紀錄相符。故意將未轉送Gateway金鑰的結果改成false，檢查實際失敗；環境注入Bedrock／Vertex路由後仍只走本機。審查抓出的Client環境繼承、無強制停止期限及不等待子程序均已修正並重跑通過。程序參數及連接埠讀回確認停止（/tmp/gateway-client-process-closeout.json），詳docs/client-roundtrip-evidence.md。這只覆蓋傳輸與請求格式，沒有開啟保存，也未驗最新版工具往返、取消、個人／群組隔離或真實供應商；既有工具探針可從本檔歷史位置查找後重用，不把舊版結果算作新版通過。
+
+2026-11-05 原Codex CLI0.166.0經Gateway706e719的個人／群組API憑證隔離7項通過：三項成功各送上游一次，模型403及三項503皆無上游請求，Client均退出1。直接證據`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`，程序與兩個連接埠已停，見`/tmp/gateway-codex-identity-closeout.json`。不涵蓋CodexFile持有人實送、第二真人、跨主機、工具往返與保存，不標P1完成。

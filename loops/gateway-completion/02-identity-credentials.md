@@ -153,3 +153,5 @@ P1：接入群組管理與 Codex 既有支援，再完成 S04；核對個人優�
 2026-11-05 原Claude Code2.1.318身分隔離7項通過，Gateway版本829be2f：Alice／Bob各用自己的假API金鑰、模型白名單403、未設定503、個人撤銷503、同帳號群組後備及移除成員503。四種拒絕均沒有新增上游請求；正向逐筆核模型、唯一認證標頭與不夾帶他人或Gateway憑證。結果`/home/cash/.cache/tmp/gateway-client-identity-s661_nca/result.json`，重現腳本`scripts/verify-client-identity.py`。503時Claude會重試，三項由30秒期限停止（exit124），不能宣稱Client正常退出；直接API狀態與沒有上游是獨立證據。
 
 審查抓出的只看最後一筆、混帶憑證、過鬆資料庫名稱及漏查已撤銷憑證均已修正；4項檢查器測試納入clients gate且通過，含混帶、重複標頭、body洩漏及先錯後對。最新版完整7項重新通過，服務與連接埠停止證據`/tmp/gateway-client-identity-closeout.json`。只用隔離DB及假供應商，未做模型運算或改正式環境；Codex身分隔離、第二真人及跨主機仍未驗。
+
+2026-11-05 原Codex CLI0.166.0經Gateway706e719的個人／群組API憑證隔離7項通過：三項成功各送上游一次，模型403及三項503皆無上游請求，Client均退出1。直接證據`/home/cash/.cache/tmp/gateway-client-identity-88cr0em7/result.json`，程序與兩個連接埠已停，見`/tmp/gateway-codex-identity-closeout.json`。不涵蓋CodexFile持有人實送、第二真人、跨主機、工具往返與保存，不標P1完成。

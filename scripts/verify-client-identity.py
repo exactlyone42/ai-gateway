@@ -20,14 +20,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gateway-binary', required=True, type=Path)
     parser.add_argument('--revision', required=True)
+    parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     args = parser.parse_args()
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
         raise RuntimeError('需要本機隔離測試資料庫')
-    version = subprocess.check_output(['claude', '--version'], text=True).strip()
-    if not version.startswith('2.1.318 '):
-        raise RuntimeError('需要Claude Code 2.1.318')
+    version = subprocess.check_output([args.client, '--version'], text=True).strip()
+    required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.318 '
+    if not version.startswith(required):
+        raise RuntimeError('Client版本不符')
+    codex = args.client == 'codex'
+    provider_key = 'openai' if codex else 'anthropic'
+    operation = 'openai_responses' if codex else 'anthropic_messages'
+    model_prefix = 'company' if codex else 'claude'
+    client_key = 'codex-cli' if codex else 'claude-code'
+    response_path = '/v1/responses' if codex else '/v1/messages'
+    expected_reply = 'W06_CODEX_OK' if codex else 'W05_CLAUDE_CODE_OK'
     root = Path(__file__).resolve().parent.parent
     runtime = Path(tempfile.mkdtemp(prefix='gateway-client-identity-'))
     os.chmod(runtime, 0o700)
@@ -39,7 +48,7 @@ def main():
     fixture.request_paths = {'claude-code': [], 'codex-cli': []}
     fixture.client_credentials = set()
     fixture.captured_requests = []
-    fixture.provider_keys_by_model = {'claude-alice': 'fixture-alice-api', 'claude-bob': 'fixture-bob-api'}
+    fixture.provider_keys_by_model = {f'{model_prefix}-alice': 'fixture-alice-api', f'{model_prefix}-bob': 'fixture-bob-api'}
     fixture.provider_credentials = set(fixture.provider_keys_by_model.values()) | {'fixture-alice-group'}
     server = ThreadingHTTPServer(('127.0.0.1', 0), fixture)
     server.daemon_threads = True
@@ -58,7 +67,8 @@ def main():
         'CREDENTIAL_ENVIRONMENT': 'dev', 'CREDENTIAL_HASH_KEY': 'isolated-client-identity-hash-key-32-bytes',
         'ADMIN_BOOTSTRAP_TOKEN': bootstrap, 'ADMIN_BOOTSTRAP_TENANT_ID': '00000000-0000-0000-0000-000000000001',
         'CONTENT_CAPTURE_ENABLED': 'false', 'LISTEN_ADDRESS': f'127.0.0.1:{gateway_port}',
-        'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{server.server_port}', 'OPENAI_BASE_URL': 'http://127.0.0.1:1',
+        'ANTHROPIC_BASE_URL': 'http://127.0.0.1:1' if codex else f'http://127.0.0.1:{server.server_port}',
+        'OPENAI_BASE_URL': f'http://127.0.0.1:{server.server_port}' if codex else 'http://127.0.0.1:1',
         'ANTHROPIC_PERSONAL_TOKEN_DIR': str(runtime / 'personal'), 'LEDGER_SPOOL_DIR': str(runtime / 'ledger'),
     }
     checks = []
@@ -96,12 +106,12 @@ def main():
         def activate(kind, resource):
             api(f'/admin/v1/{kind}/{resource["id"]}/lifecycle', 'POST', {'version': resource['version'], 'state': 'active'}, admin)
 
-        provider = create('providers', {'provider_key': 'anthropic', 'display_name': '假供應商', 'provider_type': 'anthropic', 'base_url': environment['ANTHROPIC_BASE_URL'], 'credential_ref': 'env://ANTHROPIC_API_KEY', 'supported_operations': ['anthropic_messages']})['resource']
+        provider = create('providers', {'provider_key': provider_key, 'display_name': '假供應商', 'provider_type': provider_key, 'base_url': environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY', 'supported_operations': [operation]})['resource']
         activate('providers', provider)
         users = {}
         for name in ('alice', 'bob', 'missing'):
-            model = 'claude-' + name
-            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': model, 'supported_operations': ['anthropic_messages'], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': True})['resource']
+            model = model_prefix + '-' + name
+            resource = create('models', {'provider_id': provider['id'], 'public_model_id': model, 'provider_model_id': model, 'supported_operations': [operation], 'supports_streaming': True, 'supports_tools': True, 'supports_reasoning': True})['resource']
             activate('models', resource)
             user = create('users', {'display_name': name})['resource']
             credential = create('credentials', {'display_name': name, 'user_id': user['id']})['secret']
@@ -110,51 +120,60 @@ def main():
             policy = create('policies', {'policy_key': name, 'revision': 1, 'user_id': user['id'], 'configuration': {'constraints': {'allowed_models': [model]}}})['resource']
             activate('policies', policy)
             if name != 'missing':
-                api(f'/admin/v1/provider-api-keys/anthropic/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+                api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
 
         def client(name, model, success, label):
-            before = len(fixture.request_paths['claude-code'])
+            before = len(fixture.request_paths[client_key])
             capture_start = len(fixture.captured_requests)
             denial_status = None
             if not success:
                 denial_status = 403 if label == 'model-denied' else 503
-                api('/v1/messages', 'POST', {'model': model, 'max_tokens': 1, 'messages': [{'role': 'user', 'content': 'fixture'}]}, users[name][1], denial_status)
+                body = {'model': model, 'input': 'fixture', 'max_output_tokens': 1} if codex else {'model': model, 'max_tokens': 1, 'messages': [{'role': 'user', 'content': 'fixture'}]}
+                api(response_path, 'POST', body, users[name][1], denial_status)
             home = runtime / label
             home.mkdir()
-            result = subprocess.run(['timeout', '--kill-after=5s', '30s', 'claude', '-p', '--model', model, '--max-turns', '1', 'Reply with exactly W05_CLAUDE_CODE_OK and nothing else.'], env={
-                'PATH': os.environ['PATH'], 'CLAUDE_CONFIG_DIR': str(home), 'ANTHROPIC_BASE_URL': base,
-                'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
-                'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
-            }, cwd=runtime, capture_output=True, text=True, timeout=40)
-            after = len(fixture.request_paths['claude-code'])
+            prompt = f'Reply with exactly {expected_reply} and nothing else.'
+            if codex:
+                (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "low"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
+                command = ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', prompt]
+                client_environment = {'PATH': os.environ['PATH'], 'CODEX_HOME': str(home), 'GATEWAY_TEST_KEY': users[name][1]}
+            else:
+                command = ['claude', '-p', '--model', model, '--max-turns', '1', prompt]
+                client_environment = {
+                    'PATH': os.environ['PATH'], 'CLAUDE_CONFIG_DIR': str(home), 'ANTHROPIC_BASE_URL': base,
+                    'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
+                    'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
+                }
+            result = subprocess.run(['timeout', '--kill-after=5s', '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=40)
+            after = len(fixture.request_paths[client_key])
             diagnostic = result.stdout + '\n' + result.stderr
             for secret in fixture.client_credentials | fixture.provider_credentials:
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
             if success:
-                if result.returncode != 0 or result.stdout.strip() != 'W05_CLAUDE_CODE_OK' or after <= before:
+                if result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before:
                     raise RuntimeError(f'{label}: 原Client未完成假串流')
                 observed = fixture.captured_requests[capture_start:]
                 if not observed or any(capture['model'] != model or not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
                     raise RuntimeError(f'{label}: 憑證隔離失敗')
-            elif after != before or result.stdout.strip() == 'W05_CLAUDE_CODE_OK':
+            elif after != before or result.stdout.strip() == expected_reply:
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
-        client('alice', 'claude-alice', True, 'alice-personal')
-        client('bob', 'claude-bob', True, 'bob-personal')
-        client('alice', 'claude-bob', False, 'model-denied')
-        client('missing', 'claude-missing', False, 'missing-credential')
+        client('alice', f'{model_prefix}-alice', True, 'alice-personal')
+        client('bob', f'{model_prefix}-bob', True, 'bob-personal')
+        client('alice', f'{model_prefix}-bob', False, 'model-denied')
+        client('missing', f'{model_prefix}-missing', False, 'missing-credential')
         alice = users['alice'][0]
-        api(f'/admin/v1/provider-api-keys/anthropic/{alice}', 'DELETE', token=admin, expected=204)
-        client('alice', 'claude-alice', False, 'personal-revoked')
+        api(f'/admin/v1/provider-api-keys/{provider_key}/{alice}', 'DELETE', token=admin, expected=204)
+        client('alice', f'{model_prefix}-alice', False, 'personal-revoked')
         group = create('groups', {'display_name': '本人群組'})
         api(f'/admin/v1/groups/{group["id"]}/members/{alice}', 'POST', token=admin, expected=204)
-        api(f'/admin/v1/groups/{group["id"]}/provider-credentials/anthropic/api', 'PUT', {'token': 'fixture-alice-group'}, admin, 204)
-        fixture.provider_keys_by_model['claude-alice'] = 'fixture-alice-group'
-        client('alice', 'claude-alice', True, 'group-fallback')
+        api(f'/admin/v1/groups/{group["id"]}/provider-credentials/{provider_key}/api', 'PUT', {'token': 'fixture-alice-group'}, admin, 204)
+        fixture.provider_keys_by_model[f'{model_prefix}-alice'] = 'fixture-alice-group'
+        client('alice', f'{model_prefix}-alice', True, 'group-fallback')
         api(f'/admin/v1/groups/{group["id"]}/members/{alice}', 'DELETE', token=admin, expected=204)
-        client('alice', 'claude-alice', False, 'membership-revoked')
+        client('alice', f'{model_prefix}-alice', False, 'membership-revoked')
         (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
         print(f'原Client身分隔離通過：{len(checks)}項；證據：{runtime}')
     finally:
