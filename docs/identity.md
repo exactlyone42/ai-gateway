@@ -102,6 +102,10 @@ cache／撤銷競態、production bootstrap 拒絕，以及五表明文掃描的
 
 管理者可對 `/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}` 使用 GET、PUT、DELETE；`kind` 為 `subscription` 或 `api`，PUT 內容為 `{"token":"本人憑證"}`。provider 必須是同租戶已啟用的供應商，訂閱限 Anthropic；Codex 仍沿用明確指定的一位持有人，不走群組後備。GET 只回設定、啟用與檔案是否符合綁定的狀態，不回憑證。Operator、Viewer 均不可操作這個介面。
 
+後台「Identities」選擇群組後，管理者可在「群組供應商憑證」選供應商與憑證種類，查狀態、更新或撤銷。供應商可翻頁；切換群組、供應商或種類會清空輸入。秘密只留在當次輸入與送出請求，不進查詢快取；送出後立即清空。操作結果未確認時只讀回狀態，不自動重送；狀態讀取失敗時禁止更新及撤銷，先重新核對。
+
+畫面狀態隔離採 React 19 的切換 key 重建表單，查詢依 TanStack Query 5 明確停用失敗重試，更新使用直接請求而不把秘密存進 mutation cache。來源：[React 狀態重設](https://react.dev/learn/preserving-and-resetting-state#option-2-resetting-state-with-a-key)、[查詢重試設定](https://tanstack.com/query/v5/docs/framework/react/guides/query-retries)，2026-11-05 核對；不新增依賴。
+
 每次變更先記操作嘗試，再鎖定群組、原子更新檔案，最後把綁定與成功稽核一起提交。檔案與資料庫無法一起回滾；失敗時回結果未確認，之後應先 GET 查狀態，再明確更新或撤銷。讀取若發現檔案與綁定不符會拒絕，不自行猜測要用哪一版。資料庫取鎖最多等2秒，單次查詢最多5秒。
 
 群組請求保留會員列、內容綁定及檔案共享鎖到上游回應標頭；移除會員另外取得同一使用者的本機排他鎖，避免資料庫連線失效後提前完成撤權。API 與訂閱共用這把會員鎖，憑證檔仍分開。未配置個人憑證目錄的入口，若群組已有啟用的憑證綁定，會拒絕移除會員；查驗前先鎖群組，再以新的查詢讀取綁定。這依賴 Gateway 程序使用相同的個人憑證目錄；跨主機鎖、直接修改資料庫、多人真實訂閱與正式上線尚未驗收。以群組掛憑證不會自動判定這些使用者是否同一個人，原有管理者責任不變。

@@ -3,6 +3,7 @@ import { CirclePower, Pencil, Plus, PowerOff, RefreshCw, ShieldOff, Trash2, X } 
 import { useMemo, useState, type FormEvent } from 'react'
 import { adminRequest } from './api'
 import { useAuth } from './auth'
+import { GroupCredentials } from './group-credentials'
 import { DataTable, ErrorState, Loading, Page, RangePicker, SecretDialog, Status, Unavailable } from './components'
 import { compactNumber, formatCost, formatDate, reportWindow, type RangeKey } from './time'
 import type { CursorPage, JsonObject, ResourcePage } from './types'
@@ -116,6 +117,7 @@ function Groups({ canWrite, canManageMembers }: { canWrite: boolean; canManageMe
     {canWrite && <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const name = String(new FormData(form).get('name') ?? '').trim(); if (name) void change('/groups', 'POST', { display_name: name }) }}><label>群組名稱<input name="name" required maxLength={120} /></label><button>建立群組</button></form>}
     <QueryBody query={groups}>{(data) => <><label>選擇群組<select value={group} onChange={(event) => { setGroup(event.target.value); setMemberAfter('') }}><option value="">請選擇</option>{data.items.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>{groupAfter && <button onClick={() => { setGroupAfter(''); setGroup('') }}>回第一頁</button>}{data.next_after && <button onClick={() => { setGroupAfter(data.next_after!); setGroup('') }}>下一頁群組</button>}</>}</QueryBody>
     {group && <QueryBody query={members}>{(data) => <><DataTable rows={data.items} columns={[{ key: 'user_id', label: '使用者', render: (row) => users.data?.items.find((user) => user.id === row.user_id)?.display_name ?? row.user_id }, ...(canManageMembers ? [{ key: 'actions', label: '操作', render: (row: JsonObject) => <button onClick={() => void change(`/groups/${group}/members/${row.user_id}`, 'DELETE')}>移除</button> }] : [])]} />{memberAfter && <button onClick={() => setMemberAfter('')}>回第一頁成員</button>}{data.next_after && <button onClick={() => setMemberAfter(data.next_after!)}>下一頁成員</button>}{canManageMembers && <form onSubmit={(event) => { event.preventDefault(); const user = String(new FormData(event.currentTarget).get('user') ?? ''); if (user) void change(`/groups/${group}/members/${user}`, 'POST') }}><label>加入使用者<select name="user" required><option value="">請選擇</option>{(users.data?.items ?? []).map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select></label><button>加入</button>{userAfter && <button type="button" onClick={() => setUserAfter('')}>回第一頁使用者</button>}{users.data?.next_after && <button type="button" onClick={() => setUserAfter(users.data!.next_after!)}>下一頁使用者</button>}</form>}</>}</QueryBody>}
+    {group && canManageMembers && <GroupCredentials key={group} group={group} />}
   </section>
 }
 
