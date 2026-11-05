@@ -31,6 +31,7 @@ jobs:
       # See docs/engineering-standards.md section 0.
       - name: Run full checks
         env:
+          SQLX_OFFLINE: "true"
           PGHOST: github-runner-agent-pool-gateway-db
           PGUSER: gateway
           PGPASSWORD: ${{ secrets.RUNNER_DB_PASSWORD }}

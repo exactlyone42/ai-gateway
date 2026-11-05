@@ -1417,6 +1417,7 @@ mod tests {
             .is_err()
         );
         assert!(path.exists());
+        held.unlock().unwrap();
         drop(held);
         super::replay_isolated_spool(
             &store,
@@ -1513,6 +1514,7 @@ mod tests {
                 .is_err()
         );
         assert!(path.exists());
+        lock.unlock().unwrap();
         drop(lock);
         remove_deleted_spool(&pool, &path, &keys, limits, capacity)
             .await

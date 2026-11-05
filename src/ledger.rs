@@ -2444,7 +2444,10 @@ mod tests {
             return;
         }
         let buffer = crate::logging::capture::Buffer::default();
-        let (subscriber, _provider) = crate::logging::test_subscriber(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(buffer.clone())
+            .finish();
         tracing::subscriber::set_global_default(subscriber).unwrap();
         let directory = test_directory("cancelled-publish-failure");
         let runtime = tokio::runtime::Builder::new_current_thread()
