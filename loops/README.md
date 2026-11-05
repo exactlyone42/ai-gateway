@@ -60,3 +60,7 @@ W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因�
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
 
 - [jev-local](jev-local.loop.md)：本機 Jev 接入。
+
+## 2026-11-05 整體優先順序
+
+以 [gateway-completion.loop.md](gateway-completion.loop.md) 為唯一母檔。依序處理 #108 CI 與既有成果整合、憑證隔離及保存還原、原 Client 全流程與發布。盤點見 [07](gateway-completion/07-priority-audit.md)，執行 prompt 見 [08](gateway-completion/08-execution-prompt.md)；舊版本與暫停敘述須以新盤點核對。
