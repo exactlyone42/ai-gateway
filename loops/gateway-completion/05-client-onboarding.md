@@ -50,3 +50,9 @@ P3：以最後整合版本完成 Claude Code 與 Codex 工具要求、結果、�
 取消收尾讀回`/tmp/gateway-original-client-cancel-closeout.json`：本輪cancel測試DB為0、對應Gateway程序空，temp-service空。獨立審查未見新強殺假綠，Codex中斷判準依官方0.166.0來源且結合訊號前存活、上游斷線及帳本，不單靠JSON無完成事件作結論。
 
 2026-11-05 取消切片新版全套 `/tmp/gateway-original-client-cancel-all.log` 已結束碼0（session46386讀回）；正常取消與強殺陰性均保留。用量數值、加密保存與正式驗收仍未完成。
+
+2026-11-05 接上原Client `--check-capture`。首次初始化因預設.cache上層群組可寫被安全門檻拒絕，改用/tmp私有目錄，未放寬保存規則。首次20秒等待不足30秒匯入週期，依startup實際週期改為最多250次、每次0.2秒就緒查詢，SQL錯誤立即失敗。寬鬆保存核對已被審查指出可同時截斷串流及丟原訊息的假綠，已改逐字比對fixture實際發出串流，解析兩輪請求確認完整原user，工具結果須在正確類型及call id欄位。嚴格版原Claude工具保存 `/tmp/gateway-client-identity-aao9d3u2/capture-result.json` 通過：2筆complete、8條內容讀回及串流逐字相符；temp-service已結束。本機dev單一見證，無模型運算、正式未動；尚未驗密文明文掃描、保存讀回變異陰性、Codex保存、取消保存及用量數值。新用量查詢已準備但未接入驗證；本輪未提交、未跑新版全套。下一步補保存陰性並依序完成其餘三個原Client場景，再接用量核對。
+
+2026-11-05 保存與用量補驗：純驗證抽至client_capture_validation.py，截斷兩份相同串流、移除原user但marker留tool結果、錯工具結果、重複attempt、預估輸入歸零及錯實際用量均拒絕；連既有fixture共11項測試通過，已接all。Codex工具嚴格保存22ag0n5u通過。取消保存Claude49xkhoua、Codex6_1dyw4y皆incomplete且4條讀回，Claude供應商實際1/0，Codex供應商未提供用量故無provider_reported，預估另列。後續強化拒絕重複attempt與零預估，對兩筆已保存的usage-result重新執行新純驗證均過，證據/tmp/gateway-cancel-strict-usage.log，未重跑Client。新版完整工具與用量：Claude vd0npfq9、Codex v2pgkbad，各2筆complete、8條讀回、每輪實際1/1；SQL帶attempt_id且核對請求集合與唯一列數。預估僅驗有效、來源與帳本一致，未獨立證明估算準確。所有runtime均/tmp/gateway-client-identity-前綴；服務已結束。資料庫密文明文掃描、本輪新版全套、正式與跨主機仍待驗；未提交。
+
+2026-11-05 保存驗收切片全套 `/tmp/gateway-original-client-capture-all.log` 結束碼0（session73919），包含新增11項fixture與保存/用量負向檢查。部署、正式資料、密文明文掃描及跨主機缺口維持，不標整體完成。

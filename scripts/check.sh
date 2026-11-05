@@ -333,7 +333,7 @@ case "${1:-gate}" in
     python3 scripts/check-migrations.py
     python3 -m unittest discover -s scripts -p "test_deploy*.py"
     python3 -m unittest scripts/test_capture_backup_gateway_flags.py
-    python3 -m unittest scripts/test_client_tool_roundtrip_fixture.py
+    python3 -m unittest scripts/test_client_tool_roundtrip_fixture.py scripts/test_client_capture_validation.py
     python3 -m unittest scripts/test_backup_capture.py scripts/test_backup_docker_orphan.py scripts/test_capture_backup.py scripts/test_capture_backup_freshness.py scripts/test_capture_backup_source_state.py scripts/test_capture_storage_identity.py scripts/test_capture_storage_identity_live.py scripts/test_capture_database_identity_live.py scripts/test_ledger_backup_source.py scripts/test_ledger_backup_source_live.py scripts/test_ledger_watchdog.py scripts/test_legacy_archive_stage.py scripts/test_legacy_backup_source.py scripts/test_legacy_backup_live.py scripts/test_capture_restore.py scripts/test_restore_ledger_backup.py scripts/test_restore_ledger_live.py scripts/test_erasure_witness.py
     if [[ "${RUN_ERASURE_WITNESS_DOCKER:-0}" == "1" ]]; then python3 scripts/test_remote_witness_tls.py; fi
     python3 -m unittest discover -s scripts -p "test_sync_codex_auth.py"

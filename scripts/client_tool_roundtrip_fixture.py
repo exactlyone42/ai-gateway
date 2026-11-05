@@ -15,6 +15,7 @@ def handler(base):
         original_user_messages = []
         context_preserved = False
         tool_rejection = ''
+        emitted_streams = []
 
         def do_POST(self):
             cls = type(self)
@@ -54,6 +55,7 @@ def handler(base):
                         return self._send(422, 'application/json', b'{"error":"missing_read_tool"}')
                     events = [{'type': 'message_start', 'message': {'id': 'msg_fixture_read', 'type': 'message', 'role': 'assistant', 'content': [], 'model': body['model'], 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 1, 'output_tokens': 0}}}, {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'tool_use', 'id': cls.tool_call_id, 'name': 'Read', 'input': {}}}, {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps({'file_path': cls.nonce_path})}}, {'type': 'content_block_stop', 'index': 0}, {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use', 'stop_sequence': None}, 'usage': {'output_tokens': 1}}, {'type': 'message_stop'}]
                     payload = ''.join('event: ' + event['type'] + '\ndata: ' + json.dumps(event) + '\n\n' for event in events)
+                cls.emitted_streams.append(payload)
                 return self._send(200, 'text/event-stream', payload.encode())
             if cls.tool_requests != 2:
                 return self._send(422, 'application/json', b'{"error":"unexpected_tool_round"}')
@@ -74,6 +76,8 @@ def handler(base):
                 return self._send(422, 'application/json', b'{"error":"missing_real_tool_result_or_call"}')
             cls.tool_result_received = True
             name = 'openai-response.sse' if codex else 'anthropic-response.sse'
-            return self._send(200, 'text/event-stream', (self.fixture_dir / name).read_bytes())
+            payload = (self.fixture_dir / name).read_text()
+            cls.emitted_streams.append(payload)
+            return self._send(200, 'text/event-stream', payload.encode())
 
     return ToolHandler

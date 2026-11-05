@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
+    parser.add_argument('--check-capture', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     if args.control_wrong_tool_result and not args.check_tools:
@@ -33,6 +34,8 @@ def main():
         parser.error('cancel and tool validation must run separately')
     if args.control_force_client_kill and not args.check_cancel:
         parser.error('forced kill control requires --check-cancel')
+    if args.check_capture and not (args.check_tools or args.check_cancel):
+        parser.error('capture validation requires tools or cancel')
     database = os.environ['DATABASE_URL']
     parsed = urlsplit(database)
     if os.environ.get('CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION') != '1' or parsed.hostname not in ('127.0.0.1', 'localhost') or not parsed.path.startswith('/gateway_client_identity_validation_'):
@@ -49,7 +52,7 @@ def main():
     response_path = '/v1/responses' if codex else '/v1/messages'
     expected_reply = 'W06_CODEX_OK' if codex else 'W05_CLAUDE_CODE_OK'
     root = Path(__file__).resolve().parent.parent
-    runtime = Path(tempfile.mkdtemp(prefix='gateway-client-identity-'))
+    runtime = Path(tempfile.mkdtemp(prefix='gateway-client-identity-', **({'dir': '/tmp'} if args.check_capture else {})))
     os.chmod(runtime, 0o700)
     captures = runtime / 'captures'
     captures.mkdir()
@@ -86,9 +89,19 @@ def main():
         'OPENAI_BASE_URL': f'http://127.0.0.1:{server.server_port}' if codex else 'http://127.0.0.1:1',
         'ANTHROPIC_PERSONAL_TOKEN_DIR': str(runtime / 'personal'), 'LEDGER_SPOOL_DIR': str(runtime / 'ledger'),
     }
+    if args.check_capture:
+        environment.update({'CONTENT_CAPTURE_ENABLED': 'true', 'DATABASE_MAX_CONNECTIONS': '8', 'CONTENT_CAPTURE_TEST_ALLOW_LOCAL_WITNESS': '1'})
+        for label in ('SPOOL', 'KEY', 'ANCHOR', 'ERASURE', 'WITNESS'):
+            directory = runtime / ('encrypted-' + label.lower())
+            directory.mkdir(mode=0o700)
+            environment['CONTENT_CAPTURE_' + label + '_DIR'] = str(directory)
+        initialization = subprocess.run([str(binary), '--initialize-content-capture'], cwd=root, env=environment, capture_output=True, text=True, timeout=30)
+        (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
+        if initialization.returncode:
+            raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
     checks = []
 
-    def api(path, method='GET', body=None, token=None, expected=200):
+    def api(path, method='GET', body=None, token=None, expected=200, raw_response=False):
         headers = {'x-request-id': str(uuid.uuid4())}
         if token:
             headers['authorization'] = f'Bearer {token}'
@@ -102,6 +115,8 @@ def main():
             status, raw = error.code, error.read()
         if status != expected:
             raise RuntimeError(f'{method} {path}: {status}, expected {expected}')
+        if raw_response:
+            return raw.decode()
         return json.loads(raw) if raw else None
 
     log = (runtime / 'gateway.log').open('wb')
@@ -210,6 +225,41 @@ def main():
                 raise RuntimeError(f'{label}: 應拒絕卻送出或回成功')
             checks.append({'case': label, 'passed': True, 'upstream_requests': after - before, 'client_exit': result.returncode, 'denial_status': denial_status})
 
+        def verify_capture():
+            query = root / 'queries/test_client_capture_records.sql'
+            count = 1 if args.check_cancel else 2
+            expected_state = 'incomplete' if args.check_cancel else 'complete'
+            for _ in range(250):
+                result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
+                records = json.loads(result.stdout)
+                if len(records) == count and all(record['state'] == expected_state for record in records):
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError('加密保存數量或完成狀態不符：' + json.dumps(records))
+            saved = []
+            for record in records:
+                content = {}
+                for leg in ('client_request', 'provider_request', 'provider_response', 'client_response'):
+                    content[leg] = api(f'/admin/v1/request-captures/{record["capture_id"]}/content?leg={leg}', token=admin, raw_response=True)
+                    if not content[leg]:
+                        raise RuntimeError('加密讀回內容為空：' + leg)
+                if content['provider_response'] != content['client_response']:
+                    raise RuntimeError('供應商與Client保存串流不一致')
+                saved.append(content)
+            if args.check_tools:
+                runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_tools'](saved, fixture, codex)
+            else:
+                if 'CANCEL_STREAM_PENDING' not in saved[0]['provider_response'] or 'response.completed' in saved[0]['provider_response'] or 'message_stop' in saved[0]['provider_response']:
+                    raise RuntimeError('中斷保存內容不符')
+            usage_query = root / 'queries/test_client_capture_usage.sql'
+            usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=usage_query.read_text(), capture_output=True, text=True, timeout=5, check=True)
+            usage_records = json.loads(usage_result.stdout)
+            runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_usage'](usage_records, records, args.check_cancel, codex)
+            (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
+            (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
+            checks[-1]['capture_records'] = records
+
         if args.check_cancel:
             client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
             if fixture.cancel_requests != 1:
@@ -223,6 +273,8 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError('原Client取消未正確持久記帳：' + json.dumps(observed))
+            if args.check_capture:
+                verify_capture()
             checks[-1].update({'cancelled_by_sigint': True, 'upstream_closed': True, 'ledger': observed})
             (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
             print(f'原Client串流取消通過；證據：{runtime}')
@@ -240,6 +292,8 @@ def main():
             fixture.tool_mode = True
             client('alice', f'{model_prefix}-alice', True, 'tool-roundtrip', f'Read {fixture.nonce_path} using your local tool. Preserve {fixture.context_marker}. Then reply with exactly {expected_reply} and nothing else.')
             fixture.tool_mode = False
+            if args.check_capture:
+                verify_capture()
             if fixture.tool_requests != 2 or not fixture.tool_result_received:
                 raise RuntimeError('原Client沒有完成工具要求、結果與上下文往返')
             checks[-1].update({'tool_requests': fixture.tool_requests, 'real_tool_result': fixture.tool_result_received, 'original_context_preserved': fixture.context_preserved, 'tool_name': fixture.tool_name})
