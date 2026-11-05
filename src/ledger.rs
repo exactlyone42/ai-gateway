@@ -701,15 +701,7 @@ impl Reservation {
 
     pub async fn finish(mut self, completion: RequestCompletion) -> Result<(), LedgerError> {
         if let Some(lease) = self.routing_lease.as_mut() {
-            let error_type = completion
-                .attempts
-                .last()
-                .and_then(|attempt| attempt.error_type.as_deref());
-            lease.conclude(
-                completion.completed_at,
-                completion.status == "completed",
-                error_type,
-            );
+            lease.conclude(completion.completed_at);
         }
         // Keep ownership while the final envelope becomes the durable
         // checkpoint. Cancellation during that write still publishes a
