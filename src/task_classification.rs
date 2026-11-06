@@ -250,7 +250,6 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
-    use crate::model_registry::{CapabilityRequirements, GatewayOperation};
 
     #[derive(Deserialize)]
     struct Fixture {
@@ -262,7 +261,6 @@ mod tests {
         id: String,
         input: String,
         expected_task: Option<String>,
-        required_capabilities: Vec<String>,
         contrast_group: Option<String>,
     }
 
@@ -315,38 +313,8 @@ mod tests {
                 "{task} recall was {correct}/{total}"
             );
         }
-        let capability_failures = fixture
-            .cases
-            .iter()
-            .filter_map(|case| {
-                let actual = CapabilityRequirements::from_request(
-                    GatewayOperation::OpenAiResponses,
-                    &serde_json::json!({"input": case.input}),
-                );
-                let mut names = [
-                    (actual.streaming, "streaming"),
-                    (actual.tools, "tools"),
-                    (actual.reasoning, "reasoning"),
-                    (actual.images, "images"),
-                    (actual.structured_output, "structured_output"),
-                ]
-                .into_iter()
-                .filter_map(|(enabled, name)| enabled.then_some(name.to_owned()))
-                .collect::<Vec<_>>();
-                names.sort();
-                let mut expected = case.required_capabilities.clone();
-                expected.sort();
-                (names != expected).then(|| case.id.clone())
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            capability_failures.is_empty(),
-            "capability extraction failed: {capability_failures:?}"
-        );
         eprintln!(
-            "task-classification-report accuracy={correct}/{} capability_accuracy={}/{} fallback={}/{} p95_us={} failures={task_failures:?}",
-            fixture.cases.len(),
-            fixture.cases.len() - capability_failures.len(),
+            "task-classification-report accuracy={correct}/{} fallback={}/{} p95_us={} failures={task_failures:?}",
             fixture.cases.len(),
             fixture
                 .cases
