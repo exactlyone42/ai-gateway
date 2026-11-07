@@ -5,6 +5,12 @@
 每個人／每台設備／每個 Agent 拿一把可撤銷的閘道金鑰，把公司核准的官方 API 容量集中調度，
 依政策決定「誰先跑、用哪個模型、花多少」，並留下完整的用量與稽核軌跡——**Provider 憑證永不外流**。
 
+## 架構圖
+
+![Agent Pool Gateway 系統架構](architecture-diagram.svg)
+
+PDF 版：[architecture-diagram.pdf](architecture-diagram.pdf)。圖只畫目前已有的元件；改元件時一起改圖。
+
 ## 三個 Plane
 
 邊界要一直保持清楚，這是整份架構最重要的約束。

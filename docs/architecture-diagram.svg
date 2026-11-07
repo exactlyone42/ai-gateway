@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="640" viewBox="0 0 1400 640">
+<defs>
+<filter id="r" x="-2%" y="-2%" width="104%" height="104%"><feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="3.2"/></filter>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#5a4515"/></marker>
+<style>
+text{font-family:"Noto Sans CJK TC","Noto Sans TC",sans-serif;fill:#3b2f12}
+.h{font-size:22px;font-weight:700}
+.g{font-size:11px;fill:#6b5a3a}
+.t{font-size:13px;font-weight:700}
+.s{font-size:10px;fill:#5a4a2a}
+.l{font-size:10px;fill:#4a3d1c}
+.b{font-size:13px;font-weight:700;fill:#2f62a0}
+</style>
+</defs>
+<rect width="1400" height="640" fill="#fffdf5"/>
+<g filter="url(#r)">
+<rect x="20" y="70" width="195" height="120" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="40" y="105" width="155" height="64" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="20" y="235" width="195" height="140" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="40" y="268" width="155" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="235" y="52" width="915" height="522" rx="18" fill="none" stroke="#3a6ea5" stroke-width="2.6"/>
+<rect x="255" y="70" width="875" height="120" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="268" y="105" width="155" height="64" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="443" y="105" width="155" height="64" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="618" y="105" width="155" height="64" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="793" y="105" width="155" height="64" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="968" y="105" width="155" height="64" rx="8" fill="#fbdc96" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="255" y="235" width="875" height="140" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="268" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="361" y1="313" x2="375" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="376" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="469" y1="313" x2="483" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="484" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="577" y1="313" x2="591" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="592" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="685" y1="313" x2="699" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="700" y="268" width="92" height="90" rx="8" fill="#fbdc96" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="793" y1="313" x2="807" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="808" y="268" width="92" height="90" rx="8" fill="#fbdc96" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="901" y1="313" x2="915" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="916" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="1009" y1="313" x2="1023" y2="313" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="1024" y="268" width="92" height="90" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="255" y="420" width="875" height="120" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="268" y="455" width="195" height="70" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="483" y="455" width="195" height="70" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="698" y="455" width="195" height="70" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="913" y="455" width="195" height="70" rx="8" fill="#fbdc96" stroke="#7b5b1e" stroke-width="2"/>
+<line x1="215" y1="130" x2="255" y2="130" stroke="#5a4515" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+<line x1="215" y1="313" x2="255" y2="313" stroke="#5a4515" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+<line x1="1130" y1="313" x2="1210" y2="313" stroke="#5a4515" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+<line x1="690" y1="190" x2="690" y2="235" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<line x1="690" y1="375" x2="690" y2="420" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<line x1="1130" y1="490" x2="1210" y2="490" stroke="#5a4515" stroke-width="2" marker-end="url(#a)"/>
+<rect x="1210" y="70" width="175" height="335" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="1225" y="95" width="145" height="50" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1225" y="156" width="145" height="50" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1225" y="217" width="145" height="50" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1225" y="278" width="145" height="50" rx="8" fill="#fbdc96" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1225" y="339" width="145" height="50" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1210" y="420" width="175" height="125" rx="14" fill="none" stroke="#9a7b4f" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="1225" y="445" width="145" height="42" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+<rect x="1225" y="495" width="145" height="42" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
+</g>
+<text x="24" y="38" class="h">Agent Pool Gateway 系統架構</text>
+<text x="30" y="87" class="g">管理者</text>
+<text x="117.5" y="133.0" class="t" text-anchor="middle">管理員</text>
+<text x="117.5" y="148.0" class="s" text-anchor="middle">瀏覽器後台、Admin API</text>
+<text x="30" y="252" class="g">用戶端</text>
+<text x="117.5" y="304.0" class="t" text-anchor="middle">Claude Code／Codex</text>
+<text x="117.5" y="319.0" class="s" text-anchor="middle">Cursor、自建 Agent</text>
+<text x="117.5" y="331.0" class="s" text-anchor="middle">只帶 Gateway 金鑰</text>
+<text x="245" y="596" class="b">公司 Gateway（伺服器，Rust，單一實例）：Provider 憑證只存在這裡，不回傳給任何用戶端</text>
+<text x="265" y="87" class="g">控制面｜設定與身分（掛掉時，進行中的串流不中斷）</text>
+<text x="345.5" y="133.0" class="t" text-anchor="middle">後台 Admin API</text>
+<text x="345.5" y="148.0" class="s" text-anchor="middle">短效 session、RBAC</text>
+<text x="520.5" y="133.0" class="t" text-anchor="middle">憑證與身分</text>
+<text x="520.5" y="148.0" class="s" text-anchor="middle">金鑰 → 使用者／設備／Agent</text>
+<text x="695.5" y="133.0" class="t" text-anchor="middle">政策與配額</text>
+<text x="695.5" y="148.0" class="s" text-anchor="middle">六層合併、用量上限</text>
+<text x="870.5" y="133.0" class="t" text-anchor="middle">模型目錄與路由資料</text>
+<text x="870.5" y="148.0" class="s" text-anchor="middle">品質別名、成功率、延遲</text>
+<text x="1045.5" y="133.0" class="t" text-anchor="middle">Provider 憑證保管</text>
+<text x="1045.5" y="148.0" class="s" text-anchor="middle">含 Codex 訂閱權杖</text>
+<text x="265" y="252" class="g">資料面｜請求由左往右，串流回應沿原路反向送回</text>
+<text x="314.0" y="304.0" class="t" text-anchor="middle">協定轉接</text>
+<text x="314.0" y="319.0" class="s" text-anchor="middle">Messages</text>
+<text x="314.0" y="331.0" class="s" text-anchor="middle">Responses 等</text>
+<text x="422.0" y="304.0" class="t" text-anchor="middle">驗證身分</text>
+<text x="422.0" y="319.0" class="s" text-anchor="middle">金鑰雜湊比對</text>
+<text x="422.0" y="331.0" class="s" text-anchor="middle">解析 Principal</text>
+<text x="530.0" y="304.0" class="t" text-anchor="middle">政策評估</text>
+<text x="530.0" y="319.0" class="s" text-anchor="middle">品質、急迫度</text>
+<text x="530.0" y="331.0" class="s" text-anchor="middle">預算、期限</text>
+<text x="638.0" y="304.0" class="t" text-anchor="middle">准入控制</text>
+<text x="638.0" y="319.0" class="s" text-anchor="middle">接受、排隊</text>
+<text x="638.0" y="331.0" class="s" text-anchor="middle">降級、換路、拒絕</text>
+<text x="746.0" y="304.0" class="t" text-anchor="middle">公平排程</text>
+<text x="746.0" y="319.0" class="s" text-anchor="middle">加權公平佇列</text>
+<text x="746.0" y="331.0" class="s" text-anchor="middle">保留互動容量</text>
+<text x="854.0" y="304.0" class="t" text-anchor="middle">模型路由</text>
+<text x="854.0" y="319.0" class="s" text-anchor="middle">能力、健康</text>
+<text x="854.0" y="331.0" class="s" text-anchor="middle">成本、負載</text>
+<text x="962.0" y="304.0" class="t" text-anchor="middle">供應商轉接</text>
+<text x="962.0" y="319.0" class="s" text-anchor="middle">各家格式</text>
+<text x="962.0" y="331.0" class="s" text-anchor="middle">注入伺服器憑證</text>
+<text x="1070.0" y="304.0" class="t" text-anchor="middle">串流代理</text>
+<text x="1070.0" y="319.0" class="s" text-anchor="middle">增量轉送</text>
+<text x="1070.0" y="331.0" class="s" text-anchor="middle">取消傳到上游</text>
+<text x="265" y="437" class="g">帳務與觀測｜旁路寫入，不擋主要請求</text>
+<text x="365.5" y="486.0" class="t" text-anchor="middle">用量帳本</text>
+<text x="365.5" y="501.0" class="s" text-anchor="middle">每次請求與 token 用量</text>
+<text x="580.5" y="486.0" class="t" text-anchor="middle">稽核軌跡</text>
+<text x="580.5" y="501.0" class="s" text-anchor="middle">誰在何時改了什麼</text>
+<text x="795.5" y="486.0" class="t" text-anchor="middle">OTLP 匯出</text>
+<text x="795.5" y="501.0" class="s" text-anchor="middle">指標、追蹤、遮蔽後日誌</text>
+<text x="1010.5" y="486.0" class="t" text-anchor="middle">持久暫存 spool</text>
+<text x="1010.5" y="501.0" class="s" text-anchor="middle">資料庫掛掉時先寫，有上限</text>
+<text x="1170" y="304" class="l" text-anchor="middle">HTTPS</text>
+<text x="702" y="217" class="l" text-anchor="start">提供設定</text>
+<text x="702" y="402" class="l" text-anchor="start">旁路寫入</text>
+<text x="1170" y="481" class="l" text-anchor="middle">寫入</text>
+<text x="1220" y="87" class="g">模型提供者</text>
+<text x="1297.5" y="116.0" class="t" text-anchor="middle">Anthropic API</text>
+<text x="1297.5" y="131.0" class="s" text-anchor="middle">雲端</text>
+<text x="1297.5" y="177.0" class="t" text-anchor="middle">OpenAI API</text>
+<text x="1297.5" y="192.0" class="s" text-anchor="middle">雲端</text>
+<text x="1297.5" y="238.0" class="t" text-anchor="middle">Gemini／xAI</text>
+<text x="1297.5" y="253.0" class="s" text-anchor="middle">雲端</text>
+<text x="1297.5" y="299.0" class="t" text-anchor="middle">Codex 訂閱</text>
+<text x="1297.5" y="314.0" class="s" text-anchor="middle">伺服器保管權杖</text>
+<text x="1297.5" y="360.0" class="t" text-anchor="middle">本機模型</text>
+<text x="1297.5" y="375.0" class="s" text-anchor="middle">vLLM、Ollama</text>
+<text x="1220" y="437" class="g">基礎設施</text>
+<text x="1297.5" y="462.0" class="t" text-anchor="middle">PostgreSQL</text>
+<text x="1297.5" y="477.0" class="s" text-anchor="middle">帳本、身分、政策</text>
+<text x="1297.5" y="512.0" class="t" text-anchor="middle">OTel 後端</text>
+<text x="1297.5" y="527.0" class="s" text-anchor="middle">SigNoz 等，可替換</text>
+</svg>
