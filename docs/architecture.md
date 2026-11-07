@@ -7,7 +7,7 @@
 
 ## 架構圖
 
-![Agent Pool Gateway 系統架構](architecture-diagram.svg)
+![AI Gateway 系統架構](architecture-diagram.svg)
 
 PDF 版：[architecture-diagram.pdf](architecture-diagram.pdf)。圖只畫目前已有的元件；改元件時一起改圖。
 
