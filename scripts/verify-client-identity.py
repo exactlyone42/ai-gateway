@@ -37,6 +37,8 @@ def main():
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
+    parser.add_argument('--check-slow-reader', action='store_true')
+    parser.add_argument('--control-drain-reader', action='store_true')
     parser.add_argument('--check-long-stream', action='store_true')
     parser.add_argument('--check-capture', action='store_true')
     parser.add_argument('--check-error', action='store_true')
@@ -48,6 +50,11 @@ def main():
     live_source = args.check_codex_held or args.check_local
     owned_cancel = args.check_local and args.check_cancel
     recovery_mode = args.check_auth_recovery or args.check_stream_failure
+    cancel_recovery = owned_cancel or args.check_slow_reader
+    if args.check_slow_reader and (not (args.check_cancel and args.check_capture) or any((live_source, args.check_tools, args.check_error, args.check_compact, args.check_long_stream, args.control_force_client_kill))):
+        parser.error('慢讀必須搭配取消與保存，且與其他模式分開')
+    if args.control_drain_reader and not args.check_slow_reader:
+        parser.error('快讀反例僅供慢讀驗收')
     if args.check_long_stream and (not args.check_capture or any((args.check_local, args.check_codex_held, args.check_tools, args.check_cancel, args.check_error, args.check_compact))):
         parser.error('長串流必須搭配保存驗收，且與其他模式分開')
     if recovery_mode and not (args.check_error and args.check_capture):
@@ -123,7 +130,10 @@ def main():
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
-    if args.check_cancel or args.check_long_stream:
+    if args.check_slow_reader:
+        slow_reader = runpy.run_path(str(root / 'scripts/client_slow_reader.py'))
+        fixture = slow_reader['handler'](fixture)
+    elif args.check_cancel or args.check_long_stream:
         fixture = runpy.run_path(str(root / 'scripts/client_cancel_fixture.py'))['handler'](fixture)
         if args.check_long_stream:
             fixture.stream_seconds = 660
@@ -185,6 +195,8 @@ def main():
         fixture.provider_credentials.update((source_auth['tokens']['access_token'], source_auth['tokens']['account_id']))
     if args.check_local:
         environment['EXTRA_PROVIDER_PROFILES_JSON'] = json.dumps([{'kind': 'ollama', 'credential_ref': 'env://LOCAL_OLLAMA', 'provider_key': provider_key, 'base_url': 'http://127.0.0.1:11434', 'operations': [operation]}])
+    if args.check_slow_reader:
+        environment.update({'SCHEDULER_PASSTHROUGH': 'false', 'SCHEDULER_PER_PROVIDER': '1', 'SCHEDULER_PER_MODEL': '1'})
     checks = []
     if owned_cancel:
         cancel_marker = 'owned-cancel-' + uuid.uuid4().hex
@@ -268,7 +280,7 @@ def main():
             if codex:
                 reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                if args.check_local or recovery_mode or args.check_long_stream:
+                if args.check_local or recovery_mode or args.check_long_stream or args.check_slow_reader:
                     with (home / 'config.toml').open('a') as config:
                         config.write('stream_max_retries = 0\nrequest_max_retries = 0\nstream_idle_timeout_ms = 600000\n')
                 if args.check_compact:
@@ -290,7 +302,7 @@ def main():
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                     'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
                 }
-                if args.check_stream_failure or args.check_long_stream or owned_cancel:
+                if args.check_stream_failure or args.check_long_stream or owned_cancel or args.check_slow_reader:
                     client_environment['CLAUDE_CODE_MAX_RETRIES'] = '0'
                     client_environment['CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK'] = '1'
                 if args.check_long_stream:
@@ -428,6 +440,8 @@ def main():
         def verify_capture():
             validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
             markers = [cancel_marker, expected_reply] if owned_cancel else owned_fields if args.check_owned_compact else [owned_value, expected_reply] if args.check_owned_tools else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            if args.check_slow_reader:
+                markers.append('SLOW_READER_RESOURCE_CHECK')
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -438,13 +452,13 @@ def main():
             count = 3 if args.check_owned_compact or args.check_owned_tools else fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
             if recovery_mode:
                 count += fixture.recovery_requests
-            if owned_cancel:
+            if cancel_recovery:
                 count = 2
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
                 records = json.loads(result.stdout)
-                states = ['incomplete', 'complete'] if args.check_stream_failure or owned_cancel else [expected_state] * count
+                states = ['incomplete', 'complete'] if args.check_stream_failure or cancel_recovery else [expected_state] * count
                 if len(records) == count and [record['state'] for record in records] == states:
                     break
                 time.sleep(0.2)
@@ -459,7 +473,10 @@ def main():
                     content[leg] = api(f'/admin/v1/request-captures/{record["capture_id"]}/content?leg={leg}', token=admin, raw_response=True)
                     if not content[leg]:
                         raise RuntimeError('加密讀回內容為空：' + leg)
-                validation['validate_passthrough_stream'](content['provider_response'], content['client_response'])
+                if args.check_slow_reader and record['state'] == 'incomplete':
+                    slow_reader['validate_prefix'](content['provider_response'], content['client_response'])
+                else:
+                    validation['validate_passthrough_stream'](content['provider_response'], content['client_response'])
                 saved.append(content)
             if args.check_tools:
                 runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_tools'](saved, fixture, codex)
@@ -505,6 +522,12 @@ def main():
             elif recovery_mode:
                 name = 'openai-response.sse' if codex else 'anthropic-response.sse'
                 validation['validate_error_recovery'](saved, fixture.error_payloads, (fixture.fixture_dir / name).read_text(), usage_records, records, codex, interrupted=args.check_stream_failure, upstream_request_id=fixture.error_request_ids[0])
+            elif args.check_slow_reader:
+                if len(usage_records) != 2 or [row['status'] for row in usage_records] != ['cancelled', 'completed']:
+                    raise RuntimeError('慢讀取消與新請求的帳本狀態不符')
+                for index, cancel in enumerate((True, False)):
+                    selected = [row for row in usage_records if row['id'] == records[index]['capture_id']]
+                    validation['validate_usage'](selected, records[index:index + 1], cancel, codex)
             else:
                 validation['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
             dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
@@ -512,7 +535,7 @@ def main():
             reject_plaintext((runtime / 'gateway.log').read_bytes(), markers)
             (runtime / 'plaintext-result.json').write_text(json.dumps({'spool_files': len(spool_files), 'capture_ids': sorted(path.stem for path in spool_files), 'database_dump_bytes': len(dump.stdout), 'gateway_log_bytes': (runtime / 'gateway.log').stat().st_size, 'markers': len(markers), 'plaintext_absent': True}, indent=2))
             (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
-            (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': all(content['provider_response'] == content['client_response'] for content in saved), 'stream_events_equal': True}, indent=2))
+            (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': all(content['provider_response'] == content['client_response'] for content in saved), 'stream_events_equal': None if args.check_slow_reader else True, 'partial_client_prefix_verified': args.check_slow_reader}, indent=2))
             checks[-1]['capture_records'] = records
 
         if live_source and not owned_cancel:
@@ -588,7 +611,11 @@ def main():
             print(f'原Client長串流通過；證據：{runtime}')
             return
         if args.check_cancel:
-            client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
+            if args.check_slow_reader:
+                fixture.slow_proof = slow_reader['run'](gateway.pid, binary, base, users['alice'][1], f'{model_prefix}-alice', codex, fixture, runtime, args.control_drain_reader)
+                checks.append({'label': 'slow-reader-cancel', 'client_kind': 'raw_http_capacity_probe', 'native_client': False, 'upstream_requests': 1, 'ingress_request_ids': [fixture.slow_proof['ingress_request_id']]})
+            else:
+                client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
             if not owned_cancel and fixture.cancel_requests != 1:
                 raise RuntimeError('取消測試產生非預期的上游重送')
             query = root / 'queries/test_client_cancel_ledger.sql'
@@ -600,7 +627,7 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError('原Client取消未正確持久記帳：' + json.dumps(observed))
-            if owned_cancel:
+            if cancel_recovery:
                 if api('/health').get('active_requests') != 0:
                     raise RuntimeError('原Client取消後Gateway仍有工作')
                 client('alice', f'{model_prefix}-alice', True, 'after-local-cancel')
@@ -609,12 +636,12 @@ def main():
             active = api('/health').get('active_requests')
             if active != 0:
                 raise RuntimeError(f'取消後Gateway仍有執行中的請求：{active}')
-            checks[0].update({'cancelled_by_sigint': True, 'upstream_closed': None if owned_cancel else True, 'active_requests_after': active, 'ledger': observed})
-            if owned_cancel:
+            checks[0].update({'cancelled_by_sigint': not args.check_slow_reader, 'upstream_closed': None if owned_cancel else True, 'active_requests_after': active, 'ledger': observed})
+            if cancel_recovery:
                 for check in checks:
                     check['upstream_requests'] = 1
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'local_cancel': fixture.local_cancel_proof if owned_cancel else None, 'checks': checks, 'not_run': ['model-denied', 'gateway-key-revoked'] if owned_cancel else []}, indent=2))
-            print(f'原Client串流取消通過；證據：{runtime}')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'local_cancel': fixture.local_cancel_proof if owned_cancel else None, 'slow_reader': fixture.slow_proof if args.check_slow_reader else None, 'checks': checks, 'not_run': ['model-denied', 'gateway-key-revoked'] if cancel_recovery else []}, indent=2))
+            print(f'慢讀容量與原Client新請求通過；證據：{runtime}' if args.check_slow_reader else f'原Client串流取消通過；證據：{runtime}')
             return
         if not args.check_tools:
             client('alice', f'{model_prefix}-alice', True, 'alice-personal')
