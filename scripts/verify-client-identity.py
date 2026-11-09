@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--check-access-matrix', action='store_true')
     parser.add_argument('--check-tenant-access', action='store_true')
     parser.add_argument('--check-access-race', action='store_true')
+    parser.add_argument('--check-capture-access', action='store_true')
+    parser.add_argument('--control-capture-access', choices=('viewer', 'before', 'during'))
     parser.add_argument('--control-quota-double-admit', action='store_true')
     parser.add_argument('--control-tenant-admin-as-viewer', action='store_true')
     parser.add_argument('--control-access-foreign-source', action='store_true')
@@ -56,6 +58,10 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
+    if args.check_capture_access and (not args.check_capture or any((live_source, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact))):
+        parser.error('內容授權與保存故障須搭配保存，與原Client及其他模式分開驗收')
+    if args.control_capture_access and not args.check_capture_access:
+        parser.error('內容保存反例僅供內容授權與保存故障驗收')
     if args.check_access_matrix and any((args.check_tenant_access, args.check_access_race, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
         parser.error('權限矩陣與原Client及其他模式分開驗收')
     if args.check_tenant_access and any((args.check_access_race, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
@@ -113,7 +119,7 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
+    if args.check_capture and not (args.check_capture_access or args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
         if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
@@ -156,6 +162,8 @@ def main():
         fixture = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['handler'](fixture)
     if args.check_access_race:
         fixture = runpy.run_path(str(root / 'scripts/client_access_race.py'))['handler'](fixture)
+    if args.check_capture_access:
+        fixture = runpy.run_path(str(root / 'scripts/client_capture_access.py'))['handler'](fixture, runtime / 'encrypted-spool')
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
     if args.check_slow_reader:
@@ -219,10 +227,10 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
-    if args.check_access_matrix or args.check_tenant_access or args.check_access_race:
+    if args.check_access_matrix or args.check_tenant_access or args.check_access_race or args.check_capture_access:
         environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
         fixture.provider_credentials.add('fixture-tenant-api')
-    if args.check_tenant_access:
+    if args.check_tenant_access or args.check_capture_access:
         environment['PROVIDER_ALLOWED_TENANT_IDS'] = '00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002'
     if args.check_codex_held:
         environment.update({'CODEX_AUTH_FILE': str(args.codex_auth_file.resolve()), 'CODEX_ACCOUNT_ID': source_auth['tokens']['account_id'], 'CODEX_OWNER_USER_ID': str(uuid.uuid4()), 'PROVIDER_ALLOWED_TENANT_IDS': environment['ADMIN_BOOTSTRAP_TENANT_ID']})
@@ -248,11 +256,13 @@ def main():
             with urlopen(Request(base + path, data=data, headers=headers, method=method), timeout=8) as response:
                 status, raw = response.status, response.read()
                 request_id = response.headers.get('x-request-id')
+                cache_control = response.headers.get('cache-control')
         except HTTPError as error:
             status, raw = error.code, error.read()
             request_id = error.headers.get('x-request-id')
+            cache_control = error.headers.get('cache-control')
         if response_metadata is not None:
-            response_metadata.update(status=status, request_id=request_id)
+            response_metadata.update(status=status, request_id=request_id, cache_control=cache_control)
         if expected is not None and status != expected:
             raise RuntimeError(f'{method} {path}: {status}, expected {expected}')
         if raw_response:
@@ -303,8 +313,8 @@ def main():
             print(f'權限競態通過{len(rows)}項；證據：{runtime}')
             return
 
-        if args.check_tenant_access:
-            print(f'租戶角色矩陣證據：{runtime}', flush=True)
+        if args.check_tenant_access or args.check_capture_access:
+            print(f'{"內容授權與保存故障" if args.check_capture_access else "租戶角色矩陣"}證據：{runtime}', flush=True)
             gateway.terminate()
             gateway.wait(timeout=7)
             environment['ADMIN_BOOTSTRAP_TENANT_ID'] = '00000000-0000-0000-0000-000000000002'
@@ -314,6 +324,11 @@ def main():
                 raise RuntimeError('第二租戶Gateway啟動失敗')
             other_login = api('/admin/v1/bootstrap', 'POST', {'display_name': '租戶B管理者', 'credential_name': '租戶B登入'}, bootstrap, 201)['login_token']
             other_admin = api('/admin/v1/sessions', 'POST', token=other_login, expected=201)['access_token']
+            if args.check_capture_access:
+                verify = runpy.run_path(str(root / 'scripts/client_capture_access.py'))['verify']
+                rows = verify(base, api, create, activate, users, provider, fixture, runtime, admin, other_admin, codex, database, args.control_capture_access)
+                print(f'內容授權與保存故障通過{len(rows)}項；證據：{runtime}')
+                return
             matrix = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['verify']
             rows = matrix(api, create, activate, users, provider, fixture, runtime, admin, other_admin, codex, args.control_tenant_admin_as_viewer)
             print(f'租戶角色矩陣通過{len(rows)}項；證據：{runtime}')
@@ -781,6 +796,9 @@ def main():
                 (runtime / 'failure-capture-error.txt').write_text(type(error).__name__)
         raise
     finally:
+        if args.check_capture_access:
+            fixture.release_suffix.set()
+            (runtime / 'capture-access-source.json').write_text(json.dumps({'upstream_calls': len(fixture.captured_requests), 'observations': fixture.captured_requests, 'before_source': fixture.source_proofs, 'suffix_sent': fixture.suffix_sent, 'source_closed': fixture.source_closed}, indent=2))
         if args.check_access_race:
             fixture.release_headers.set()
             fixture.release_body.set()
