@@ -1741,6 +1741,33 @@ mod tests {
         .unwrap();
         assert_eq!(first["events"], 1);
         assert_eq!(first["window_tokens"], 3);
+        for fields in [
+            vec!["quota_actual_tokens"],
+            vec!["quota_actual_cost_microusd"],
+            vec!["quota_actual_tokens", "quota_actual_cost_microusd"],
+        ] {
+            let mut omitted = payload.clone();
+            for field in fields {
+                omitted[0]["request"][field] = Value::Null;
+            }
+            let error = sqlx::query_file!("queries/test_ingest_usage_replay.sql", omitted)
+                .execute(&pool)
+                .await
+                .expect_err("settled values must not be omitted in a replay");
+            assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("GW409")
+            );
+            let unchanged = sqlx::query_file_scalar!(
+                "queries/test_quota_replay_evidence.sql",
+                tenant_id,
+                reservation_id
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(unchanged, first);
+        }
         sqlx::query_file!("queries/test_ingest_usage_replay.sql", payload)
             .execute(&pool)
             .await

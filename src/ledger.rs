@@ -3644,6 +3644,7 @@ mod tests {
             )],
             completed_at: now,
         });
+        envelope.finalized = Some(true);
         spool.finish(request_id, &envelope).unwrap();
         let ready = fs::read_to_string(spool.path(request_id, "ready")).unwrap();
         assert!(!ready.contains("sentinel-prompt"));
@@ -3672,6 +3673,7 @@ mod tests {
             attempts: Vec::new(),
             completed_at: Utc::now(),
         });
+        second.finalized = Some(true);
         unavailable.inner.spool.finish(second_id, &second).unwrap();
         unavailable.schedule_flush(&tokio::runtime::Handle::current());
         unavailable.wait_for_idle().await;
@@ -4148,6 +4150,147 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), data);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn replay_rejects_changed_content_and_rolls_back_mixed_batch(pool: Pool<Postgres>) {
+        let mut original = RequestEnvelope::started(request_start("content-original"));
+        let now = original.request.created_at + chrono::Duration::seconds(1);
+        original.request.requested_parameters = Some(serde_json::json!({"model":"requested"}));
+        original.request.provider_parameters = Some(serde_json::json!({"model":"provider"}));
+        original.request.attribution = Some(RequestAttribution {
+            task_id: Some("original-task".to_owned()),
+            ..RequestAttribution::default()
+        });
+        original.complete(RequestCompletion {
+            status: "completed".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: vec![ProviderAttempt::completed(
+                CompletedAttempt {
+                    provider: "test-provider".to_owned(),
+                    model: "test-model".to_owned(),
+                    provider_request_id: None,
+                    provider_response_id: None,
+                    started_at: now,
+                    completed_at: now,
+                    status: "completed".to_owned(),
+                    error_type: None,
+                },
+                br#"{"usage":{"prompt_tokens":2,"completion_tokens":1}}"#,
+            )],
+            completed_at: now,
+        });
+        let original_id = original.request.id;
+        let original = serde_json::to_value(original).unwrap();
+        for _ in 0..2 {
+            sqlx::query_file!(
+                "queries/test_ingest_usage_replay.sql",
+                serde_json::json!([original])
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut changes = Vec::new();
+        for (pointer, value) in [
+            ("/usage_records/0/input_tokens", serde_json::json!(50)),
+            (
+                "/attempts/0/provider_request_id",
+                serde_json::json!("changed"),
+            ),
+            ("/request/status", serde_json::json!("failed")),
+            ("/request/attribution/task_id", serde_json::json!("changed")),
+            (
+                "/request/requested_parameters/model",
+                serde_json::json!("changed"),
+            ),
+            (
+                "/request/provider_parameters/model",
+                serde_json::json!("changed"),
+            ),
+            ("/request/attribution", Value::Null),
+            ("/request/requested_parameters", Value::Null),
+            ("/attempts", serde_json::json!([])),
+            ("/usage_records", serde_json::json!([])),
+            ("/request/id", serde_json::json!(Uuid::new_v4())),
+            (
+                "/usage_records/0/provider_attempt_id",
+                serde_json::json!(Uuid::new_v4()),
+            ),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            changes.push((pointer, changed));
+        }
+        for (case, changed) in changes {
+            let healthy = RequestEnvelope::started(request_start("mixed-healthy"));
+            let healthy_id = healthy.request.id;
+            let error = sqlx::query_file!(
+                "queries/test_ingest_usage_replay.sql",
+                serde_json::json!([healthy, changed])
+            )
+            .execute(&pool)
+            .await
+            .expect_err(case);
+            assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("GW409"),
+                "{case}"
+            );
+            let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", healthy_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                (counts.requests, counts.attempts, counts.usage),
+                (0, 0, 0),
+                "{case}"
+            );
+            sqlx::query_file!(
+                "queries/test_ingest_usage_replay.sql",
+                serde_json::json!([original])
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", original_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((counts.requests, counts.attempts, counts.usage), (1, 1, 1));
+        let request_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let mut left = original.clone();
+        left["request"]["id"] = serde_json::json!(request_id);
+        left["request"]["request_id"] = serde_json::json!("global-id-collision");
+        left["attempts"][0]["id"] = serde_json::json!(attempt_id);
+        left["attempts"][0]["gateway_request_id"] = serde_json::json!(request_id);
+        left["usage_records"][0]["id"] = serde_json::json!(Uuid::new_v4());
+        left["usage_records"][0]["gateway_request_id"] = serde_json::json!(request_id);
+        left["usage_records"][0]["provider_attempt_id"] = serde_json::json!(attempt_id);
+        let mut right = left.clone();
+        let tenant = serde_json::json!(Uuid::new_v4());
+        right["request"]["tenant_id"] = tenant.clone();
+        right["attempts"][0]["tenant_id"] = tenant.clone();
+        right["usage_records"][0]["tenant_id"] = tenant;
+        let left = serde_json::json!([left]);
+        let right = serde_json::json!([right]);
+        let left_query = sqlx::query_file!("queries/test_ingest_usage_replay.sql", left);
+        let right_query = sqlx::query_file!("queries/test_ingest_usage_replay.sql", right);
+        let (left, right) = tokio::join!(left_query.execute(&pool), right_query.execute(&pool));
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        let error = left.err().or_else(|| right.err()).unwrap();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("GW409")
+        );
+        let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((counts.requests, counts.attempts, counts.usage), (1, 1, 1));
     }
 
     #[sqlx::test]
