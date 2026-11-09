@@ -45,6 +45,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
   "env": {
     "ANTHROPIC_BASE_URL": "https://aigw.internal.example.com",
     "ANTHROPIC_AUTH_TOKEN": "aigw_sk_...",
+    "CLAUDE_CODE_MAX_RETRIES": "0",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
   }
 }
@@ -63,8 +65,7 @@ Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號�
 bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發現為
 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
 只顯示 id 含 `claude` 或 `anthropic` 的模型。每個模型另回傳
-`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，避免串流途中被誤判斷線，
-也避免 Client 自動重送可能已執行的工作。Claude Code 2.1.306 的首筆回應另受
+`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，但這些欄位不能當成 Claude 已停用重送的證據。本輪原設定在部分輸出後斷線共送六次；只關一般重試仍會改發非串流。上方兩個 Client 設定須一起使用：`CLAUDE_CODE_MAX_RETRIES=0` 關一般重試，`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` 關串流失敗後的非串流備援。用途見 [官方重試說明](https://code.claude.com/docs/en/errors#tune-retry-behavior) 及 [環境設定](https://code.claude.com/docs/en/env-vars)。Claude Code 2.1.306 的首筆回應另受
 `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` 控制；長工作需在 Client 設為 `600000`，
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS` 不能取代它。`x-claude-code-agent-id` 是 agent，不是人。
 

@@ -74,6 +74,78 @@ class ErrorRecoveryTest(unittest.TestCase):
             validate_error_recovery(*args)
 
 
+class StreamFailureRecoveryTest(unittest.TestCase):
+    def sample(self, codex):
+        args = ErrorRecoveryTest().sample(codex)
+        parts = args[2].split('\n\n')
+        opening = '\n\n'.join(parts[:4 if codex else 3]) + '\n\n'
+        args[0][0]['provider_response'] = opening
+        args[1] = [opening]
+        failed = args[3][0]
+        failed['provider_request_id'] = 'fixture-error-1'
+        failed['error_type'] = 'upstream_body_error'
+        if not codex:
+            failed['actual_usage'] = {'input_tokens': 1, 'output_tokens': 0}
+            failed['usage'].append({'source': 'provider_reported', 'input_tokens': 1, 'output_tokens': 0})
+        args[4][0]['state'] = 'incomplete'
+        args[4][1]['state'] = 'complete'
+        return args
+
+    def validate(self, args):
+        validate_error_recovery(*args, interrupted=True, upstream_request_id='fixture-error-1')
+
+    def test_partial_stream_and_new_request_complete(self):
+        for codex in (False, True):
+            self.validate(self.sample(codex))
+
+    def test_headers_alone_are_not_started_generation(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            opening = args[1][0].split('\n\n')[0] + '\n\n'
+            args[0][0]['provider_response'] = opening
+            args[1] = [opening]
+            with self.assertRaises(RuntimeError):
+                self.validate(args)
+
+    def test_completed_stream_is_not_an_interruption(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            args[0][0]['provider_response'] = args[2]
+            args[1] = [args[2]]
+            with self.assertRaises(RuntimeError):
+                self.validate(args)
+
+    def test_interruption_must_leave_incomplete_capture(self):
+        args = self.sample(True)
+        args[4][0]['state'] = 'complete'
+        with self.assertRaises(RuntimeError):
+            self.validate(args)
+
+    def test_failure_reason_cannot_be_missing(self):
+        args = self.sample(True)
+        args[3][0]['error_type'] = None
+        with self.assertRaises(RuntimeError):
+            self.validate(args)
+
+    def test_started_failure_cannot_be_cancelled(self):
+        args = self.sample(True)
+        args[3][0]['status'] = 'cancelled'
+        with self.assertRaises(RuntimeError):
+            self.validate(args)
+
+    def test_known_partial_usage_cannot_disappear(self):
+        args = self.sample(False)
+        args[3][0]['usage'].pop()
+        with self.assertRaises(RuntimeError):
+            self.validate(args)
+
+    def test_unknown_usage_cannot_be_invented(self):
+        args = self.sample(True)
+        args[3][0]['usage'].append({'source': 'provider_reported', 'input_tokens': 1, 'output_tokens': 0})
+        with self.assertRaises(RuntimeError):
+            self.validate(args)
+
+
 class PassthroughStreamTest(unittest.TestCase):
     stream = 'event: message_start\ndata: {"text":"keepalive"}\n\nevent: message_stop\ndata: {}\n\n'
 

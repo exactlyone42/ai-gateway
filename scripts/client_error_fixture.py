@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 
 
 def handler(base):
@@ -12,6 +13,8 @@ def handler(base):
         auth_recovery = False
         recovered = False
         recovery_requests = 0
+        stream_failure = False
+        error_request_ids = []
 
         def do_POST(self):
             if self.path.startswith('/v1/messages/count_tokens'):
@@ -32,8 +35,30 @@ def handler(base):
             if cls.success_control:
                 name = 'openai-response.sse' if codex else 'anthropic-response.sse'
                 return self._send(200, 'text/event-stream', (self.fixture_dir / name).read_bytes())
-            kind = 'authentication_error' if cls.auth_recovery else 'invalid_request_error'
             request_id = 'fixture-error-' + str(cls.error_requests)
+            cls.error_request_ids.append(request_id)
+            if cls.stream_failure:
+                if not body.get('stream'):
+                    return self._send(422, 'application/json', b'{"error":"stream_required"}')
+                name = 'openai-response.sse' if codex else 'anthropic-response.sse'
+                parts = (self.fixture_dir / name).read_text().split('\n\n')
+                opening = '\n\n'.join(parts[:4 if codex else 3]) + '\n\n'
+                opening = opening.replace('W06_CODEX_OK', cls.error_marker).replace('W05_CLAUDE_CODE_OK', cls.error_marker)
+                payload = opening.encode()
+                cls.error_payloads.append(opening)
+                self.send_response(200)
+                self.send_header('content-type', 'text/event-stream')
+                self.send_header('content-length', str(len(payload) + 64))
+                self.send_header('connection', 'close')
+                self.send_header('x-should-retry', 'false')
+                self.send_header('request-id', request_id)
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                time.sleep(0.25)
+                self.close_connection = True
+                return
+            kind = 'authentication_error' if cls.auth_recovery else 'invalid_request_error'
             payload = json.dumps({'type': 'error', 'error': {'type': kind, 'code': kind, 'message': cls.error_marker + ':' + str(cls.error_requests)}, 'request_id': request_id}).encode()
             cls.error_payloads.append(payload.decode())
             if cls.auth_recovery:

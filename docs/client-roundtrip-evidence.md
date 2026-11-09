@@ -1,5 +1,17 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-09 R1-S4 部分輸出後斷線
+
+同一既有執行檔 `r1s4auth-d251c59-unlock`，原 Claude 2.1.319 與 Codex 0.166.0 各收到部分文字後，由假供應商提前關閉連線，不送完成或錯誤事件。兩個 Client 均退出 1、只有一次上游請求；再另發新請求，各一次成功、退出 0，共四項通過。本輪只補驗收器及使用設定，沒有改正式請求程式或 Client 執行檔。
+
+Claude 原設定共送六次且逾時；只設 `CLAUDE_CODE_MAX_RETRIES=0` 仍有四次，包含改發非串流。須再設 `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` 才通過一次上限，使用範例已補齊。兩設定分別依 [官方重試說明](https://code.claude.com/docs/en/errors#tune-retry-behavior) 與 [環境設定](https://code.claude.com/docs/en/env-vars)；Gateway 模型清單中的零重試欄位不足以證明 Claude 不重送。Codex 沿用 S1 的零一般重試及零串流重試設定。上述設定只用於隔離 Client，未改使用者預設。
+
+每個 Client 都有兩筆不同入口與保存：首筆不完整、失敗原因為上游內容傳輸錯誤；後筆完整、成功。Claude 已收到供應商回報的輸入 1／輸出 0，仍照實保留；Codex 尚無供應商用量，只有估算，不能將實際用量欄位的零當成確知免費。恢復請求各回報輸入 1／輸出 1。兩側原始內容、失敗編號與帳本逐筆相符，日誌、資料庫及加密檔的測試明文掃描通過；不要求原 Client 一定把部分文字顯示在畫面上。
+
+既有驗收器加入 `--check-error --check-stream-failure --check-capture`，兩個 Client 分別使用新建且名稱以 `gateway_client_identity_validation_` 開頭的本機隔離庫，設定 `CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION=1`，透過既有臨時服務工具登記。每個 Client 上限 30 秒，保存最多等 50 秒；沿用前輪認證拒絕的固定執行檔與版本。`--control-error-as-success` 使來源回完整成功串流，驗收確實拒絕退出 0 的假錯誤；八項新保存測試另拒絕未開始、已完成、狀態錯誤、遺失或虛構用量，保存驗證共 69 項通過。
+
+原件與失敗對照：`/home/cash/.local/state/ai-gateway/r1-s4-stream-interruption-20261109`。來源為可控假供應商，不證明真實供應商、實際工具執行或長串流取消正常。其餘 429／5xx／逾時、S2 格式、S3／S5、R2／R3 與舊範圍仍未驗，S4 維持驗證中；未合 main 或部署。完整檢查與推送狀態以該處 summary.json 為準。
+
 ## 2026-11-09 R1-S4 上游認證拒絕後恢復
 
 Gateway 原本丟掉上游的 `x-should-retry` 提示，原 Claude 經固定 401 來源共送六次並逾時。現在兩種協定都保留上游原值；兩項 HTTP 路由測試先失敗、修改後通過，既有狀態碼、原始內容與重試等待時間仍相符。
