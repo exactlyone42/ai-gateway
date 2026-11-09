@@ -3,6 +3,7 @@
   "task": "gateway-completion",
   "project": "/home/cash/work_space/private/agent-pool-gateway-completion",
   "steps": {
+    "R2-S4": {"kind": "internal", "reason": "沿既有撤權與來源鎖/輪替/配額，以隔離HTTP驗競爭及實際結帳，只新增驗收器與證據；無新正式程式行為，R3及同版發布仍未完成，原交付點保留"},
     "R2-S3": {"kind": "internal", "reason": "用既有管理/身分/政策/憑證驗兩隔離租戶與角色，只新增HTTP驗收器、無正式程式行為變更；競態、保存與同版發布未完成，原交付點不變"},
     "R2-S2": {"kind": "internal", "reason": "用既有管理API及本人訂閱驗原Codex首次使用、歸屬及拒絕，僅驗收器零重試設定、沒有新正式程式行為；R2隔離競態、R3及同版發布仍未完成，既有交付點不變"},
     "R2-S1": {"kind": "internal", "reason": "核對既有本人與群組憑證選擇規則，補隔離HTTP驗收器及必要反例；沒有正式程式變更或可上線新功能，原Client/真本人憑證、安全與發布仍須R2-S2至S5及R3，既有交付點不變"},

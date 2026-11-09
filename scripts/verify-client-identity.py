@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--check-local', action='store_true')
     parser.add_argument('--check-access-matrix', action='store_true')
     parser.add_argument('--check-tenant-access', action='store_true')
+    parser.add_argument('--check-access-race', action='store_true')
+    parser.add_argument('--control-quota-double-admit', action='store_true')
     parser.add_argument('--control-tenant-admin-as-viewer', action='store_true')
     parser.add_argument('--control-access-foreign-source', action='store_true')
     parser.add_argument('--check-owned-tools', action='store_true')
@@ -54,10 +56,14 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
-    if args.check_access_matrix and any((args.check_tenant_access, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+    if args.check_access_matrix and any((args.check_tenant_access, args.check_access_race, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
         parser.error('權限矩陣與原Client及其他模式分開驗收')
-    if args.check_tenant_access and any((live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+    if args.check_tenant_access and any((args.check_access_race, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
         parser.error('租戶角色矩陣與原Client及其他模式分開驗收')
+    if args.check_access_race and any((live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+        parser.error('權限競態與原Client及其他模式分開驗收')
+    if args.control_quota_double_admit and not args.check_access_race:
+        parser.error('雙重核發反例僅供權限競態驗收')
     if args.control_tenant_admin_as_viewer and not args.check_tenant_access:
         parser.error('角色反例僅供租戶角色矩陣')
     if args.control_access_foreign_source and not args.check_access_matrix:
@@ -148,6 +154,8 @@ def main():
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
     if args.check_tenant_access:
         fixture = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['handler'](fixture)
+    if args.check_access_race:
+        fixture = runpy.run_path(str(root / 'scripts/client_access_race.py'))['handler'](fixture)
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
     if args.check_slow_reader:
@@ -211,7 +219,7 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
-    if args.check_access_matrix or args.check_tenant_access:
+    if args.check_access_matrix or args.check_tenant_access or args.check_access_race:
         environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
         fixture.provider_credentials.add('fixture-tenant-api')
     if args.check_tenant_access:
@@ -286,6 +294,14 @@ def main():
             activate('policies', policy)
             if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_access_race:
+            print(f'權限競態證據：{runtime}', flush=True)
+            race_users = {name: (*value, credential_versions[name][0]) for name, value in users.items()}
+            verify = runpy.run_path(str(root / 'scripts/client_access_race.py'))['verify']
+            rows, phases = verify(api, create, activate, race_users, provider, fixture, runtime, admin, codex, args.control_quota_double_admit)
+            print(f'權限競態通過{len(rows)}項；證據：{runtime}')
+            return
 
         if args.check_tenant_access:
             print(f'租戶角色矩陣證據：{runtime}', flush=True)
@@ -765,6 +781,10 @@ def main():
                 (runtime / 'failure-capture-error.txt').write_text(type(error).__name__)
         raise
     finally:
+        if args.check_access_race:
+            fixture.release_headers.set()
+            fixture.release_body.set()
+            (runtime / 'access-race-source.json').write_text(json.dumps({'upstream_calls': len(fixture.captured_requests), 'observations': fixture.captured_requests}, indent=2))
         if args.check_long_stream:
             fixture.stop_stream.set()
             (runtime / 'long-stream-result.json').write_text(json.dumps({'elapsed_seconds': fixture.elapsed_seconds, 'upstream_requests': fixture.cancel_requests, 'emitted_stream': fixture.emitted_stream}, indent=2))
