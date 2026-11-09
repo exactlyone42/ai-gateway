@@ -598,11 +598,25 @@ impl Ledger {
                     completed_at: Utc::now(),
                 });
                 let payload = serde_json::to_value([failure]).map_err(LedgerError::Json)?;
-                sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
-                    .execute(&self.inner.pool)
-                    .await
-                    .map_err(LedgerError::Database)?;
-                drop(backup_guard);
+                let pool = self.inner.pool.clone();
+                let pending = PendingFinalization::new(self.clone());
+                tokio::spawn(async move {
+                    let _pending = pending;
+                    let _guard = backup_guard;
+                    sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
+                        .execute(&pool)
+                        .await
+                        .map_err(|error| {
+                            tracing::error!(
+                                error.type = "ledger_capacity_reconciliation_failed",
+                                exception.message = %error,
+                                "帳本滿容量的結帳補記失敗"
+                            );
+                            LedgerError::Database(error)
+                        })
+                })
+                .await
+                .map_err(LedgerError::Worker)??;
                 return Err(LedgerError::SpoolFull);
             }
             result => result?,
@@ -2751,6 +2765,159 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), ledger.wait_for_idle())
             .await
             .unwrap();
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
+    }
+
+    #[sqlx::test]
+    async fn cancelled_capacity_reconciliation_retains_backup_guard(pool: Pool<Postgres>) {
+        let directory = test_directory("cancelled-capacity");
+        let ledger = Ledger::open_coordinated(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+            Some(directory.clone()),
+        )
+        .unwrap();
+        let occupied = RequestEnvelope::started(request_start("occupied-capacity"));
+        ledger
+            .inner
+            .spool
+            .reserve(occupied.request.id, &occupied)
+            .unwrap();
+        drop(crate::capture_backup_barrier::try_exclusive(&directory).unwrap());
+        let start = request_start("cancelled-capacity-fixture");
+        let tenant = start.principal.tenant_id;
+        let gateway_id = Uuid::new_v4();
+        let reservation_id = Uuid::new_v4();
+        sqlx::query_file!(
+            "queries/test_insert_partial_conflict_reservation.sql",
+            reservation_id,
+            tenant,
+            gateway_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut blocker = pool.begin().await.unwrap();
+        let locked = sqlx::query_file!("queries/test_lock_usage_tenant.sql", tenant)
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let worker = ledger.clone();
+        let request = tokio::spawn(async move {
+            worker
+                .reserve_with_quota(
+                    start,
+                    Some(gateway_id),
+                    Some(RequestQuotaSnapshot {
+                        reservation_id: Some(reservation_id),
+                        decision: serde_json::json!({}),
+                        requires_cost: false,
+                    }),
+                    None,
+                    Some(("responses", None, None)),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let waiting = sqlx::query_file!("queries/test_waiting_usage_ingest.sql", locked.pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(waiting.waiting);
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_err());
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        let pending_after_abort = ledger.pending_finalizations();
+        let backup_blocked = crate::capture_backup_barrier::try_exclusive(&directory).is_err();
+        let drain_waited = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ledger.wait_for_finalizations(),
+        )
+        .await
+        .is_err();
+        blocker.rollback().await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ledger.wait_for_finalizations(),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let evidence = sqlx::query_file!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .evidence;
+        let counts = sqlx::query_file!("queries/test_usage_replay_counts.sql", gateway_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let status = sqlx::query_file_scalar!(
+            "queries/test_cancelled_ledger_status.sql",
+            tenant,
+            "cancelled-capacity-fixture"
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        println!(
+            "capacity cancellation: pending={pending_after_abort} backup_blocked={backup_blocked} drain_waited={drain_waited} evidence={evidence} requests={} attempts={} usage={} status={status:?}",
+            counts.requests, counts.attempts, counts.usage
+        );
+        assert_eq!(pending_after_abort, 1);
+        assert!(backup_blocked);
+        assert!(drain_waited);
+        assert_eq!(evidence["state"], "reconciled");
+        assert_eq!(evidence["actual_tokens"], 0);
+        assert_eq!(evidence["events"], 1);
+        assert_eq!((counts.requests, counts.attempts, counts.usage), (1, 0, 0));
+        assert_eq!(status.as_deref(), Some("failed"));
+        assert_eq!(ledger.pending_finalizations(), 0);
+        assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
+    }
+
+    #[sqlx::test]
+    async fn failed_capacity_reconciliation_releases_backup_guard(pool: Pool<Postgres>) {
+        let directory = test_directory("failed-capacity");
+        let ledger = Ledger::open_coordinated(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+            Some(directory.clone()),
+        )
+        .unwrap();
+        let occupied = RequestEnvelope::started(request_start("occupied-capacity"));
+        ledger
+            .inner
+            .spool
+            .reserve(occupied.request.id, &occupied)
+            .unwrap();
+        pool.close().await;
+        let result = ledger
+            .reserve_with_quota(
+                request_start("failed-capacity-fixture"),
+                Some(Uuid::new_v4()),
+                Some(RequestQuotaSnapshot {
+                    reservation_id: Some(Uuid::new_v4()),
+                    decision: serde_json::json!({}),
+                    requires_cost: false,
+                }),
+                None,
+                Some(("messages", None, None)),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(LedgerError::Database(sqlx::Error::PoolClosed))
+        ));
+        assert_eq!(ledger.pending_finalizations(), 0);
         assert!(crate::capture_backup_barrier::try_exclusive(&directory).is_ok());
     }
 
