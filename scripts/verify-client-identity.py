@@ -37,6 +37,7 @@ def main():
     parser.add_argument('--check-tools', action='store_true')
     parser.add_argument('--control-wrong-tool-result', action='store_true')
     parser.add_argument('--check-cancel', action='store_true')
+    parser.add_argument('--check-long-stream', action='store_true')
     parser.add_argument('--check-capture', action='store_true')
     parser.add_argument('--check-error', action='store_true')
     parser.add_argument('--check-auth-recovery', action='store_true')
@@ -46,6 +47,8 @@ def main():
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
     recovery_mode = args.check_auth_recovery or args.check_stream_failure
+    if args.check_long_stream and (not args.check_capture or any((args.check_local, args.check_codex_held, args.check_tools, args.check_cancel, args.check_error, args.check_compact))):
+        parser.error('長串流必須搭配保存驗收，且與其他模式分開')
     if recovery_mode and not (args.check_error and args.check_capture):
         parser.error('認證或串流恢復驗收必須搭配 --check-error 與 --check-capture')
     if args.check_auth_recovery and args.check_stream_failure:
@@ -76,7 +79,7 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or live_source):
+    if args.check_capture and not (args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
         if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
@@ -117,8 +120,10 @@ def main():
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
-    if args.check_cancel:
+    if args.check_cancel or args.check_long_stream:
         fixture = runpy.run_path(str(root / 'scripts/client_cancel_fixture.py'))['handler'](fixture)
+        if args.check_long_stream:
+            fixture.stream_seconds = 660
     if args.check_error:
         fixture = runpy.run_path(str(root / 'scripts/client_error_fixture.py'))['handler'](fixture)
         fixture.success_control = args.control_error_as_success
@@ -198,7 +203,7 @@ def main():
         return json.loads(raw) if raw else None
 
     log = (runtime / 'gateway.log').open('wb')
-    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '1500s' if args.check_local and args.check_owned_tools else '900s' if args.check_local else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '1500s' if args.check_local and args.check_owned_tools else '900s' if args.check_local or args.check_long_stream else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
     try:
         time.sleep(2)
         if gateway.poll() is not None:
@@ -256,7 +261,7 @@ def main():
             if codex:
                 reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                if args.check_local or recovery_mode:
+                if args.check_local or recovery_mode or args.check_long_stream:
                     with (home / 'config.toml').open('a') as config:
                         config.write('stream_max_retries = 0\nrequest_max_retries = 0\nstream_idle_timeout_ms = 600000\n')
                 if args.check_compact:
@@ -278,9 +283,12 @@ def main():
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                     'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
                 }
-                if args.check_stream_failure:
+                if args.check_stream_failure or args.check_long_stream:
                     client_environment['CLAUDE_CODE_MAX_RETRIES'] = '0'
                     client_environment['CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK'] = '1'
+                if args.check_long_stream:
+                    client_environment['CLAUDE_STREAM_IDLE_TIMEOUT_MS'] = '600000'
+                    client_environment['CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS'] = '600000'
                 if args.check_compact:
                     client_environment['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'] = '1'
                     client_environment['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = '100000'
@@ -319,7 +327,7 @@ def main():
                             os.killpg(process.pid, signal.SIGKILL)
                             process.wait()
             else:
-                result = subprocess.run(['timeout', '--kill-after=5s', '600s' if args.check_local and success else '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=610 if args.check_local and success else 40)
+                result = subprocess.run(['timeout', '--kill-after=5s', '780s' if args.check_long_stream else '600s' if args.check_local and success else '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=790 if args.check_long_stream else 610 if args.check_local and success else 40)
                 if args.check_owned_tools and success:
                     initial_diagnostic = result.stdout + '\n' + result.stderr
                     for secret in fixture.client_credentials | fixture.provider_credentials:
@@ -447,6 +455,8 @@ def main():
                     for leg in ('client_request', 'provider_request'):
                         if expected_reply not in content[leg]:
                             raise RuntimeError('錯誤保存未保留原請求')
+            elif args.check_long_stream:
+                validation['validate_long_stream'](saved, fixture.emitted_stream, fixture.elapsed_seconds, expected_reply, codex)
             elif live_source:
                 if args.check_owned_compact:
                     compact = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_compact'](saved, owned_fields)
@@ -463,6 +473,8 @@ def main():
             usage_query = root / 'queries/test_client_capture_usage.sql'
             usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=usage_query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             usage_records = json.loads(usage_result.stdout)
+            if args.check_long_stream and any(row['status'] != 'completed' for row in usage_records):
+                raise RuntimeError('長串流未成功結帳')
             if args.check_error and {row['request_id'] for row in usage_records} != {request_id for check in checks for request_id in check.get('ingress_request_ids', [])}:
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
             if live_source:
@@ -544,6 +556,15 @@ def main():
             (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
             print(f'原Client上游錯誤通過；證據：{runtime}')
             return
+        if args.check_long_stream:
+            client('alice', f'{model_prefix}-alice', True, 'long-stream')
+            if fixture.cancel_requests != 1:
+                raise RuntimeError('長串流產生非預期的上游重送')
+            verify_capture()
+            checks[-1]['elapsed_seconds'] = fixture.elapsed_seconds
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            print(f'原Client長串流通過；證據：{runtime}')
+            return
         if args.check_cancel:
             client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
             if fixture.cancel_requests != 1:
@@ -559,7 +580,10 @@ def main():
                 raise RuntimeError('原Client取消未正確持久記帳：' + json.dumps(observed))
             if args.check_capture:
                 verify_capture()
-            checks[-1].update({'cancelled_by_sigint': True, 'upstream_closed': True, 'ledger': observed})
+            active = api('/health').get('active_requests')
+            if active != 0:
+                raise RuntimeError(f'取消後Gateway仍有執行中的請求：{active}')
+            checks[-1].update({'cancelled_by_sigint': True, 'upstream_closed': True, 'active_requests_after': active, 'ledger': observed})
             (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
             print(f'原Client串流取消通過；證據：{runtime}')
             return
@@ -619,6 +643,10 @@ def main():
                 (runtime / 'failure-capture-error.txt').write_text(type(error).__name__)
         raise
     finally:
+        if args.check_long_stream:
+            fixture.stop_stream.set()
+            (runtime / 'long-stream-result.json').write_text(json.dumps({'elapsed_seconds': fixture.elapsed_seconds, 'upstream_requests': fixture.cancel_requests, 'emitted_stream': fixture.emitted_stream}, indent=2))
+            print(f'長串流測試證據：{runtime}')
         if args.check_error:
             (runtime / 'error-result.json').write_text(json.dumps({'upstream_requests': fixture.error_requests, 'recovery_requests': fixture.recovery_requests, 'observations': fixture.error_observations, 'error_payloads': fixture.error_payloads}, indent=2))
             print(f'錯誤測試證據：{runtime}')

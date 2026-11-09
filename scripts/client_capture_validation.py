@@ -8,6 +8,17 @@ def validate_passthrough_stream(provider, client):
         raise RuntimeError('供應商與Client保存串流不一致')
 
 
+def validate_long_stream(saved, emitted, elapsed, expected_reply, codex):
+    if len(saved) != 1 or elapsed is None or elapsed <= 600:
+        raise RuntimeError('長串流未以單一請求跨過600秒門檻')
+    validate_passthrough_stream(emitted, saved[0]['provider_response'])
+    events = [json.loads(line[5:].lstrip()) for line in emitted.splitlines() if line.startswith('data:')]
+    completed = 'response.completed' if codex else 'message_stop'
+    text = ''.join(event['delta'] if codex else event['delta']['text'] for event in events if event.get('type') == ('response.output_text.delta' if codex else 'content_block_delta'))
+    if text != expected_reply or sum(event.get('type') == completed for event in events) != 1 or any(event.get('type') in ('error', 'response.failed', 'response.incomplete') for event in events):
+        raise RuntimeError('長串流缺少唯一完成事件或完整原回覆')
+
+
 def validate_owned_compact(saved, fields):
     if len(saved) != 3 or len(fields) != 4 or len(set(fields)) != 4:
         raise RuntimeError('真摘要驗收缺少三輪或四項不同內容')

@@ -1,5 +1,17 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-09 R1-S3 受控長串流與取消
+
+本輪沿用 `r1s4auth-d251c59-unlock` 固定執行檔，只補驗收器，未改正式請求程式、Client 執行檔或使用者預設。來源是本機可控的 Anthropic／OpenAI 串流，不冒稱指定實際模型、正式反向代理或跨機已驗收。
+
+原 Claude 2.1.319 與 Codex 0.166.0 各以一次來源請求開始串流，再收到 SIGINT 中斷訊號。兩側連線關閉，保存標為不完整、帳本為取消；Claude 已回報的輸入 1／輸出 0 保留，Codex 未收到供應商用量仍只有估算，不把實際欄位的零當免費。另補取消後 Gateway 執行中請求必須歸零，兩 Client 已用新隔離庫重驗均為 0；這不證明實際模型的推理工作已停止。強制以 SIGKILL 結束 Claude 的反例退出 -9，確實被拒絕，不能冒充正常取消。沿用 `--check-cancel --check-capture`；反例另加 `--control-force-client-kill`。
+
+長串流模式為 `--check-long-stream --check-capture`，固定真實 660 秒逐字傳送，不能由命令參數縮短。Claude 的閒置與首筆等待、Codex 的串流閒置均在隔離設定設為 600000 毫秒；兩種 Client 均停用自動重送。依 [Claude 官方等待設定](https://code.claude.com/docs/en/env-vars) 及 [Codex 官方設定](https://learn.chatgpt.com/docs/config-file/config-reference)，這些是等待不到新資料的限制；660 秒總長不等於能容忍 660 秒完全無資料。這裡每個字相隔約 41 或 60 秒，Gateway 也保留自己的保活訊息。
+
+驗收必須同時有真實首尾時間超過 600 秒、唯一來源請求、原 Client 完整預期文字與退出 0、唯一完成事件、完整加密保存與成功用量；不能只憑等候時間或保活判成功。兩原 Client 實際各持續 660 秒、一次入口及上游、退出 0，保存完整且供應商用量各輸入 1／輸出 1，長串流兩項通過。保存驗證新增五項，共 74 項通過；短完整回覆、長時間截斷、錯字及重複完成的四項斷言在補強前確實失敗。完整檢查及推送狀態，以 `/home/cash/.local/state/ai-gateway/r1-s3-stream-cancel-20261109/summary.json` 最終原件為準。
+
+每個模式與 Client 都使用新建的本機 `gateway_client_identity_validation_` 隔離庫、明確寫入旗標及臨時服務登記；原 Client 長串流上限 780 秒、Gateway 900 秒，失敗不盲重送、不清庫。S3 維持驗證中：指定實際模型取消、慢讀取有界記憶體與資源釋放仍需證據；S2 格式、S4 其餘故障、S5、R2／R3 與舊範圍保留，未合 main 或部署。獨立程式審查 100 秒逾時無報告，不稱已獨立通過。
+
 ## 2026-11-09 R1-S4 部分輸出後斷線
 
 同一既有執行檔 `r1s4auth-d251c59-unlock`，原 Claude 2.1.319 與 Codex 0.166.0 各收到部分文字後，由假供應商提前關閉連線，不送完成或錯誤事件。兩個 Client 均退出 1、只有一次上游請求；再另發新請求，各一次成功、退出 0，共四項通過。本輪只補驗收器及使用設定，沒有改正式請求程式或 Client 執行檔。

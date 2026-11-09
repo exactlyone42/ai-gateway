@@ -3,8 +3,47 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery, validate_long_stream
 from pathlib import Path
+
+
+class LongStreamTest(unittest.TestCase):
+    def sample(self, codex):
+        name = 'openai-response.sse' if codex else 'anthropic-response.sse'
+        stream = (Path(__file__).resolve().parent.parent / 'tests/fixtures/client-roundtrip' / name).read_text()
+        return [[{'provider_response': stream}], stream, 660, 'W06_CODEX_OK' if codex else 'W05_CLAUDE_CODE_OK', codex]
+
+    def test_complete_stream_beyond_real_timeout(self):
+        for codex in (False, True):
+            validate_long_stream(*self.sample(codex))
+
+    def test_short_complete_reply_cannot_be_long_stream(self):
+        args = self.sample(True)
+        args[2] = 599
+        with self.assertRaises(RuntimeError):
+            validate_long_stream(*args)
+
+    def test_delayed_partial_reply_cannot_be_complete(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            stream = '\n\n'.join(args[1].split('\n\n')[:4 if codex else 3]) + '\n\n'
+            args[0][0]['provider_response'] = stream
+            args[1] = stream
+            with self.assertRaises(RuntimeError):
+                validate_long_stream(*args)
+
+    def test_wrong_text_cannot_finish(self):
+        args = self.sample(True)
+        args[3] = 'wrong'
+        with self.assertRaises(RuntimeError):
+            validate_long_stream(*args)
+
+    def test_multiple_completions_cannot_pass(self):
+        args = self.sample(True)
+        args[1] += args[1]
+        args[0][0]['provider_response'] = args[1]
+        with self.assertRaises(RuntimeError):
+            validate_long_stream(*args)
 
 
 class ErrorRecoveryTest(unittest.TestCase):
