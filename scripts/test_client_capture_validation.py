@@ -2,9 +2,72 @@ import copy
 import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from scripts.client_local_cancel import slots
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery, validate_long_stream
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery, validate_long_stream, validate_owned_cancel
 from pathlib import Path
+
+
+class OwnedCancelTest(unittest.TestCase):
+    def test_idle_runner_empty_token_list_is_supported(self):
+        for token in ([], {'n_decoded': 8}, [{'n_decoded': 8}]):
+            row = {'id': 0, 'id_task': 23, 'is_processing': bool(token), 'next_token': token}
+            with patch('scripts.client_local_cancel.request_json', return_value=[row]):
+                self.assertEqual(slots({'port': 1})['n_decoded'], 8 if token else 0)
+
+    def sample(self, codex):
+        args = StreamFailureRecoveryTest().sample(codex)
+        content = args[0][0]
+        content['client_response'] = content['provider_response']
+        content['client_request'] = json.dumps({'model': 'public', 'input': 'cancel-marker'})
+        content['provider_request'] = json.dumps({'model': 'qwen', 'input': 'cancel-marker'})
+        args[3][0]['status'] = 'cancelled'
+        args[3][0].update({'model': 'qwen', 'provider': 'local-ollama'})
+        proof = {'during': {'is_processing': True, 'n_decoded': 8}, 'after': {'is_processing': False}, 'stop_seconds': 0.2}
+        return [[content], args[3][:1], args[4][:1], 'qwen', 'cancel-marker', proof, codex]
+
+    def test_real_partial_usage_and_stopped_inference(self):
+        for codex in (False, True):
+            validate_owned_cancel(*self.sample(codex))
+
+    def test_backend_must_have_started_and_stopped(self):
+        for field in ('during', 'after'):
+            args = self.sample(True)
+            args[5][field]['is_processing'] = field == 'after'
+            with self.assertRaises(RuntimeError):
+                validate_owned_cancel(*args)
+
+    def test_partial_text_and_no_terminal_are_required(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            args[0][0]['provider_response'] = args[0][0]['provider_response'].split('\n\n')[0] + '\n\n'
+            args[0][0]['client_response'] = args[0][0]['provider_response']
+            with self.assertRaises(RuntimeError):
+                validate_owned_cancel(*args)
+
+    def test_wrong_model_and_missing_input_rejected(self):
+        for index, value in ((3, 'wrong-model'), (4, 'missing-marker')):
+            args = self.sample(True)
+            args[index] = value
+            with self.assertRaises(RuntimeError):
+                validate_owned_cancel(*args)
+
+    def test_completed_accounting_is_not_cancelled(self):
+        args = self.sample(True)
+        args[1][0]['status'] = 'completed'
+        with self.assertRaises(RuntimeError):
+            validate_owned_cancel(*args)
+
+    def test_reported_usage_must_not_be_lost_or_invented(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            if codex:
+                args[1][0]['usage'].append({'source': 'provider_reported', 'input_tokens': 2, 'output_tokens': 1})
+            else:
+                args[1][0]['usage'].pop()
+            with self.assertRaises(RuntimeError):
+                validate_owned_cancel(*args)
 
 
 class LongStreamTest(unittest.TestCase):

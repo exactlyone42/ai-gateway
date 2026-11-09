@@ -19,6 +19,44 @@ def validate_long_stream(saved, emitted, elapsed, expected_reply, codex):
         raise RuntimeError('長串流缺少唯一完成事件或完整原回覆')
 
 
+def validate_owned_cancel(saved, usage_records, records, model, marker, proof, codex):
+    if len(saved) != 1 or len(records) != 1 or len(usage_records) != 1 or records[0].get('state') != 'incomplete':
+        raise RuntimeError('本人來源取消缺少唯一不完整保存')
+    row = usage_records[0]
+    if row['id'] != records[0]['capture_id'] or row['status'] != 'cancelled' or row.get('model') != model or row.get('provider') != 'local-ollama':
+        raise RuntimeError('本人來源取消的模型或帳本狀態不符')
+    if not proof.get('during', {}).get('is_processing') or proof['during'].get('n_decoded', 0) < 8 or proof.get('after', {}).get('is_processing') is not False or not 0 <= proof.get('stop_seconds', -1) <= 10:
+        raise RuntimeError('缺少實際推理開始及取消後停止的證據')
+    for leg in ('client_request', 'provider_request'):
+        if not marker or marker not in saved[0][leg]:
+            raise RuntimeError('本人來源取消保存缺少原指令')
+    if json.loads(saved[0]['provider_request']).get('model') != model:
+        raise RuntimeError('本人來源取消未送到指定模型')
+    validate_passthrough_stream(saved[0]['provider_response'], saved[0]['client_response'])
+    events = [json.loads(line[5:].lstrip()) for line in saved[0]['provider_response'].splitlines() if line.startswith('data:')]
+    text = [event.get('delta') if codex else (event.get('delta') or {}).get('text') for event in events if event.get('type') == ('response.output_text.delta' if codex else 'content_block_delta')]
+    if not any(isinstance(value, str) and value for value in text) or any(event.get('type') in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete', 'error') for event in events):
+        raise RuntimeError('本人來源取消沒有部分文字或已經結束')
+    native = {}
+    for event in events:
+        fragment = (event.get('response') or {}).get('usage') if codex else (event.get('message') or {}).get('usage') if event.get('type') == 'message_start' else event.get('usage')
+        if fragment:
+            native.update(fragment)
+    expected = {'input_tokens': native.get('input_tokens', 0), 'output_tokens': native.get('output_tokens', 0), 'cached_input_tokens': (native.get('input_tokens_details') or {}).get('cached_tokens', 0) if codex else native.get('cache_read_input_tokens', 0), 'cache_write_input_tokens': (native.get('input_tokens_details') or {}).get('cache_write_tokens', 0) if codex else native.get('cache_creation_input_tokens', 0), 'reasoning_tokens': (native.get('output_tokens_details') or {}).get('reasoning_tokens', 0) if codex else 0}
+    if codex:
+        expected['input_tokens'] -= expected['cached_input_tokens'] + expected['cache_write_input_tokens']
+        expected['output_tokens'] -= expected['reasoning_tokens']
+    reported = [item for item in row['usage'] or [] if item['source'] == 'provider_reported']
+    if any(expected.values()):
+        if len(reported) != 1 or any(actual.get(key, 0) != value for actual in (row['actual_usage'], reported[0]) for key, value in expected.items()):
+            raise RuntimeError('本人來源取消遺失或改寫已回報用量')
+    elif reported or any(row['actual_usage'].values()):
+        raise RuntimeError('本人來源取消尚無回報用量卻虛構實際值')
+    estimates = [item for item in row['usage'] or [] if item['source'] == 'estimated']
+    if len(estimates) != 1 or row['estimated_usage'].get('input_tokens', 0) <= 0 or any(estimates[0][key] != row['estimated_usage'].get(key, 0) for key in ('input_tokens', 'output_tokens')):
+        raise RuntimeError('本人來源取消未保留獨立估算')
+
+
 def validate_owned_compact(saved, fields):
     if len(saved) != 3 or len(fields) != 4 or len(set(fields)) != 4:
         raise RuntimeError('真摘要驗收缺少三輪或四項不同內容')

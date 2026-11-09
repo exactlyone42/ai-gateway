@@ -46,6 +46,7 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
+    owned_cancel = args.check_local and args.check_cancel
     recovery_mode = args.check_auth_recovery or args.check_stream_failure
     if args.check_long_stream and (not args.check_capture or any((args.check_local, args.check_codex_held, args.check_tools, args.check_cancel, args.check_error, args.check_compact))):
         parser.error('長串流必須搭配保存驗收，且與其他模式分開')
@@ -53,8 +54,10 @@ def main():
         parser.error('認證或串流恢復驗收必須搭配 --check-error 與 --check-capture')
     if args.check_auth_recovery and args.check_stream_failure:
         parser.error('認證拒絕與串流中斷必須分開驗收')
-    if args.check_local and (args.check_codex_held or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_cancel, args.check_error))):
+    if args.check_local and (args.check_codex_held or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_error))):
         parser.error('local source requires a source model separately from fixture and subscription modes')
+    if owned_cancel and (not args.check_capture or args.check_owned_tools):
+        parser.error('實際模型取消必須驗保存，且與工具模式分開')
     if args.check_owned_compact and (not (args.check_codex_held and args.check_capture) or args.check_owned_tools):
         parser.error('owned compact requires owned source and capture, separately from tools')
     if args.check_owned_tools and not (live_source and args.check_capture):
@@ -183,6 +186,8 @@ def main():
     if args.check_local:
         environment['EXTRA_PROVIDER_PROFILES_JSON'] = json.dumps([{'kind': 'ollama', 'credential_ref': 'env://LOCAL_OLLAMA', 'provider_key': provider_key, 'base_url': 'http://127.0.0.1:11434', 'operations': [operation]}])
     checks = []
+    if owned_cancel:
+        cancel_marker = 'owned-cancel-' + uuid.uuid4().hex
 
     def api(path, method='GET', body=None, token=None, expected=200, raw_response=False):
         headers = {'x-request-id': str(uuid.uuid4())}
@@ -203,7 +208,7 @@ def main():
         return json.loads(raw) if raw else None
 
     log = (runtime / 'gateway.log').open('wb')
-    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '1500s' if args.check_local and args.check_owned_tools else '900s' if args.check_local or args.check_long_stream else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '1500s' if owned_cancel or (args.check_local and args.check_owned_tools) else '900s' if args.check_local or args.check_long_stream else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
     try:
         time.sleep(2)
         if gateway.poll() is not None:
@@ -258,6 +263,8 @@ def main():
             home = runtime / label
             home.mkdir()
             prompt = tool_prompt or f'Reply with exactly {expected_reply} and nothing else.'
+            if cancel and owned_cancel:
+                prompt = f'Test marker {cancel_marker}. Write every integer from 1 to 1000000 in order, separated by spaces. Start with 1 now and keep going. Do not use tools or explain.'
             if codex:
                 reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
@@ -283,7 +290,7 @@ def main():
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                     'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
                 }
-                if args.check_stream_failure or args.check_long_stream:
+                if args.check_stream_failure or args.check_long_stream or owned_cancel:
                     client_environment['CLAUDE_CODE_MAX_RETRIES'] = '0'
                     client_environment['CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK'] = '1'
                 if args.check_long_stream:
@@ -292,7 +299,12 @@ def main():
                 if args.check_compact:
                     client_environment['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'] = '1'
                     client_environment['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = '100000'
-            if cancel:
+                if owned_cancel and cancel:
+                    command[1:1] = ['--output-format', 'stream-json', '--verbose', '--include-partial-messages']
+            if cancel and owned_cancel:
+                result, fixture.local_cancel_proof = runpy.run_path(str(root / 'scripts/client_local_cancel.py'))['run'](command, client_environment, runtime, home, args.source_model, codex, args.control_force_client_kill)
+                fixture.client_exit = result.returncode
+            elif cancel:
                 process = subprocess.Popen(command, env=client_environment, cwd=runtime, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
                 try:
                     if not fixture.stream_started.wait(10):
@@ -376,7 +388,7 @@ def main():
             if not cancel:
                 (home / 'client-result.json').write_text(json.dumps({'exit': result.returncode, 'expected_success': success and not error, 'expected_reply_matches': result.stdout.strip() == expected_reply}, indent=2))
             if live_source:
-                if success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
+                if not cancel and success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
                     raise RuntimeError(f'{label}: 原{args.client}未完成來源實送，紀錄位於{runtime}')
                 if not success and (result.returncode != 1 or result.stdout.strip() == expected_reply):
                     raise RuntimeError(f'{label}: 原{args.client}未正常退出拒絕，退出碼{result.returncode}')
@@ -415,7 +427,7 @@ def main():
 
         def verify_capture():
             validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
-            markers = owned_fields if args.check_owned_compact else [owned_value, expected_reply] if args.check_owned_tools else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            markers = [cancel_marker, expected_reply] if owned_cancel else owned_fields if args.check_owned_compact else [owned_value, expected_reply] if args.check_owned_tools else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -426,11 +438,13 @@ def main():
             count = 3 if args.check_owned_compact or args.check_owned_tools else fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
             if recovery_mode:
                 count += fixture.recovery_requests
+            if owned_cancel:
+                count = 2
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
                 records = json.loads(result.stdout)
-                states = ['incomplete', 'complete'] if args.check_stream_failure else [expected_state] * count
+                states = ['incomplete', 'complete'] if args.check_stream_failure or owned_cancel else [expected_state] * count
                 if len(records) == count and [record['state'] for record in records] == states:
                     break
                 time.sleep(0.2)
@@ -465,7 +479,7 @@ def main():
                     validation['validate_owned_followup'](saved, owned_value, followup_prompt, codex)
                     (runtime / 'owned-tools-result.json').write_text(json.dumps({'source_requests': len(saved), 'original_context_preserved': True, 'tool_result_preserved': True, 'second_user_instruction_preserved': True, 'followup_without_new_tools': True}, indent=2))
                 for leg in ('client_request', 'provider_request'):
-                    if not (args.check_owned_tools or args.check_owned_compact) and expected_reply not in saved[0][leg]:
+                    if not (args.check_owned_tools or args.check_owned_compact or owned_cancel) and expected_reply not in saved[0][leg]:
                         raise RuntimeError('本人來源保存缺少原請求')
             else:
                 if 'CANCEL_STREAM_PENDING' not in saved[0]['provider_response'] or 'response.completed' in saved[0]['provider_response'] or 'message_stop' in saved[0]['provider_response']:
@@ -479,7 +493,15 @@ def main():
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
             if live_source:
                 (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
-                validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
+                if owned_cancel:
+                    first = [row for row in usage_records if row['id'] == records[0]['capture_id']]
+                    second = [row for row in usage_records if row['id'] == records[1]['capture_id']]
+                    validation['validate_owned_cancel'](saved[:1], first, records[:1], args.source_model, cancel_marker, fixture.local_cancel_proof, codex)
+                    validation['validate_owned_usage'](saved[1:], second, records[1:], expected_reply, codex)
+                    if len(usage_records) != 2 or any(row['model'] != args.source_model or row['provider'] != provider_key for row in usage_records):
+                        raise RuntimeError('實際模型取消與恢復不是同一來源各一次')
+                else:
+                    validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
             elif recovery_mode:
                 name = 'openai-response.sse' if codex else 'anthropic-response.sse'
                 validation['validate_error_recovery'](saved, fixture.error_payloads, (fixture.fixture_dir / name).read_text(), usage_records, records, codex, interrupted=args.check_stream_failure, upstream_request_id=fixture.error_request_ids[0])
@@ -493,7 +515,7 @@ def main():
             (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': all(content['provider_response'] == content['client_response'] for content in saved), 'stream_events_equal': True}, indent=2))
             checks[-1]['capture_records'] = records
 
-        if live_source:
+        if live_source and not owned_cancel:
             owned_prompt = None
             if args.check_owned_compact:
                 owned_fields = [name + '-' + uuid.uuid4().hex for name in ('goal', 'decision', 'constraint', 'next')]
@@ -567,7 +589,7 @@ def main():
             return
         if args.check_cancel:
             client('alice', f'{model_prefix}-alice', True, 'stream-cancel', cancel=True)
-            if fixture.cancel_requests != 1:
+            if not owned_cancel and fixture.cancel_requests != 1:
                 raise RuntimeError('取消測試產生非預期的上游重送')
             query = root / 'queries/test_client_cancel_ledger.sql'
             for _ in range(30):
@@ -578,13 +600,20 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError('原Client取消未正確持久記帳：' + json.dumps(observed))
+            if owned_cancel:
+                if api('/health').get('active_requests') != 0:
+                    raise RuntimeError('原Client取消後Gateway仍有工作')
+                client('alice', f'{model_prefix}-alice', True, 'after-local-cancel')
             if args.check_capture:
                 verify_capture()
             active = api('/health').get('active_requests')
             if active != 0:
                 raise RuntimeError(f'取消後Gateway仍有執行中的請求：{active}')
-            checks[-1].update({'cancelled_by_sigint': True, 'upstream_closed': True, 'active_requests_after': active, 'ledger': observed})
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            checks[0].update({'cancelled_by_sigint': True, 'upstream_closed': None if owned_cancel else True, 'active_requests_after': active, 'ledger': observed})
+            if owned_cancel:
+                for check in checks:
+                    check['upstream_requests'] = 1
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'local_cancel': fixture.local_cancel_proof if owned_cancel else None, 'checks': checks, 'not_run': ['model-denied', 'gateway-key-revoked'] if owned_cancel else []}, indent=2))
             print(f'原Client串流取消通過；證據：{runtime}')
             return
         if not args.check_tools:
@@ -652,7 +681,7 @@ def main():
             print(f'錯誤測試證據：{runtime}')
         if args.check_cancel:
             fixture.stop_stream.set()
-            (runtime / 'cancel-result.json').write_text(json.dumps({'client_exit': fixture.client_exit, 'upstream_requests': fixture.cancel_requests, 'upstream_closed': fixture.peer_closed.is_set()}, indent=2))
+            (runtime / 'cancel-result.json').write_text(json.dumps(getattr(fixture, 'local_cancel_proof', {'client_exit': fixture.client_exit, 'upstream_requests': None if owned_cancel else fixture.cancel_requests, 'upstream_closed': fixture.peer_closed.is_set()}), indent=2))
             print(f'取消測試證據：{runtime}')
         if args.check_tools:
             (runtime / 'tool-result.json').write_text(json.dumps({'tool_requests': fixture.tool_requests, 'real_tool_result': fixture.tool_result_received, 'original_context_preserved': fixture.context_preserved, 'rejection': fixture.tool_rejection}, indent=2))

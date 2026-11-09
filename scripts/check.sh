@@ -330,6 +330,12 @@ case "${1:-gate}" in
   secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
   selftest)  exec ./scripts/check-selftest.sh ;;
   all|pre-push)
+    python3 - <<'PY'
+import ast
+from pathlib import Path
+for path in Path('scripts').glob('*.py'):
+    ast.parse(path.read_text(), filename=str(path))
+PY
     python3 scripts/check-migrations.py
     python3 -m unittest discover -s scripts -p "test_deploy*.py"
     python3 -m unittest scripts/test_capture_backup_gateway_flags.py
