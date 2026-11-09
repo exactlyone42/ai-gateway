@@ -175,6 +175,10 @@ exactly once under the same tenant lock as admission. Day and month boundaries
 are fixed to UTC. `recompute_quota_windows(tenant_uuid)` rebuilds counters from
 immutable reservations and reconciliation state under that lock.
 
+同批有多筆請求結帳時，先按租戶、額度、限制種類及起算時間加總調整量，再更新每個額度視窗一次。用量與成本都依各筆預留和最終實報的差額調整；重播不會再次調整，混入衝突內容時整批拒絕。
+
+`20261110000001_quota_batch_windows.sql` 修正後續入帳，不會自動改寫歷史額度。升級前已有的錯帳仍須另外核對；重建計數要沿用既有租戶鎖與 `recompute_quota_windows`，不能把原事件或驗收原件改成預期數字。這次選擇修正原入帳函數，保留外層重播檢查，避免新增另一套結帳路徑。
+
 Concurrency is a request-lifetime RAII lease. W12 deliberately supports one
 gateway process; startup holds a PostgreSQL session advisory lock and a second
 process fails before binding the listener. W19 keeps that contract: enabling
