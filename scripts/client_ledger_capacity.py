@@ -72,12 +72,19 @@ def verify(api, create, activate, users, fixture, runtime, codex, database):
         status = 'failed' if tokens == 0 else 'completed'
         if row is None or row['status'] != status:
             raise RuntimeError('帳本容量故障與恢復後紀錄不完整')
+        attempts = [attempt for attempt in final['provider_attempts'] if attempt['gateway_request_id'] == row['id']]
+        if tokens == 0:
+            if row['id'] in reservations or row['quota_reservation_id'] is not None or attempts:
+                raise RuntimeError('帳本容量不足的拒絕仍建立額度預留或送出來源')
+            checks.append({'request_id': row['id'], 'status': status, 'quota_reserved': False, 'provider_calls': 0})
+            continue
         reservation = reservations[row['id']]
         events = [event for event in final['quota_reconciliation_events'] if event['reservation_id'] == reservation['id']]
-        attempts = [attempt for attempt in final['provider_attempts'] if attempt['gateway_request_id'] == row['id']]
-        if reservation['state'] != 'reconciled' or reservation['actual_tokens'] != tokens or len(events) != 1 or events[0]['actual_tokens'] != tokens or len(attempts) != (1 if tokens else 0):
+        if reservation['state'] != 'reconciled' or reservation['actual_tokens'] != tokens or len(events) != 1 or events[0]['actual_tokens'] != tokens or len(attempts) != 1:
             raise RuntimeError('帳本容量故障後重複、漏結帳或用量不符')
         checks.append({'request_id': row['id'], 'status': status, 'actual_tokens': tokens, 'events': 1, 'attempts': len(attempts)})
+    if len(reservations) != 2 or len(final['quota_reconciliation_events']) != 2:
+        raise RuntimeError('容量拒絕前後建立了多餘預留，或正常請求漏記與重複結帳')
     if sum(row['reserved_tokens'] for row in final['quota_windows'] if row['limit_kind'] == 'tokens_per_hour') != 4:
         raise RuntimeError('帳本容量故障留下未回收的額度估量')
     (runtime / 'capacity-result.json').write_text(json.dumps({'calls': calls, 'estimate': estimate, 'quota_limit': estimate * 2, 'final_tokens': 4, 'source_calls': 2, 'checks': checks, 'scope': '同機隔離HTTP與受控來源，非原Client或真模型'}, indent=2, ensure_ascii=False))

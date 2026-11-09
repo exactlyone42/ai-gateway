@@ -574,7 +574,8 @@ impl Ledger {
         .map_err(LedgerError::Worker)?;
         let (reservation, pending) = match result {
             Err(LedgerError::SpoolFull)
-                if failure.request.quota_reservation_id.is_some()
+                if (failure.request.quota_reservation_id.is_some()
+                    || gateway_request_id.is_some())
                     && self.inner.database_writes_enabled.load(Ordering::Acquire) =>
             {
                 failure.finalized = Some(true);
@@ -764,6 +765,11 @@ impl Ledger {
                     .or_insert(0usize) += 1;
             }
         }
+        let blocked_reservations = reservations
+            .keys()
+            .chain(retained_reservations.iter())
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
         let mut ambiguous = Vec::new();
         ready.retain(|(path, envelope)| {
             let duplicate = envelope
@@ -801,17 +807,75 @@ impl Ledger {
         ready.truncate(FLUSH_BATCH_SIZE);
         let mut pending = vec![ready];
         let mut flushed = 0;
-        while let Some(batch) = pending.pop() {
+        while let Some(mut batch) = pending.pop() {
             if batch.is_empty() {
                 continue;
             }
-            let payload =
-                serde_json::to_value(batch.iter().map(|entry| &entry.1).collect::<Vec<_>>())
-                    .map_err(LedgerError::Json)?;
-            match sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
-                .execute(&self.inner.pool)
+            let result = async {
+                let payload =
+                    serde_json::to_value(batch.iter().map(|entry| &entry.1).collect::<Vec<_>>())
+                        .map_err(LedgerError::Json)?;
+                let recover_quota = batch.iter().any(|(_, envelope)| {
+                    envelope.request.quota_reservation_id.is_none()
+                        && envelope.attempts.is_empty()
+                        && matches!(envelope.request.status.as_str(), "cancelled" | "failed")
+                });
+                if !recover_quota {
+                    sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
+                        .execute(&self.inner.pool)
+                        .await
+                        .map_err(LedgerError::Database)?;
+                    return Ok(());
+                }
+                let mut transaction = self
+                    .inner
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(LedgerError::Database)?;
+                let mut tenants = batch
+                    .iter()
+                    .map(|(_, envelope)| envelope.request.tenant_id)
+                    .collect::<Vec<_>>();
+                tenants.sort_unstable();
+                tenants.dedup();
+                sqlx::query_file!("queries/ledger_lock_tenants.sql", &tenants)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(LedgerError::Database)?;
+                let recovered = sqlx::query_file!(
+                    "queries/ledger_recover_quota.sql",
+                    payload,
+                    &blocked_reservations
+                )
+                .fetch_all(&mut *transaction)
                 .await
-            {
+                .map_err(LedgerError::Database)?
+                .into_iter()
+                .map(|row| ((row.tenant_id, row.gateway_request_id), row))
+                .collect::<HashMap<_, _>>();
+                for (_, envelope) in &mut batch {
+                    if let Some(row) =
+                        recovered.get(&(envelope.request.tenant_id, envelope.request.id))
+                    {
+                        envelope.request.quota_reservation_id = Some(row.reservation_id);
+                        envelope.request.quota_decision = Some(row.decision.clone());
+                        envelope.request.quota_requires_cost = row.requires_cost;
+                        envelope.request.quota_actual_tokens = Some(0);
+                        envelope.request.quota_actual_cost_microusd = Some(0);
+                    }
+                }
+                let payload =
+                    serde_json::to_value(batch.iter().map(|entry| &entry.1).collect::<Vec<_>>())
+                        .map_err(LedgerError::Json)?;
+                sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(LedgerError::Database)?;
+                transaction.commit().await.map_err(LedgerError::Database)
+            }
+            .await;
+            match result {
                 Ok(_) => {
                     flushed += batch.len();
                     let paths = batch.into_iter().map(|entry| entry.0).collect::<Vec<_>>();
@@ -824,7 +888,7 @@ impl Ledger {
                     .await
                     .map_err(LedgerError::Worker)??;
                 }
-                Err(error)
+                Err(LedgerError::Database(error))
                     if error
                         .as_database_error()
                         .and_then(|value| value.code())
@@ -849,7 +913,7 @@ impl Ledger {
                         tracing::error!(error.type = "ledger_conflicting_record", "conflicting usage record retained for review");
                     }
                 }
-                Err(error) => return Err(LedgerError::Database(error)),
+                Err(error) => return Err(error),
             }
         }
         Ok(FlushBatch { flushed, more })
@@ -927,6 +991,19 @@ impl Ledger {
 }
 
 impl Reservation {
+    pub(crate) fn annotate_admission(
+        &mut self,
+        estimated_tokens: Option<i64>,
+        quota: Option<RequestQuotaSnapshot>,
+    ) {
+        self.envelope.request.estimated_tokens = estimated_tokens;
+        self.envelope.request.quota_reservation_id =
+            quota.as_ref().and_then(|value| value.reservation_id);
+        self.envelope.request.quota_requires_cost =
+            quota.as_ref().is_some_and(|value| value.requires_cost);
+        self.envelope.request.quota_decision = quota.map(|value| value.decision);
+    }
+
     pub(crate) fn attach_capture(
         &mut self,
         capture: Arc<crate::capture_session::AsyncCaptureSession>,
@@ -3693,6 +3770,55 @@ mod tests {
         let recovered = spool.ready().unwrap();
         assert_eq!(recovered[0].1.request.status, "cancelled");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[sqlx::test]
+    async fn startup_links_committed_quota_to_pre_admission_spool(pool: Pool<Postgres>) {
+        let directory = test_directory("admission-crash");
+        let ledger = Ledger::open(
+            pool.clone(),
+            directory.clone(),
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        let start = request_start("admission-crash-fixture");
+        let tenant = start.principal.tenant_id;
+        let gateway_id = Uuid::new_v4();
+        let reservation_id = Uuid::new_v4();
+        let envelope = RequestEnvelope::started_with(start, Some(gateway_id), None);
+        ledger.inner.spool.reserve(gateway_id, &envelope).unwrap();
+        drop(ledger);
+        sqlx::query_file!(
+            "queries/test_insert_partial_conflict_reservation.sql",
+            reservation_id,
+            tenant,
+            gateway_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let reopened = Ledger::open(
+            pool.clone(),
+            directory,
+            MIN_ENTRY_MAX_BYTES * 3,
+            MIN_ENTRY_MAX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(reopened.flush_startup().await.unwrap(), 1);
+        let evidence = sqlx::query_file!(
+            "queries/test_quota_replay_evidence.sql",
+            tenant,
+            reservation_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .evidence;
+        println!("pre-admission recovery: {evidence}");
+        assert_eq!(evidence["state"], "reconciled");
+        assert_eq!(evidence["events"], 1);
+        assert_eq!(evidence["actual_tokens"], 0);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::{
     canonical::{PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
-    ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
+    ledger::{ProviderAttempt, RequestCompletion, TokenUsage},
     logging,
     middleware::{REQUEST_ID_HEADER, RequestReceivedAt},
     model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector},
@@ -186,13 +186,12 @@ pub(super) async fn proxy(
             gateway_request_id,
         );
     }
-    let routing_reason = prepared_quota.routing_reason;
-    let task_routing = prepared_quota.task_routing;
+    let mut reservation = prepared_quota.reservation;
     let translation = prepared_quota.translation;
     let crate::quota::QuotaAdmission {
         selection,
         estimated_usage: estimated,
-        snapshot: quota_snapshot,
+        snapshot: _,
         concurrency,
     } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
@@ -200,42 +199,6 @@ pub(super) async fn proxy(
     let provider = selection.provider_key.clone();
     let selection_snapshot = selection.ledger_snapshot();
     let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
-    let mut reservation = state
-        .ledger
-        .reserve_with_quota(
-            RequestStart {
-                request_id: ledger_request_id(&headers),
-                session_id: canonical.session_id.clone(),
-                trace_id: canonical.trace_id.clone(),
-                requested_model: Some(canonical.requested_model.clone()),
-                workload_class: Some(canonical.workload_class.clone()),
-                urgency: Some(canonical.urgency.clone()),
-                quality: Some(value_text(&policy.quality)),
-                budget_class: Some(canonical.budget_class.clone()),
-                estimated_tokens: ledger_estimated
-                    .as_ref()
-                    .map(request_quota::estimated_tokens),
-                selection: selection_snapshot.clone(),
-                policy: Some(
-                    policy
-                        .ledger_snapshot()
-                        .with_routing(routing_reason)
-                        .with_task_routing(task_routing),
-                ),
-                principal: principal.clone(),
-                created_at: received_at,
-            },
-            Some(gateway_request_id),
-            quota_snapshot,
-            Some(&prepared.rejection.attribution),
-            Some((
-                operation.name(),
-                header_text(&headers, "x-claude-code-agent-id"),
-                header_text(&headers, "x-claude-code-parent-agent-id"),
-            )),
-        )
-        .await?;
-    reservation.cancel_on_force(state.lifecycle.force_token());
     let setup = async {
         let profile = state
             .profile_for_user(&canonical.principal, &selection.profile)

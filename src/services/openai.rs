@@ -19,7 +19,7 @@ use crate::{
     canonical::{CanonicalRequest, CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
-    ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
+    ledger::{ProviderAttempt, RequestCompletion, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
     model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, ProviderKind},
@@ -205,8 +205,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             gateway_request_id,
         );
     }
-    let routing_reason = prepared_quota.routing_reason;
-    let task_routing = prepared_quota.task_routing;
+    let mut reservation = prepared_quota.reservation;
     let translation = prepared_quota.translation;
     let response_max_bytes = if translation.translated {
         state.config.stream_event_max_bytes.saturating_mul(8)
@@ -216,43 +215,13 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let QuotaAdmission {
         selection,
         estimated_usage: estimated,
-        snapshot: quota_snapshot,
+        snapshot: _,
         concurrency,
     } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
     let selection_snapshot = selection.ledger_snapshot();
-    let mut reservation = state
-        .ledger
-        .reserve_with_quota(
-            RequestStart {
-                request_id: ledger_request_id(&request.headers),
-                session_id: canonical.session_id.clone(),
-                trace_id: canonical.trace_id.clone(),
-                requested_model: Some(canonical.requested_model.clone()),
-                workload_class: Some(canonical.workload_class.clone()),
-                urgency: Some(canonical.urgency.clone()),
-                quality: Some(value_text(&policy.quality)),
-                budget_class: Some(canonical.budget_class.clone()),
-                estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
-                selection: selection_snapshot.clone(),
-                policy: Some(
-                    policy
-                        .ledger_snapshot()
-                        .with_routing(routing_reason)
-                        .with_task_routing(task_routing),
-                ),
-                principal: request.principal.clone(),
-                created_at: request.received_at,
-            },
-            Some(gateway_request_id),
-            quota_snapshot,
-            Some(&prepared.rejection.attribution),
-            Some((request.operation.name(), None, None)),
-        )
-        .await?;
-    reservation.cancel_on_force(state.lifecycle.force_token());
     let setup = async {
         let profile = state
             .profile_for_user(&canonical.principal, &selection.profile)
