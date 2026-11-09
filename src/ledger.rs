@@ -512,7 +512,7 @@ impl Ledger {
     }
 
     pub async fn reserve(&self, start: RequestStart) -> Result<Reservation, LedgerError> {
-        self.reserve_with_quota(start, None, None, None).await
+        self.reserve_with_quota(start, None, None, None, None).await
     }
 
     pub(crate) async fn reserve_with_quota(
@@ -521,6 +521,7 @@ impl Ledger {
         gateway_request_id: Option<Uuid>,
         quota: Option<RequestQuotaSnapshot>,
         attribution: Option<&RequestAttribution>,
+        protocol: Option<(&str, Option<String>, Option<String>)>,
     ) -> Result<Reservation, LedgerError> {
         let backup_guard = if let Some(root) = self.inner.capture_backup_root.clone() {
             Some(Arc::new(
@@ -542,16 +543,23 @@ impl Ledger {
         };
         let mut envelope = RequestEnvelope::started_with(start, gateway_request_id, quota);
         envelope.request.attribution = attribution.cloned();
+        if let Some((operation, client_agent_id, parent_agent_id)) = protocol {
+            envelope.request.operation = bounded_text(operation.to_owned());
+            envelope.request.client_agent_id = bounded(client_agent_id);
+            envelope.request.parent_agent_id = bounded(parent_agent_id);
+        }
+        let mut failure = envelope.clone();
         let id = envelope.request.id;
         let spool = Arc::clone(&self.inner.spool);
         let ledger = self.clone();
         let pending = PendingFinalization::new(self.clone());
-        let (reservation, pending) = tokio::task::spawn_blocking(move || {
+        let reserve_guard = backup_guard.clone();
+        let result = tokio::task::spawn_blocking(move || {
             spool.reserve(id, &envelope)?;
             Ok((
                 Reservation {
                     ledger,
-                    backup_guard,
+                    backup_guard: reserve_guard,
                     id: Some(id),
                     envelope,
                     _scheduler_lease: None,
@@ -563,7 +571,43 @@ impl Ledger {
             ))
         })
         .await
-        .map_err(LedgerError::Worker)??;
+        .map_err(LedgerError::Worker)?;
+        let (reservation, pending) = match result {
+            Err(LedgerError::SpoolFull)
+                if failure.request.quota_reservation_id.is_some()
+                    && self.inner.database_writes_enabled.load(Ordering::Acquire) =>
+            {
+                failure.finalized = Some(true);
+                if let Some(decision) = failure
+                    .request
+                    .policy_decision
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
+                    decision.insert("denied".to_owned(), Value::Bool(true));
+                    decision.insert(
+                        "denial_reason".to_owned(),
+                        Value::String("ledger_unavailable".to_owned()),
+                    );
+                }
+                failure.complete(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: None,
+                    selected_provider: None,
+                    attempts: Vec::new(),
+                    completed_at: Utc::now(),
+                });
+                let payload = serde_json::to_value([failure]).map_err(LedgerError::Json)?;
+                sqlx::query_file!("queries/ingest_usage_envelopes.sql", payload)
+                    .execute(&self.inner.pool)
+                    .await
+                    .map_err(LedgerError::Database)?;
+                drop(backup_guard);
+                return Err(LedgerError::SpoolFull);
+            }
+            result => result?,
+        };
+        drop(backup_guard);
         drop(pending);
         Ok(reservation)
     }
@@ -596,10 +640,15 @@ impl Ledger {
         quota: Option<RequestQuotaSnapshot>,
         attribution: &RequestAttribution,
     ) -> Result<(), LedgerError> {
-        let mut reservation = self
-            .reserve_with_quota(start, None, quota, Some(attribution))
+        let reservation = self
+            .reserve_with_quota(
+                start,
+                None,
+                quota,
+                Some(attribution),
+                Some((operation, client_agent_id, parent_agent_id)),
+            )
             .await?;
-        reservation.annotate_protocol(operation, client_agent_id, parent_agent_id);
         reservation
             .finish(RequestCompletion {
                 status: "rejected".to_owned(),
@@ -2990,6 +3039,7 @@ mod tests {
                 None,
                 None,
                 Some(&attribution),
+                None,
             )
             .await
             .unwrap();

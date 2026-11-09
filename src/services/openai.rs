@@ -249,10 +249,10 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             Some(gateway_request_id),
             quota_snapshot,
             Some(&prepared.rejection.attribution),
+            Some((request.operation.name(), None, None)),
         )
         .await?;
     reservation.cancel_on_force(state.lifecycle.force_token());
-    reservation.annotate_protocol(request.operation.name(), None, None);
     let setup = async {
         let profile = state
             .profile_for_user(&canonical.principal, &selection.profile)

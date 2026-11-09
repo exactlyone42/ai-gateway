@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--check-access-race', action='store_true')
     parser.add_argument('--check-capture-access', action='store_true')
     parser.add_argument('--check-preflight-quota', action='store_true')
+    parser.add_argument('--check-ledger-capacity', action='store_true')
     parser.add_argument('--control-capture-access', choices=('viewer', 'before', 'during'))
     parser.add_argument('--control-quota-double-admit', action='store_true')
     parser.add_argument('--control-tenant-admin-as-viewer', action='store_true')
@@ -59,7 +60,10 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
-    if args.check_preflight_quota and (not args.check_capture or any(value for name, value in vars(args).items() if name not in ('gateway_binary', 'revision', 'client', 'check_capture', 'check_preflight_quota'))):
+    quota_http_mode = args.check_preflight_quota or args.check_ledger_capacity
+    if args.check_preflight_quota and args.check_ledger_capacity:
+        parser.error('兩種額度故障須分開驗收')
+    if quota_http_mode and (not args.check_capture or any(value for name, value in vars(args).items() if name not in ('gateway_binary', 'revision', 'client', 'check_capture', 'check_preflight_quota', 'check_ledger_capacity'))):
         parser.error('送出前故障額度驗收須搭配保存，與其他模式分開')
     if args.check_capture_access and (not args.check_capture or any((live_source, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact))):
         parser.error('內容授權與保存故障須搭配保存，與原Client及其他模式分開驗收')
@@ -122,7 +126,7 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_preflight_quota or args.check_capture_access or args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
+    if args.check_capture and not (quota_http_mode or args.check_capture_access or args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
         if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
@@ -144,9 +148,9 @@ def main():
             local_capabilities = json.load(response).get('capabilities', [])
         if 'completion' not in local_capabilities or (args.check_owned_tools and 'tools' not in local_capabilities):
             raise RuntimeError('本機模型未宣告所需的文字或工具能力')
-    version = 'HTTP-only' if args.check_preflight_quota else subprocess.check_output([args.client, '--version'], text=True).strip()
+    version = 'HTTP-only' if quota_http_mode else subprocess.check_output([args.client, '--version'], text=True).strip()
     required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.319 '
-    if not args.check_preflight_quota and not version.startswith(required):
+    if not quota_http_mode and not version.startswith(required):
         raise RuntimeError('Client版本不符')
     codex = args.client == 'codex'
     provider_key = 'local-ollama' if args.check_local else 'codex-subscription' if args.check_codex_held else ('openai' if codex else 'anthropic')
@@ -161,6 +165,8 @@ def main():
     captures = runtime / 'captures'
     captures.mkdir()
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
+    if args.check_ledger_capacity:
+        fixture = runpy.run_path(str(root / 'scripts/client_access_race.py'))['handler'](fixture)
     if args.check_tenant_access:
         fixture = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['handler'](fixture)
     if args.check_access_race:
@@ -230,9 +236,11 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
-    if args.check_preflight_quota or args.check_access_matrix or args.check_tenant_access or args.check_access_race or args.check_capture_access:
+    if quota_http_mode or args.check_access_matrix or args.check_tenant_access or args.check_access_race or args.check_capture_access:
         environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
         fixture.provider_credentials.add('fixture-tenant-api')
+    if args.check_ledger_capacity:
+        environment.update({'LEDGER_SPOOL_MAX_BYTES': '98304', 'LEDGER_SPOOL_ENTRY_MAX_BYTES': '32768'})
     if args.check_tenant_access or args.check_capture_access:
         environment['PROVIDER_ALLOWED_TENANT_IDS'] = '00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002'
     if args.check_codex_held:
@@ -307,6 +315,13 @@ def main():
             activate('policies', policy)
             if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_ledger_capacity:
+            print(f'帳本容量與額度證據：{runtime}', flush=True)
+            verify = runpy.run_path(str(root / 'scripts/client_ledger_capacity.py'))['verify']
+            verify(api, create, activate, users, fixture, runtime, codex, database)
+            print(f'帳本容量不足後額度恢復通過；證據：{runtime}')
+            return
 
         if args.check_preflight_quota:
             print(f'送出前故障額度證據：{runtime}', flush=True)
@@ -806,6 +821,9 @@ def main():
                 (runtime / 'failure-capture-error.txt').write_text(type(error).__name__)
         raise
     finally:
+        if args.check_ledger_capacity:
+            fixture.release_headers.set()
+            fixture.release_body.set()
         if args.check_capture_access:
             fixture.release_suffix.set()
             (runtime / 'capture-access-source.json').write_text(json.dumps({'upstream_calls': len(fixture.captured_requests), 'observations': fixture.captured_requests, 'before_source': fixture.source_proofs, 'suffix_sent': fixture.suffix_sent, 'source_closed': fixture.source_closed}, indent=2))

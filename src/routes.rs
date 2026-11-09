@@ -1984,6 +1984,7 @@ mod tests {
                 Some(identity.capture),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2111,6 +2112,7 @@ mod tests {
                 Some(ledger_failure_identity.capture),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2203,6 +2205,7 @@ mod tests {
                 Some(cancelled_identity.capture),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2291,6 +2294,7 @@ mod tests {
                     created_at: Utc::now(),
                 },
                 Some(failed_identity.capture),
+                None,
                 None,
                 None,
             )

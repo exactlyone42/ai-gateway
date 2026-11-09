@@ -228,14 +228,14 @@ pub(super) async fn proxy(
             Some(gateway_request_id),
             quota_snapshot,
             Some(&prepared.rejection.attribution),
+            Some((
+                operation.name(),
+                header_text(&headers, "x-claude-code-agent-id"),
+                header_text(&headers, "x-claude-code-parent-agent-id"),
+            )),
         )
         .await?;
     reservation.cancel_on_force(state.lifecycle.force_token());
-    reservation.annotate_protocol(
-        operation.name(),
-        header_text(&headers, "x-claude-code-agent-id"),
-        header_text(&headers, "x-claude-code-parent-agent-id"),
-    );
     let setup = async {
         let profile = state
             .profile_for_user(&canonical.principal, &selection.profile)
