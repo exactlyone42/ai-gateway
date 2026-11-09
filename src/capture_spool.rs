@@ -65,6 +65,14 @@ pub(crate) struct CaptureSpool {
     secret_guard: CaptureSecretGuard,
 }
 
+impl Drop for CaptureSpool {
+    fn drop(&mut self) {
+        if let Err(error) = self.file.unlock() {
+            tracing::error!(error = %error, error.type = "capture_spool_unlock_failed", "內容暫存寫入鎖解除失敗");
+        }
+    }
+}
+
 pub(crate) struct VerifiedSpool {
     pub cipher: CaptureCipher,
     pub blocks: Vec<(CaptureLeg, u64, Vec<u8>)>,
@@ -1117,6 +1125,57 @@ mod tests {
         );
         assert!(spool.finish().is_err());
         assert!(CaptureSpool::read(&path, identity, &master, 4096).is_err());
+    }
+
+    #[test]
+    fn a_cloned_descriptor_does_not_extend_capture_writer_lease() {
+        for complete in [true, false] {
+            let root =
+                std::env::temp_dir().join(format!("capture-writer-lease-{}", Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            let identity = CaptureIdentity {
+                tenant: Uuid::new_v4(),
+                capture: Uuid::new_v4(),
+                user: Uuid::new_v4(),
+                created_ms: chrono::Utc::now().timestamp_millis(),
+                retention_days: 30,
+            };
+            let master = [3u8; 32];
+            let mut spool = CaptureSpool::create_with_permit(
+                &root,
+                identity,
+                &master,
+                &[],
+                crate::capture_key_usage::WrapPermit::for_test(&master),
+                super::CaptureLimits::for_test(4096),
+            )
+            .unwrap();
+            spool
+                .append(CaptureLeg::ClientRequest, 0, b"saved request")
+                .unwrap();
+            let duplicate = spool.file.try_clone().unwrap();
+            let path = spool.path().to_owned();
+            assert!(CaptureSpool::recover_inner(&path, &master, 4096, true).is_err());
+            if complete {
+                spool.finish().unwrap();
+            } else {
+                drop(spool);
+            }
+            let before_release =
+                CaptureSpool::recover_inner(&path, &master, 4096, !complete).is_ok();
+            drop(duplicate);
+            let recovered = CaptureSpool::recover_inner(&path, &master, 4096, !complete).unwrap();
+            println!(
+                "writer lease: complete={complete} before_release={before_release} after_release=true"
+            );
+            assert_eq!(recovered.complete, complete);
+            assert_eq!(recovered.blocks.len(), 1 + usize::from(complete));
+            assert!(
+                before_release,
+                "a retained descriptor extended the writer lease"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
