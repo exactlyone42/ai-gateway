@@ -221,12 +221,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(%address, "agent pool gateway started");
     let quota_guard = state.quotas.clone();
+    let guard_required = !state.config.scheduler.passthrough;
     let guard_lost = Arc::new(AtomicBool::new(false));
     let shutdown_guard_lost = Arc::clone(&guard_lost);
     let guarded_shutdown = async move {
         tokio::select! {
             _ = shutdown => {}
-            _ = quota_guard.wait_for_single_instance_guard_loss() => {
+            _ = quota_guard.wait_for_single_instance_guard_loss(), if guard_required => {
                 shutdown_guard_lost.store(true, Ordering::Release);
                 tracing::error!(error.type = "single_instance_guard_lost", "single instance guard is unavailable");
             }
