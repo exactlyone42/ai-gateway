@@ -115,6 +115,16 @@ python3 scripts/test_capture_backup_gateway.py --gateway-bin target/debug/agent-
 
 演練使用本機 Docker、測試用帳號與模擬上游，不連接正式資料。它會輸出使用的程式指紋，並檢查備份、竄改拒絕及還原後讀舊寫新；執行前須有 `python:3.13-slim`、`postgres:17-alpine` 映像及 GPG。指定其他程式檔時，指紋只能識別該檔，不能證明它來自目前原始碼。
 
+完整資料對帳另加 `--check-restored-state <全新證據目錄>`。正向模式需搭配兩協定串流、過期還原或衝突暫存案例，不能用沒有未刪歷史資料的空集合冒通過。它會建立實際額度，逐欄比對11張帳本、額度與密文資料表；送入閘道、送往模型、模型回應、回給Client四段內容須各自與還原前的雜湊相同。另核對舊金鑰保留、新金鑰使用計數、入帳暫存及本機／遠端已確認的刪除進度，還原後新請求也必須只結帳一次。來源仍是測試回應，不是原Client或跨主機驗收。
+
+完整正向演練可組合 `--check-deletion --check-remote-replay --check-protocol-streams --check-database-privileges --check-readonly-backup-role --check-backup-entry`；另以 `--check-expired-restore --check-database-privileges` 驗過期清理，以 `--check-ledger-conflict --check-database-privileges` 驗非空衝突暫存。每次指定不同的全新證據目錄；失敗亦保留加密備份、測試用GPG金鑰及資料讀回，目錄只供操作者存取。Docker物件仍由原演練收尾，只回收本次建立者。
+
+完成入庫的全文暫存會正常清除；驗收須先證明未刪內容的資料庫密文、資料欄位及四方向內容都相同，才允許對應暫存消失。仍待入帳或隔離的入帳原件則須逐檔保留，不能只比筆數。
+
+同一模式加 `--control-corrupt-restored-state` 會故意改還原庫的一格額度；筆數相同也應退出非零。`--check-deletion --check-remote-witness --control-remote-rollback` 加完整資料對帳時，應抓出已刪內容復活而退出非零；沒有加完整資料對帳的舊控制仍會以退出0表示成功重現復活。這兩者是驗收器的反例，不是正式操作方式。
+
+資料庫備份本身不包含叢集角色；演練先由隔離fixture建立角色，再核對還原後的權限與資料，不能推成正式角色已有備份。[PostgreSQL備份範圍](https://www.postgresql.org/docs/17/app-pgdump.html)及[還原說明](https://www.postgresql.org/docs/17/app-pgrestore.html)是工具依據；資料庫快照也不能替代檔案、密鑰與刪除位置的一致性驗收。
+
 加上 `--check-deletion` 可檢查還原後是否保持刪除，再加 `--check-wrong-journal` 可檢查是否拒絕不同來源。`--check-deletion --check-rolled-back-journal` 檢查日誌與見證同時回退；目前此項會失敗，正式還原仍不可開放。
 
 `--check-deletion --check-independent-position` 會在測試程序保存刪除後的位置，將日誌與本機見證回退後，以 Gateway 的位置檢查核對：舊位置可通過，刪除後的位置必須拒絕。此演練沒有獨立見證服務，也沒有接入 Gateway 啟動路徑，不能取代正式防回退。

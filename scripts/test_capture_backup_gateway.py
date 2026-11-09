@@ -24,7 +24,17 @@ parser.add_argument('--check-lock-timeout', action='store_true')
 parser.add_argument('--check-stream-drain', action='store_true')
 parser.add_argument('--check-backup-kill', action='store_true')
 parser.add_argument('--control-corrupt-ledger-conflict', action='store_true')
+parser.add_argument('--check-restored-state', type=Path, help='完整核對還原內容並保留原件；與回退控制合用時應拒絕復活並退出非零')
+parser.add_argument('--control-corrupt-restored-state', action='store_true')
 arguments = parser.parse_args()
+if arguments.control_corrupt_restored_state and not arguments.check_restored_state:
+    parser.error('還原內容反例必須搭配 --check-restored-state')
+if arguments.check_restored_state and not (arguments.check_remote_replay or arguments.check_expired_restore or arguments.check_ledger_conflict or (arguments.check_remote_witness and arguments.control_remote_rollback)):
+    parser.error('完整還原狀態驗收必須完成遠端刪除重放、過期還原或回退反例')
+if arguments.check_restored_state and any((arguments.check_client_continuity, arguments.check_stream_drain, arguments.check_backup_kill)):
+    parser.error('完整還原狀態驗收須與備份期間持續寫入演練分開')
+if arguments.check_restored_state and not any((arguments.check_protocol_streams, arguments.check_expired_restore, arguments.check_ledger_conflict, arguments.control_corrupt_restored_state, arguments.control_remote_rollback)):
+    parser.error('完整還原正向驗收必須包含未刪歷史內容，不能用空集合通過')
 if arguments.check_readonly_backup_role and not arguments.check_database_privileges:
     parser.error('readonly backup validation requires --check-database-privileges')
 if arguments.check_readonly_backup_role and not arguments.check_remote_replay:
@@ -50,8 +60,12 @@ if not binary.is_file() or not os.access(binary, os.X_OK):
     raise SystemExit('gateway binary must be an executable file')
 project_root = Path(__file__).resolve().parent.parent
 os.chdir(project_root)
-workspace = tempfile.TemporaryDirectory(prefix='gateway-backup-e2e-')
-workspace_path = Path(workspace.name)
+if arguments.check_restored_state:
+    import capture_restore_validation as state_validation
+    evidence = arguments.check_restored_state.resolve()
+    evidence.mkdir(mode=0o700)
+workspace = None if arguments.check_restored_state else tempfile.TemporaryDirectory(prefix='gateway-backup-e2e-')
+workspace_path = Path(tempfile.mkdtemp(prefix='gateway-backup-e2e-', dir=evidence) if arguments.check_restored_state else workspace.name)
 workspace_path.chmod(0o755)
 binary_copy = workspace_path / 'gateway'
 shutil.copyfile(binary, binary_copy)
@@ -73,7 +87,12 @@ protocol_captures = []
 database_admin = 'fixture_admin' if arguments.check_database_privileges else 'gateway'
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **kwargs).stdout.strip()
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **kwargs).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        if args[:3] == ('docker', 'network', 'create'):
+            raise RuntimeError('隔離網路建立失敗：' + error.stderr.strip()) from None
+        raise
 
 def docker(*args, **kwargs):
     return run('docker', *args, **kwargs)
@@ -88,6 +107,8 @@ if not docker_host.startswith('unix:///'):
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
 def api(path, method='GET', token='', body=None, request_id=''):
+    if arguments.check_restored_state and path == '/v1/chat/completions' and body is not None:
+        body = {'max_tokens': 16, **body}
     code = 'import json,sys,urllib.request; p,m,t,b,q=sys.argv[1:]; h={"authorization":"Bearer "+t,"content-type":"application/json"}; h.update({"x-request-id":q} if q else {}); r=urllib.request.Request("http://127.0.0.1:8080"+p,data=None if b=="" else b.encode(),headers=h,method=m); \ntry: print(urllib.request.urlopen(r,timeout=15).read().decode())\nexcept urllib.error.HTTPError as e: print(e.read().decode(),file=sys.stderr); raise'
     try:
         return json.loads(docker('exec', gw, 'python', '-c', code, path, method, token, '' if body is None else json.dumps(body), request_id))
@@ -105,6 +126,8 @@ except urllib.error.HTTPError as error:
     return int(docker('exec', gw, 'python', '-c', code, path, token, method))
 
 def wire_api(path, method, token, body=None):
+    if arguments.check_restored_state and path == '/v1/responses' and body is not None:
+        body = {'max_output_tokens': 16, **body}
     code = '''import json,sys,urllib.error,urllib.request
 p,m,t,b=sys.argv[1:]
 request=urllib.request.Request("http://127.0.0.1:8080"+p,data=None if not b else b.encode(),headers={"authorization":"Bearer "+t,"content-type":"application/json"},method=m)
@@ -255,6 +278,9 @@ try:
     session = api('/admin/v1/sessions', 'POST', boot['login_token'])['access_token']
     user = api('/admin/v1/users', 'POST', session, {'display_name': 'test user'})['resource']['id']
     key = api('/admin/v1/credentials', 'POST', session, {'display_name': 'test client', 'user_id': user})['secret']
+    if arguments.check_restored_state:
+        quota = api('/admin/v1/quotas', 'POST', session, {'quota_key': 'restore-integrity', 'revision': 1, 'user_id': user, 'configuration': {'mode': 'hard', 'limits': {'requests_per_minute': 1000, 'tokens_per_hour': 100000}}})['resource']
+        api(f'/admin/v1/quotas/{quota["id"]}/lifecycle', 'POST', session, {'version': quota['version'], 'state': 'active'})
     operations = ['openai_chat_completions', 'openai_responses'] if arguments.check_protocol_streams else ['openai_chat_completions']
     provider = api('/admin/v1/providers', 'POST', session, {'provider_key': 'openai', 'display_name': 'fixture', 'provider_type': 'openai', 'base_url': f'http://{mock}:8090', 'credential_ref': 'env://OPENAI_API_KEY', 'supported_operations': operations})['resource']['id']
     model = api('/admin/v1/models', 'POST', session, {'provider_id': provider, 'public_model_id': 'company-default', 'provider_model_id': 'company-default', 'supported_operations': operations, 'supports_streaming': True})['resource']['id']
@@ -397,6 +423,36 @@ try:
         ready, _, _ = select.select([maintenance_lock.stdout], [], [], 10)
         if not ready or maintenance_lock.stdout.readline().strip() != 'READY' or maintenance_lock.poll() is not None:
             raise RuntimeError('expired capture fixture could not hold maintenance lock')
+    if arguments.check_restored_state:
+        initial_storage = state_validation.storage_state(docker, gw, paths)
+        saved_ids = {name[:-8] for name in initial_storage[paths[0]] if name.endswith('.capture')}
+        for _ in range(40):
+            before_state = state_validation.database_state(docker, pg)
+            complete_ids = {row['capture_id'] for row in before_state['capture_records'] if row['state'] == 'complete'}
+            if saved_ids <= complete_ids:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError('備份前密文暫存尚未完整匯入')
+        if not all(before_state[table] for table in ('gateway_requests', 'provider_attempts', 'usage_records', 'quotas', 'quota_windows', 'quota_reservations', 'quota_reconciliation_events', 'capture_records', 'capture_blocks')):
+            raise RuntimeError('完整還原驗收缺少非空帳本、額度或密文事件')
+        state_validation.write_evidence(evidence, 'source-state', before_state)
+        captures_to_read = [row['capture_id'] for row in before_state['capture_records'] if not arguments.check_expired_restore or row['capture_id'] != expired_capture]
+        before_content = state_validation.content_state(wire_api, captures_to_read, session)
+        state_validation.write_evidence(evidence, 'source-content', before_content)
+        before_storage = state_validation.storage_state(docker, gw, paths)
+        state_validation.write_evidence(evidence, 'source-storage', before_storage)
+        before_position = json.loads(docker('exec', gw, '/proc/1/exe', '--inspect-capture-erasure'))
+        state_validation.write_evidence(evidence, 'erasure-position-source', before_position)
+        if arguments.check_deletion:
+            other_user = api('/admin/v1/users', 'POST', session, {'display_name': 'other owner'})['resource']['id']
+            other_key = api('/admin/v1/credentials', 'POST', session, {'display_name': 'other client', 'user_id': other_user})['secret']
+            statuses = [api_status(f'/v1/request-captures/{capture}', 'DELETE', credential) for credential in ('', other_key)]
+            after_denial = state_validation.database_state(docker, pg)
+            state_validation.compare_state(evidence, 'unauthorized-delete-state', before_state, after_denial)
+            if statuses != [401, 404]:
+                raise RuntimeError('未登入或其他使用者可刪除內容')
+            state_validation.write_evidence(evidence, 'unauthorized-delete', statuses)
     if arguments.check_backup_entry:
         backup_root = workspace_path / 'backup-entry'
         backup_env = dict(gpg_env, COMPOSE_PROJECT=project, CAPTURE_BACKUP_GATEWAY=gw, CAPTURE_BACKUP_RECIPIENT=recipient, CAPTURE_BACKUP_SIGNER=signer)
@@ -525,6 +581,9 @@ except urllib.error.HTTPError as error:
         if api_status(f'/admin/v1/request-captures/{capture}/content?leg=client_request', 'GET', session) not in (404, 410, 503):
             raise RuntimeError('deleted source capture was not denied')
         print('source capture deletion: ok', flush=True)
+        if arguments.check_restored_state:
+            deleted_position = json.loads(docker('exec', gw, '/proc/1/exe', '--inspect-capture-erasure'))
+            state_validation.write_evidence(evidence, 'erasure-position-deleted', deleted_position)
         if arguments.check_remote_witness or arguments.check_remote_replay:
             latest = capture_witness_fixture.read(docker, witness_pg, project_root)
             if latest['install'] != position['install'] or latest['sequence'] <= position['sequence'] or latest['tip'] == bytes(position['tip']).hex():
@@ -573,6 +632,15 @@ except urllib.error.HTTPError as error:
     except subprocess.CalledProcessError as error:
         raise RuntimeError('isolated restore failed: ' + error.stderr) from None
     print('isolated restore: ok', flush=True)
+    if arguments.check_restored_state:
+        if arguments.control_corrupt_restored_state:
+            corrupt = (project_root / 'queries/test_capture_restore_corrupt_quota.sql').read_text()
+            changed = docker('exec', '-i', restore_pg, 'psql', '-X', '-U', 'gateway', '-d', 'gateway', '-Atq', '-v', 'ON_ERROR_STOP=1', '-v', 'tenant=' + env['ADMIN_BOOTSTRAP_TENANT_ID'], '-v', 'quota=' + quota['id'], input=corrupt)
+            if not changed.isdigit():
+                raise RuntimeError('額度反例沒有改到還原資料')
+        restored_state = state_validation.database_state(docker, restore_pg)
+        state_validation.compare_state(evidence, 'database-restored', before_state, restored_state)
+        print('還原前後11表完整內容相同，包含非空額度及密文事件', flush=True)
     if arguments.control_corrupt_ledger_conflict:
         docker('run', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--network', 'none', '--user', '10001:999', '--mount', f'type=volume,source={target_volumes[3]},target=/ledger', '--entrypoint', 'python', 'python:3.13-slim', '-c', 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest()==sys.argv[2]; p.write_bytes(b"invalid-ledger-conflict")', '/ledger/' + expected_conflict[0], expected_conflict[1])
     if arguments.check_expired_restore:
@@ -583,6 +651,10 @@ except urllib.error.HTTPError as error:
         print('backup contains unprocessed expired capture: ok', flush=True)
     if arguments.check_truncated_spool:
         docker('run', '--rm', '--label', expiry, '--label', run_label, '--pull=never', '--network', 'none', '--user', '10001:999', '--mount', f'type=volume,source={target_volumes[0]},target=/spool', '--entrypoint', 'python', 'python:3.13-slim', '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(bytes(157))', f'/spool/{capture}.capture')
+    if arguments.check_restored_state:
+        error = state_validation.collect_gateway_log(evidence, 'gateway-source-log', gw)
+        if error:
+            raise RuntimeError(error)
     docker('stop', gw)
     docker('rm', '-v', gw)
     created.remove(('container', gw))
@@ -717,6 +789,33 @@ except urllib.error.HTTPError as error:
         if latest['install'] != position['install'] or latest['sequence'] <= position['sequence']:
             raise RuntimeError('expired capture cleanup did not advance the remote witness')
         print('restored gateway erased expired capture before serving: ok', flush=True)
+    if arguments.check_restored_state:
+        after_state = state_validation.database_state(docker, restore_pg)
+        state_validation.compare_state(evidence, 'ledger-after-startup', before_state, after_state, state_validation.LEDGER_TABLES)
+        erased = [capture] if arguments.check_deletion else [expired_capture] if arguments.check_expired_restore else []
+        restored_position = json.loads(docker('exec', gw, '/proc/1/exe', '--inspect-capture-erasure'))
+        remote_position = capture_witness_fixture.read(docker, witness_pg, project_root)
+        state_validation.write_evidence(evidence, 'erasure-position-after', {'local': restored_position, 'remote': remote_position})
+        state_validation.check_erased(evidence, after_state, wire_api, session, erased)
+        if restored_position['install'] != before_position['install'] or remote_position['install'] != restored_position['install'] or remote_position['sequence'] != restored_position['sequence'] or remote_position['tip'] != bytes(restored_position['tip']).hex():
+            raise RuntimeError('還原後本機刪除位置與可信見證不同')
+        if arguments.check_deletion and restored_position != deleted_position:
+            raise RuntimeError('還原後刪除位置回退或改變')
+        if arguments.check_expired_restore and restored_position['sequence'] <= before_position['sequence']:
+            raise RuntimeError('過期清理未推進刪除位置')
+        remaining = [item for item in captures_to_read if item not in erased]
+        if not remaining:
+            raise RuntimeError('缺少未刪歷史內容，不能以空集合通過')
+        after_content = state_validation.content_state(wire_api, remaining, session)
+        expected_content = {item: before_content[item] for item in remaining}
+        state_validation.compare_state(evidence, 'content-after', expected_content, after_content)
+        before_captures = {table: [row for row in before_state[table] if row['capture_id'] not in erased] for table in ('capture_records', 'capture_blocks')}
+        after_captures = {table: [row for row in after_state[table] if row['capture_id'] not in erased] for table in ('capture_records', 'capture_blocks')}
+        state_validation.compare_state(evidence, 'capture-after', before_captures, after_captures)
+        after_storage = state_validation.storage_state(docker, gw, paths)
+        state_validation.check_storage(evidence, before_storage, after_storage, paths, erased, archived=remaining)
+        state_summary = {'binary_sha256': hashlib.sha256(binary_copy.read_bytes()).hexdigest(), 'tables': 11, 'source_counts': {name: len(rows) for name, rows in before_state.items()}, 'erased': erased, 'content_legs_preserved': len(remaining) * 4, 'new_key': True, 'scope': '同機隔離容器，非正式或跨主機見證'}
+        print('完整帳本/額度、四方向內容、金鑰換新及刪除狀態驗收通過', flush=True)
     if arguments.control_remote_rollback:
         resurrected = api(f'/admin/v1/request-captures/{capture}/content?leg=client_request', 'GET', session)
         if 'backup-e2e-original' not in json.dumps(resurrected):
@@ -787,9 +886,17 @@ except urllib.error.HTTPError as error:
         if conflict_info(gw) != [expected_conflict] or ledger_counts(restore_pg, 'backup-e2e-conflict') != (0, 0, 0):
             raise RuntimeError('restored conflict record was modified or ingested')
         print('restored gateway retained conflict and ingested normal usage: ok', flush=True)
+    if arguments.check_restored_state:
+        final_state = state_validation.database_state(docker, restore_pg)
+        state_summary['new_request'] = state_validation.check_new_accounting(evidence, after_state, final_state, latest)
+        state_validation.write_evidence(evidence, 'result', state_summary)
     print('restored gateway writes and reads new capture: ok', flush=True)
 finally:
     cleanup_errors = []
+    if arguments.check_restored_state:
+        error = state_validation.collect_gateway_log(evidence, 'gateway-final-log', gw)
+        if error:
+            cleanup_errors.append(error)
     for process_name in ('maintenance_lock', 'restore_lock'):
         process = locals().get(process_name)
         if process is not None and process.poll() is None:
@@ -833,7 +940,10 @@ finally:
             subprocess.run(['gpgconf', '--kill', 'gpg-agent'], env=gpg_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         except (OSError, subprocess.SubprocessError):
             cleanup_errors.append('test GPG agent')
-    workspace.cleanup()
+    if arguments.check_restored_state:
+        print('演練原件已保留：' + str(evidence), flush=True)
+    else:
+        workspace.cleanup()
     if cleanup_errors:
         message = 'isolated resources could not be removed: ' + ', '.join(cleanup_errors)
         if sys.exc_info()[0] is not None and not (isinstance(sys.exc_info()[1], SystemExit) and sys.exc_info()[1].code == 0):
