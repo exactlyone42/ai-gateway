@@ -306,7 +306,7 @@ def main():
             if codex:
                 reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                if args.check_local or recovery_mode or args.check_long_stream or args.check_slow_reader:
+                if args.check_local or args.check_codex_held or recovery_mode or args.check_long_stream or args.check_slow_reader:
                     with (home / 'config.toml').open('a') as config:
                         config.write('stream_max_retries = 0\nrequest_max_retries = 0\nstream_idle_timeout_ms = 600000\n')
                 if args.check_compact:

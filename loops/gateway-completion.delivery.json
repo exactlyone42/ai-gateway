@@ -3,6 +3,7 @@
   "task": "gateway-completion",
   "project": "/home/cash/work_space/private/agent-pool-gateway-completion",
   "steps": {
+    "R2-S2": {"kind": "internal", "reason": "用既有管理API及本人訂閱驗原Codex首次使用、歸屬及拒絕，僅驗收器零重試設定、沒有新正式程式行為；R2隔離競態、R3及同版發布仍未完成，既有交付點不變"},
     "R2-S1": {"kind": "internal", "reason": "核對既有本人與群組憑證選擇規則，補隔離HTTP驗收器及必要反例；沒有正式程式變更或可上線新功能，原Client/真本人憑證、安全與發布仍須R2-S2至S5及R3，既有交付點不變"},
     "R1-S1": {"kind": "internal", "reason": "建立同版原Client成功與失敗基準，修正驗證器誤報；日常工作功能及發布仍須R1-S2至S5驗收，沒有可上線新功能"},
     "S01": {"kind": "internal", "reason": "修本機 git 設定，不是可用功能"},
