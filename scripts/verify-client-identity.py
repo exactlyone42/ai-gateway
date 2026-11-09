@@ -187,7 +187,7 @@ def main():
         return json.loads(raw) if raw else None
 
     log = (runtime / 'gateway.log').open('wb')
-    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '900s' if args.check_local else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+    gateway = subprocess.Popen(['timeout', '--kill-after=5s', '1500s' if args.check_local and args.check_owned_tools else '900s' if args.check_local else '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
     try:
         time.sleep(2)
         if gateway.poll() is not None:
@@ -306,6 +306,16 @@ def main():
                             process.wait()
             else:
                 result = subprocess.run(['timeout', '--kill-after=5s', '600s' if args.check_local and success else '30s', *command], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=610 if args.check_local and success else 40)
+                if args.check_owned_tools and success:
+                    initial_diagnostic = result.stdout + '\n' + result.stderr
+                    for secret in fixture.client_credentials | fixture.provider_credentials:
+                        initial_diagnostic = initial_diagnostic.replace(secret, '[credential]')
+                    (home / 'initial-client-diagnostic.txt').write_text(initial_diagnostic)
+                    (home / 'initial-client-result.json').write_text(json.dumps({'exit': result.returncode, 'expected_reply_matches': result.stdout.strip() == owned_value}, indent=2))
+                    if result.returncode != 0 or result.stdout.strip() != owned_value:
+                        raise RuntimeError(f'真工具驗收第一輪未完成：{runtime}')
+                    resume = ['codex', 'exec', 'resume', '--last', '--skip-git-repo-check', followup_prompt] if codex else ['claude', '-p', '--continue', '--model', model, '--max-turns', '1', followup_prompt]
+                    result = subprocess.run(['timeout', '--kill-after=5s', '600s' if args.check_local else '30s', *resume], env=client_environment, cwd=runtime, capture_output=True, text=True, timeout=610 if args.check_local else 40)
                 if args.check_owned_compact and success:
                     initial_diagnostic = result.stdout + '\n' + result.stderr
                     for secret in fixture.client_credentials | fixture.provider_credentials:
@@ -383,7 +393,7 @@ def main():
 
         def verify_capture():
             validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
-            markers = owned_fields if args.check_owned_compact else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
+            markers = owned_fields if args.check_owned_compact else [owned_value, expected_reply] if args.check_owned_tools else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
             if not spool_files:
@@ -391,7 +401,7 @@ def main():
             for path in spool_files:
                 reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
-            count = 3 if args.check_owned_compact else fixture.error_requests if args.check_error else (2 if args.check_tools or args.check_owned_tools else 1)
+            count = 3 if args.check_owned_compact or args.check_owned_tools else fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
@@ -425,7 +435,8 @@ def main():
                     compact = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_compact'](saved, owned_fields)
                     (runtime / 'compact-result.json').write_text(json.dumps(compact, indent=2))
                 if args.check_owned_tools:
-                    runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_owned_tools'](saved, expected_reply, codex)
+                    validation['validate_owned_followup'](saved, owned_value, followup_prompt, codex)
+                    (runtime / 'owned-tools-result.json').write_text(json.dumps({'source_requests': len(saved), 'original_context_preserved': True, 'tool_result_preserved': True, 'second_user_instruction_preserved': True, 'followup_without_new_tools': True}, indent=2))
                 for leg in ('client_request', 'provider_request'):
                     if not (args.check_owned_tools or args.check_owned_compact) and expected_reply not in saved[0][leg]:
                         raise RuntimeError('本人來源保存缺少原請求')
@@ -457,9 +468,12 @@ def main():
                 expected_reply = '|'.join(owned_fields)
                 owned_prompt = 'Remember these exact fields for later. ' + ' '.join(name + ': ' + value + '.' for name, value in zip(('Goal', 'Decision', 'Constraint', 'Next action'), owned_fields)) + ' For this turn reply exactly ACK.'
             if args.check_owned_tools:
-                expected_reply = 'owned-tool-' + uuid.uuid4().hex
+                owned_value = 'owned-tool-' + uuid.uuid4().hex
+                expected_reply = 'FOLLOWUP:' + owned_value
+                followup_prompt = 'Using only the tool result from our previous turn, reply with FOLLOWUP: followed immediately by the exact file contents. Do not read the file again or call any tools. Return no other text.'
                 owned_file = runtime / 'owned-tool-input.txt'
-                owned_file.write_text(expected_reply)
+                owned_file.write_text(owned_value)
+                (runtime / 'owned-tools-input.json').write_text(json.dumps({'sha256': hashlib.sha256(owned_file.read_bytes()).hexdigest(), 'bytes': owned_file.stat().st_size, 'source_model': args.source_model, 'client_version': version}, indent=2))
                 owned_prompt = f'Use exactly one local shell command to read {owned_file}. Then reply with exactly the file contents and nothing else.'
                 if args.check_local and codex:
                     owned_prompt += ' Use the provided exec_command function with cmd set to cat followed by the exact path above. Do not use container.exec, exec or read_file; those tools are not available.'
@@ -468,25 +482,27 @@ def main():
             client('alice', f'{model_prefix}-alice', True, 'held-owner', owned_prompt)
             if args.check_capture:
                 verify_capture()
-            if args.check_local:
-                client('alice', f'{model_prefix}-bob', False, 'model-denied')
-            else:
-                client('bob', f'{model_prefix}-bob', False, 'held-other-user')
-            credential_id, credential_version = credential_versions['alice']
-            api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
-            client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
+            if not args.check_owned_tools:
+                if args.check_local:
+                    client('alice', f'{model_prefix}-bob', False, 'model-denied')
+                else:
+                    client('bob', f'{model_prefix}-bob', False, 'held-other-user')
+                credential_id, credential_version = credential_versions['alice']
+                api(f'/admin/v1/credentials/{credential_id}?version={credential_version}', 'DELETE', token=admin)
+                client('alice', f'{model_prefix}-alice', False, 'gateway-key-revoked')
             query = root / 'queries/test_codex_held_result.sql'
             result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'owner=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             ledger = json.loads(result.stdout)
-            expected_attempts = 3 if args.check_owned_compact else 2 if args.check_owned_tools else 1
+            expected_attempts = 3 if args.check_owned_compact or args.check_owned_tools else 1
             if ledger['attempts'] != expected_attempts or ledger['completed_owner'] != expected_attempts or ledger['other_attempts'] != 0 or ledger['reported_records'] != expected_attempts or ledger['reported_input'] <= 0 or ledger['reported_output'] <= 0 or ledger['models'] != [args.source_model] * expected_attempts or ledger['providers'] != [provider_key] * expected_attempts:
                 raise RuntimeError('本人來源帳本與隔離不符：' + json.dumps(ledger))
             for index, check in enumerate(checks):
                 check['upstream_requests'] = expected_attempts if index == 0 else 0
             if args.check_codex_held and args.codex_auth_file.read_bytes() != source_bytes:
                 raise RuntimeError('來源登入檔在驗收期間改變，未宣稱未變更')
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_kind': 'ollama' if args.check_local else 'chatgpt', 'source_capabilities': local_capabilities if args.check_local else None, 'source_auth_unchanged': True if args.check_codex_held else None, 'source_sha256': hashlib.sha256(source_bytes).hexdigest() if args.check_codex_held else None, 'checks': checks, 'ledger': ledger}, indent=2))
-            print(f'原Codex真實來源與拒絕驗收通過；證據：{runtime}')
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'source_model': args.source_model, 'source_kind': 'ollama' if args.check_local else 'chatgpt', 'source_capabilities': local_capabilities if args.check_local else None, 'source_auth_unchanged': True if args.check_codex_held else None, 'source_sha256': hashlib.sha256(source_bytes).hexdigest() if args.check_codex_held else None, 'checks': checks, 'ledger': ledger, 'not_run': ['model-denied', 'gateway-key-revoked'] if args.check_owned_tools else []}, indent=2))
+            outcome = '真工具與續談' if args.check_owned_tools else '真實來源與拒絕'
+            print(f'原{args.client}{outcome}驗收通過；證據：{runtime}')
             return
 
         if args.check_error:

@@ -1,5 +1,21 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-09 R1-S2 真工具與使用者續談
+
+本輪沿用 S1 的 Gateway binary `f8f339c51e80`，只補驗收器，沒有改正式請求程式或部署。原 Claude Code 2.1.319 使用本機 `qwen3.8:27b`；原 Codex 0.166.0 使用已安裝的 `qwen3-coder:30b`。兩者各完成一次真讀檔、工具結果回送及使用者第二輪引用，共三個來源請求。兩側原訊息、工具編號、完整工具結果、串流及實際用量均有保存原件可核。
+
+沿用 `verify-client-identity.py --check-local --check-capture --check-owned-tools`。每個 Client 須使用獨立且新建的本機 `gateway_client_identity_validation_` 測試庫，並明確設定 `CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION=1`；透過既有 `temp-service.py` 登記 30 分鐘。Claude 的 `--source-model` 設 `qwen3.8:27b`，Codex 設 `qwen3-coder:30b`。第一輪及續談各限 600 秒，Gateway 限 1500 秒；失敗不自動重送，也不刪除資料庫或原件。
+
+測試隨機檔的內容不出現在第一輪提示中。原 Client 以本機工具讀檔後，第二輪要求只引用已有結果，不准再次讀檔；Claude 使用 `--continue`，Codex 使用 `exec resume --last`，兩者均使用隔離設定與唯一工作目錄。做法依據 [Claude 官方續談說明](https://code.claude.com/docs/en/headless) 及 [Codex 官方非互動續談說明](https://developers.openai.com/codex/noninteractive)，並已核對本機 CLI 參數。
+
+Claude 續談時會移走舊工具結果上的 `cache_control` 快取提示；本輪原件證明內容、編號與錯誤狀態均未變。驗證器僅在 Claude 的跨輪工具要求與結果比較中排除這個提示，其餘欄位仍逐項相符，原始請求照樣完整保存。這個欄位的用途見 [Claude 官方工具快取說明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)。新增十一項對照，本機保存驗證共 53 項通過；包括缺工具結果、改工具編號、遺失原訊息、把 assistant 文字當新指令、再次呼叫工具，以及只保留隨機值卻截掉其餘結果。
+
+兩個 Client 都在最終標記 `FOLLOWUP:` 後多放一個空白，因此原驗收器的精確格式判準仍失敗。沒有改判準或重送來調整措辭，也沒有將完整命令改記為成功。直接重播原件，另行核對檔案全部內容、第二輪歷史及實際用量；分別移除 Client→Gateway 與 Gateway→供應商保存中的工具結果，兩個 Client 共四項缺結果對照都被拒絕。後續另證實初版驗證器會漏抓工具要求被刪的情況，已保留失敗初件並補上原工具要求、名稱及編號的完整保留檢查；新增四項實際移除工具要求對照也全被拒絕。S2 尚未全綠，不標 DONE。
+
+Codex 原先的 `qwen3.8:27b` 路線雖執行了工具，供應商第二個 Responses 回應僅含 `reasoning`，沒有最終 `message` 或 `response.output_text.done`，Client 沒有最終輸出。這項失敗保留，未將推理內容冒充最終答案；改驗同一 Gateway 已支援的非推理模型後，有最終訊息及第二輪結果。Ollama 只支援部分 OpenAI 功能，適用邊界見 [官方相容說明](https://docs.ollama.com/api/openai-compatibility)，不能由健康頁推定每種模型的工具往返都能完成。
+
+原件與重播：`/home/cash/.local/state/ai-gateway/r1-s2-20261109`；Claude 執行目錄 `/tmp/gateway-client-identity-50wts4hj`，Codex 程式模型目錄 `/tmp/gateway-client-identity-w4763nyl`，Codex 推理模型失敗目錄 `/tmp/gateway-client-identity-tzpvcetr`。原件與重播分開保留。工具模式不重跑 S1 已核的模型拒絕與撤權，輸出明列 `not_run`；Claude 撤權逾時仍待 S4。長串流、取消、其他故障、發布及 R2／R3 仍未由本輪驗收。
+
 ## 2026-11-09 R1-S1 同版基準
 
 本次使用 Claude Code 2.1.319、Codex CLI 0.166.0 與本機 `qwen3.8:27b`，不呼叫付費來源。整合來源為 #108 的 3ca21da 與 main 的 68d7569；編譯版本 `r1s1-1278965c59eb` 對應整合樹 1278965c59ebd1c91b607eac054fcfdc8537f43f。完整差異與驗收原件位於 `/home/cash/.local/state/ai-gateway/r1-s1-20261109`，尚未發布。

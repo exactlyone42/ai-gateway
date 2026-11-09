@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_compact, validate_passthrough_stream
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream
 
 
 class PassthroughStreamTest(unittest.TestCase):
@@ -295,6 +295,123 @@ class OwnedToolsValidationTest(unittest.TestCase):
         saved[1]['client_request'] = json.dumps(body)
         with self.assertRaisesRegex(RuntimeError, '遺失原訊息'):
             validate_owned_tools(saved, 'random-file-value')
+
+
+    def followup_sample(self, codex):
+        saved = self.sample() if codex else self.native_sample()
+        event = json.loads(saved[0]['provider_response'].splitlines()[0][5:])
+        call = event['item' if codex else 'content_block']
+        for leg in ('client_request', 'provider_request'):
+            body = json.loads(saved[1][leg])
+            body['input' if codex else 'messages'].insert(1, call if codex else {'role': 'assistant', 'content': [call]})
+            saved[1][leg] = json.dumps(body)
+        third = copy.deepcopy(saved[1])
+        for leg in ('client_request', 'provider_request'):
+            body = json.loads(third[leg])
+            body['input' if codex else 'messages'].append({'role': 'user', 'content': [{'type': 'input_text' if codex else 'text', 'text': 'Use the previous result.'}]})
+            third[leg] = json.dumps(body)
+        third['provider_response'] = 'data: ' + json.dumps({'type': 'response.completed' if codex else 'message_stop'}) + '\n\n'
+        return saved + [third]
+
+    def test_followup_preserves_original_context_and_tool_output(self):
+        for codex in (False, True):
+            validate_owned_followup(self.followup_sample(codex), 'random-file-value', 'Use the previous result.', codex)
+
+    def test_tool_roundtrip_alone_does_not_prove_user_followup(self):
+        with self.assertRaisesRegex(RuntimeError, '三次請求'):
+            validate_owned_followup(self.sample(), 'random-file-value', 'Use the previous result.')
+
+    def test_claude_may_move_the_cache_hint_without_changing_tool_content(self):
+        saved = self.followup_sample(False)
+        for leg in ('client_request', 'provider_request'):
+            body = json.loads(saved[1][leg])
+            body['messages'][2]['content'][0]['cache_control'] = {'type': 'ephemeral'}
+            saved[1][leg] = json.dumps(body)
+        validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', False)
+
+    def test_followup_missing_tool_output_is_rejected(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                body = json.loads(saved[2][leg])
+                if codex:
+                    body['input'] = [item for item in body['input'] if item.get('type') != 'function_call_output']
+                else:
+                    for item in body['messages']:
+                        if isinstance(item.get('content'), list):
+                            item['content'] = [block for block in item['content'] if block.get('type') != 'tool_result']
+                saved[2][leg] = json.dumps(body)
+                with self.assertRaisesRegex(RuntimeError, '未對應'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_changed_tool_id_is_rejected(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                saved[2][leg] = saved[2][leg].replace('owned-call' if codex else 'native-call', 'different-call')
+                with self.assertRaisesRegex(RuntimeError, '未對應'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_keeps_more_than_the_random_marker(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                saved[1][leg] = saved[1][leg].replace('random-file-value', 'random-file-value full-tool-context')
+                with self.assertRaisesRegex(RuntimeError, '未完整保留'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_cannot_drop_original_user_message(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                body = json.loads(saved[2][leg])
+                body['input' if codex else 'messages'].pop(0)
+                saved[2][leg] = json.dumps(body)
+                with self.assertRaisesRegex(RuntimeError, '遺失原訊息'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_assistant_text_is_not_a_second_user_instruction(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                body = json.loads(saved[2][leg])
+                body['input' if codex else 'messages'][-1]['role'] = 'assistant'
+                saved[2][leg] = json.dumps(body)
+                with self.assertRaisesRegex(RuntimeError, '第二輪使用者指令'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_cannot_read_the_file_again(self):
+        for codex in (False, True):
+            saved = self.followup_sample(codex)
+            saved[2]['provider_response'] = saved[0]['provider_response']
+            with self.assertRaisesRegex(RuntimeError, '重新呼叫工具'):
+                validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_cannot_drop_the_original_tool_call(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                body = json.loads(saved[2][leg])
+                if codex:
+                    body['input'] = [item for item in body['input'] if item.get('type') != 'function_call']
+                else:
+                    for item in body['messages']:
+                        if isinstance(item.get('content'), list):
+                            item['content'] = [block for block in item['content'] if block.get('type') != 'tool_use']
+                saved[2][leg] = json.dumps(body)
+                with self.assertRaisesRegex(RuntimeError, '原工具要求'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
+
+    def test_followup_cannot_change_the_original_tool_name(self):
+        for codex in (False, True):
+            for leg in ('client_request', 'provider_request'):
+                saved = self.followup_sample(codex)
+                body = json.loads(saved[2][leg])
+                call = body['input'][1] if codex else body['messages'][1]['content'][0]
+                call['name'] = 'different-tool'
+                saved[2][leg] = json.dumps(body)
+                with self.assertRaisesRegex(RuntimeError, '原工具要求'):
+                    validate_owned_followup(saved, 'random-file-value', 'Use the previous result.', codex)
 
 
 class OwnedCompactValidationTest(unittest.TestCase):

@@ -84,6 +84,45 @@ def validate_owned_tools(saved, expected_value, codex=True):
             outputs = [block for item in following if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_result' and block.get('tool_use_id') == calls[0]['id'] and not block.get('is_error')]
         if len(outputs) != 1 or expected_value not in json.dumps(outputs[0].get('output' if codex else 'content')):
             raise RuntimeError('本人來源工具結果與呼叫未對應')
+    return calls[0]
+
+
+def validate_owned_followup(saved, expected_value, followup_prompt, codex=True):
+    if len(saved) != 3:
+        raise RuntimeError('本人來源工具與續談不是三次請求')
+    source_call = validate_owned_tools(saved[:2], expected_value, codex)
+    validate_owned_tools([saved[0], saved[2]], expected_value, codex)
+    for leg in ('client_request', 'provider_request'):
+        field = 'input' if codex else 'messages'
+        previous = json.loads(saved[1][leg]).get(field, [])
+        following = json.loads(saved[2][leg]).get(field, [])
+        if codex:
+            calls = [item for item in previous if item.get('type') == 'function_call']
+            resumed_calls = [item for item in following if item.get('type') == 'function_call']
+            outputs = [item for item in previous if item.get('type') == 'function_call_output']
+            resumed_outputs = [item for item in following if item.get('type') == 'function_call_output']
+        else:
+            calls = [{key: value for key, value in block.items() if key != 'cache_control'} for item in previous if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_use']
+            resumed_calls = [{key: value for key, value in block.items() if key != 'cache_control'} for item in following if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_use']
+            outputs = [{key: value for key, value in block.items() if key != 'cache_control'} for item in previous if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_result']
+            resumed_outputs = [{key: value for key, value in block.items() if key != 'cache_control'} for item in following if isinstance(item.get('content'), list) for block in item['content'] if block.get('type') == 'tool_result']
+        identifier = 'call_id' if codex else 'id'
+        if len(calls) != 1 or calls != resumed_calls or calls[0].get(identifier) != source_call.get(identifier) or calls[0].get('name') != source_call.get('name'):
+            raise RuntimeError('續談未完整保留原工具要求')
+        if outputs != resumed_outputs:
+            raise RuntimeError('續談未完整保留原工具結果')
+        users = [item.get('content') for item in following if item.get('role') == 'user']
+        texts = []
+        for content in users:
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                texts.append(''.join(block.get('text', '') for block in content if block.get('type') in ('text', 'input_text')))
+        if followup_prompt not in texts:
+            raise RuntimeError('續談缺少第二輪使用者指令')
+    events = [json.loads(line[5:].lstrip()) for line in saved[2]['provider_response'].splitlines() if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]')]
+    if any(event.get('type') == 'response.output_item.done' and event.get('item', {}).get('type') == 'function_call' or event.get('type') == 'content_block_start' and event.get('content_block', {}).get('type') == 'tool_use' for event in events):
+        raise RuntimeError('續談重新呼叫工具，未只引用既有結果')
 
 
 def validate_tools(saved, fixture, codex):

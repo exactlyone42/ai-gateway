@@ -3,6 +3,7 @@
   "task": "gateway-completion",
   "project": "/home/cash/work_space/private/agent-pool-gateway-completion",
   "steps": {
+    "R1-S1": {"kind": "internal", "reason": "建立同版原Client成功與失敗基準，修正驗證器誤報；日常工作功能及發布仍須R1-S2至S5驗收，沒有可上線新功能"},
     "S01": {"kind": "internal", "reason": "修本機 git 設定，不是可用功能"},
     "S02": {
       "kind": "milestone",
