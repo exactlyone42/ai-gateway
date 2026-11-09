@@ -198,38 +198,8 @@ pub(super) async fn proxy(
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
-    let profile = state
-        .profile_for_user(&canonical.principal, &selection.profile)
-        .await?;
-    let provider_secret = profile
-        .bearer_secret()
-        .or_else(|| profile.api_key_secret())
-        .map(str::to_owned)
-        .or_else(|| profile.held_token().map(|token| token.to_string()));
     let selection_snapshot = selection.ledger_snapshot();
     let ledger_estimated = matches!(operation, Operation::Messages).then_some(estimated.clone());
-    let upstream_request = prepare_for_provider(
-        &canonical,
-        &profile,
-        &provider_model,
-        translation,
-        ProviderRequestInput {
-            source_path_and_query: path_and_query,
-            client_headers: &headers,
-            idempotency_key: None,
-        },
-    )?;
-    let provider_parameters = upstream_request.parameter_snapshot()?;
-    let mut capture = crate::services::capture_request::start(
-        &state,
-        policy,
-        &canonical,
-        &headers,
-        upstream_request.body(),
-        provider_secret.as_deref(),
-    )
-    .await?;
-    let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
     let mut reservation = state
         .ledger
         .reserve_with_quota(
@@ -260,16 +230,66 @@ pub(super) async fn proxy(
             Some(&prepared.rejection.attribution),
         )
         .await?;
-    reservation.annotate_parameters(requested_parameters, provider_parameters);
-    if let Some(session) = capture.as_ref() {
-        reservation.attach_capture(session.clone());
-    }
     reservation.cancel_on_force(state.lifecycle.force_token());
     reservation.annotate_protocol(
         operation.name(),
         header_text(&headers, "x-claude-code-agent-id"),
         header_text(&headers, "x-claude-code-parent-agent-id"),
     );
+    let setup = async {
+        let profile = state
+            .profile_for_user(&canonical.principal, &selection.profile)
+            .await?;
+        let provider_secret = profile
+            .bearer_secret()
+            .or_else(|| profile.api_key_secret())
+            .map(str::to_owned)
+            .or_else(|| profile.held_token().map(|token| token.to_string()));
+        let upstream_request = prepare_for_provider(
+            &canonical,
+            &profile,
+            &provider_model,
+            translation,
+            ProviderRequestInput {
+                source_path_and_query: path_and_query,
+                client_headers: &headers,
+                idempotency_key: None,
+            },
+        )?;
+        let provider_parameters = upstream_request.parameter_snapshot()?;
+        reservation.annotate_parameters(requested_parameters, provider_parameters);
+        let capture = crate::services::capture_request::start(
+            &state,
+            policy,
+            &canonical,
+            &headers,
+            upstream_request.body(),
+            provider_secret.as_deref(),
+        )
+        .await?;
+        Ok::<_, GatewayError>((profile, upstream_request, provider_secret, capture))
+    }
+    .await;
+    let (profile, upstream_request, provider_secret, mut capture) = match setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            reservation.annotate_policy(policy.rejection_snapshot(error.kind()));
+            reservation
+                .finish(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: Some(model.clone()),
+                    selected_provider: Some(provider.clone()),
+                    attempts: Vec::new(),
+                    completed_at: Utc::now(),
+                })
+                .await?;
+            return Err(error);
+        }
+    };
+    let is_stream = matches!(operation, Operation::Messages) && canonical.stream;
+    if let Some(session) = capture.as_ref() {
+        reservation.attach_capture(session.clone());
+    }
     let mut reservation = request_policy::enforce_deadline(reservation, policy).await?;
     reservation = crate::services::admission::acquire(
         &state,

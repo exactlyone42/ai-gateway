@@ -222,37 +222,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
-    let profile = state
-        .profile_for_user(&canonical.principal, &selection.profile)
-        .await?;
     let selection_snapshot = selection.ledger_snapshot();
-    let upstream_request = prepare_for_provider(
-        &canonical,
-        &profile,
-        &provider_model,
-        translation,
-        ProviderRequestInput {
-            source_path_and_query: &request.path_and_query,
-            client_headers: &request.headers,
-            idempotency_key,
-        },
-    )?;
-    let provider_parameters = upstream_request.parameter_snapshot()?;
-    let provider_secret = profile
-        .bearer_secret()
-        .or_else(|| profile.api_key_secret())
-        .map(str::to_owned)
-        .or_else(|| profile.held_token().map(|token| token.to_string()));
-    let mut capture = crate::services::capture_request::start(
-        state,
-        policy,
-        &canonical,
-        &request.headers,
-        upstream_request.body(),
-        provider_secret.as_deref(),
-    )
-    .await?;
-    let is_stream = canonical.stream;
     let mut reservation = state
         .ledger
         .reserve_with_quota(
@@ -281,12 +251,62 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
             Some(&prepared.rejection.attribution),
         )
         .await?;
-    reservation.annotate_parameters(requested_parameters, provider_parameters);
+    reservation.cancel_on_force(state.lifecycle.force_token());
+    reservation.annotate_protocol(request.operation.name(), None, None);
+    let setup = async {
+        let profile = state
+            .profile_for_user(&canonical.principal, &selection.profile)
+            .await?;
+        let upstream_request = prepare_for_provider(
+            &canonical,
+            &profile,
+            &provider_model,
+            translation,
+            ProviderRequestInput {
+                source_path_and_query: &request.path_and_query,
+                client_headers: &request.headers,
+                idempotency_key,
+            },
+        )?;
+        let provider_parameters = upstream_request.parameter_snapshot()?;
+        reservation.annotate_parameters(requested_parameters, provider_parameters);
+        let provider_secret = profile
+            .bearer_secret()
+            .or_else(|| profile.api_key_secret())
+            .map(str::to_owned)
+            .or_else(|| profile.held_token().map(|token| token.to_string()));
+        let capture = crate::services::capture_request::start(
+            state,
+            policy,
+            &canonical,
+            &request.headers,
+            upstream_request.body(),
+            provider_secret.as_deref(),
+        )
+        .await?;
+        Ok::<_, GatewayError>((profile, upstream_request, provider_secret, capture))
+    }
+    .await;
+    let (profile, upstream_request, provider_secret, mut capture) = match setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            reservation.annotate_policy(policy.rejection_snapshot(error.kind()));
+            reservation
+                .finish(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: Some(model.clone()),
+                    selected_provider: Some(provider.clone()),
+                    attempts: Vec::new(),
+                    completed_at: Utc::now(),
+                })
+                .await?;
+            return Err(error);
+        }
+    };
+    let is_stream = canonical.stream;
     if let Some(session) = capture.as_ref() {
         reservation.attach_capture(session.clone());
     }
-    reservation.cancel_on_force(state.lifecycle.force_token());
-    reservation.annotate_protocol(request.operation.name(), None, None);
     if policy.is_expired(Utc::now()) {
         reservation.annotate_policy(policy.rejection_snapshot("deadline_expired"));
         reservation

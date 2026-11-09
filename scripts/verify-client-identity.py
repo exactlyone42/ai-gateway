@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--check-tenant-access', action='store_true')
     parser.add_argument('--check-access-race', action='store_true')
     parser.add_argument('--check-capture-access', action='store_true')
+    parser.add_argument('--check-preflight-quota', action='store_true')
     parser.add_argument('--control-capture-access', choices=('viewer', 'before', 'during'))
     parser.add_argument('--control-quota-double-admit', action='store_true')
     parser.add_argument('--control-tenant-admin-as-viewer', action='store_true')
@@ -58,6 +59,8 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
+    if args.check_preflight_quota and (not args.check_capture or any(value for name, value in vars(args).items() if name not in ('gateway_binary', 'revision', 'client', 'check_capture', 'check_preflight_quota'))):
+        parser.error('送出前故障額度驗收須搭配保存，與其他模式分開')
     if args.check_capture_access and (not args.check_capture or any((live_source, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact))):
         parser.error('內容授權與保存故障須搭配保存，與原Client及其他模式分開驗收')
     if args.control_capture_access and not args.check_capture_access:
@@ -119,7 +122,7 @@ def main():
         parser.error('forced kill control requires --check-cancel')
     if args.control_error_as_success and not args.check_error:
         parser.error('error success control requires --check-error')
-    if args.check_capture and not (args.check_capture_access or args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
+    if args.check_capture and not (args.check_preflight_quota or args.check_capture_access or args.check_tools or args.check_cancel or args.check_error or args.check_long_stream or live_source):
         parser.error('capture validation requires tools, cancel or error')
     if args.check_codex_held:
         if args.client != 'codex' or not args.codex_auth_file or not args.source_model or any((args.check_tools, args.check_cancel, args.check_error)):
@@ -141,9 +144,9 @@ def main():
             local_capabilities = json.load(response).get('capabilities', [])
         if 'completion' not in local_capabilities or (args.check_owned_tools and 'tools' not in local_capabilities):
             raise RuntimeError('本機模型未宣告所需的文字或工具能力')
-    version = subprocess.check_output([args.client, '--version'], text=True).strip()
+    version = 'HTTP-only' if args.check_preflight_quota else subprocess.check_output([args.client, '--version'], text=True).strip()
     required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.319 '
-    if not version.startswith(required):
+    if not args.check_preflight_quota and not version.startswith(required):
         raise RuntimeError('Client版本不符')
     codex = args.client == 'codex'
     provider_key = 'local-ollama' if args.check_local else 'codex-subscription' if args.check_codex_held else ('openai' if codex else 'anthropic')
@@ -227,7 +230,7 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
-    if args.check_access_matrix or args.check_tenant_access or args.check_access_race or args.check_capture_access:
+    if args.check_preflight_quota or args.check_access_matrix or args.check_tenant_access or args.check_access_race or args.check_capture_access:
         environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
         fixture.provider_credentials.add('fixture-tenant-api')
     if args.check_tenant_access or args.check_capture_access:
@@ -304,6 +307,13 @@ def main():
             activate('policies', policy)
             if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_preflight_quota:
+            print(f'送出前故障額度證據：{runtime}', flush=True)
+            verify = runpy.run_path(str(root / 'scripts/client_preflight_quota.py'))['verify']
+            verify(api, create, activate, users, fixture, runtime, admin, codex, database)
+            print(f'送出前故障額度恢復通過；證據：{runtime}')
+            return
 
         if args.check_access_race:
             print(f'權限競態證據：{runtime}', flush=True)

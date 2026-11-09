@@ -3,6 +3,31 @@
   "task": "gateway-completion",
   "project": "/home/cash/work_space/private/ai-gateway-completion",
   "steps": {
+    "R3-S5": {
+      "kind": "stage",
+      "environment": "production",
+      "artifact": {
+        "path": "delivery/gateway-completion/r3-s5-release.tar",
+        "sha256": "pending"
+      },
+      "validation": {
+        "path": "delivery/gateway-completion/r3-s5-validation.json",
+        "sha256": "pending"
+      },
+      "authorization": {
+        "path": "delivery/gateway-completion/r3-s5-authorization.json",
+        "sha256": "pending"
+      },
+      "deploy": {
+        "path": "delivery/gateway-completion/r3-s5-deploy.sh",
+        "sha256": "pending"
+      },
+      "readback": {
+        "path": "delivery/gateway-completion/r3-s5-readback.sh",
+        "sha256": "pending"
+      },
+      "timeout_seconds": 900
+    },
     "R3-S4": {"kind": "internal", "reason": "沿既有還原器補隔離11表/帳本/額度/密文/密鑰與刪除不復活驗收及必要反例，只改驗收器與操作文件、未改產品Rust或正式配置；S3產品stage及S02/S06不變，S5與同版安全發布仍未完成"},
     "R3-S3": {
       "kind": "stage",
