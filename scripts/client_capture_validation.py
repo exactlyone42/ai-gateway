@@ -180,3 +180,17 @@ def validate_errors(saved, payloads):
         raise RuntimeError('錯誤來源缺少獨立回應識別')
     if sorted(content['provider_response'] for content in saved) != sorted(payloads):
         raise RuntimeError('錯誤保存與實際上游回應未逐筆相符')
+
+
+def validate_error_recovery(saved, payloads, recovery_stream, usage_records, records, codex):
+    if len(saved) != 2 or len(payloads) != 1 or len(records) != 2 or len(usage_records) != 2 or len({row['capture_id'] for row in records}) != 2:
+        raise RuntimeError('錯誤與恢復不是兩個獨立請求')
+    validate_errors(saved[:1], payloads)
+    validate_passthrough_stream(recovery_stream, saved[1]['provider_response'])
+    for index, failed in enumerate((True, False)):
+        selected = [row for row in usage_records if row['id'] == records[index]['capture_id']]
+        validate_usage(selected, records[index:index + 1], False, codex, failed)
+        if failed and selected[0]['provider_request_id'] != json.loads(payloads[0])['request_id']:
+            raise RuntimeError('上游錯誤編號與嘗試紀錄不一致')
+        if not failed and selected[0]['status'] != 'completed':
+            raise RuntimeError('恢復請求沒有成功結帳')

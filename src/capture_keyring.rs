@@ -251,6 +251,7 @@ pub(crate) fn initialize(
     std::fs::remove_file(root.join(".initializing"))
         .and_then(|_| std::fs::File::open(root)?.sync_all())
         .map_err(|_| CaptureKeyringError)?;
+    lock.unlock().map_err(|_| CaptureKeyringError)?;
     Ok(fingerprint)
 }
 

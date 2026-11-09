@@ -5823,7 +5823,11 @@ mod tests {
                 async move {
                     (
                         StatusCode::TOO_MANY_REQUESTS,
-                        [("content-type", "application/json"), ("retry-after", "11")],
+                        [
+                            ("content-type", "application/json"),
+                            ("retry-after", "11"),
+                            ("x-should-retry", "false"),
+                        ],
                         raw,
                     )
                 }
@@ -5853,6 +5857,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["retry-after"], "11");
+        assert_eq!(response.headers().get("x-should-retry").unwrap(), "false");
         assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), raw);
 
         state.ledger.wait_for_idle().await;
@@ -7056,6 +7061,7 @@ mod tests {
                             ("content-type", "application/json"),
                             ("content-encoding", "gzip"),
                             ("retry-after", "7"),
+                            ("x-should-retry", "true"),
                         ],
                         encoded,
                     )
@@ -7135,6 +7141,7 @@ mod tests {
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(rejected.headers()["retry-after"], "7");
+        assert_eq!(rejected.headers().get("x-should-retry").unwrap(), "true");
         assert_eq!(rejected.headers()["content-encoding"], "gzip");
         assert_eq!(
             to_bytes(rejected.into_body(), 4096).await.unwrap().as_ref(),

@@ -39,10 +39,13 @@ def main():
     parser.add_argument('--check-cancel', action='store_true')
     parser.add_argument('--check-capture', action='store_true')
     parser.add_argument('--check-error', action='store_true')
+    parser.add_argument('--check-auth-recovery', action='store_true')
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
+    if args.check_auth_recovery and not (args.check_error and args.check_capture):
+        parser.error('--check-auth-recovery 必須搭配 --check-error 與 --check-capture')
     if args.check_local and (args.check_codex_held or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_cancel, args.check_error))):
         parser.error('local source requires a source model separately from fixture and subscription modes')
     if args.check_owned_compact and (not (args.check_codex_held and args.check_capture) or args.check_owned_tools):
@@ -115,6 +118,7 @@ def main():
     if args.check_error:
         fixture = runpy.run_path(str(root / 'scripts/client_error_fixture.py'))['handler'](fixture)
         fixture.success_control = args.control_error_as_success
+        fixture.auth_recovery = args.check_auth_recovery
     if args.check_compact:
         fixture = runpy.run_path(str(root / 'scripts/client_compact_fixture.py'))['handler'](fixture)
         fixture.auto_claude = args.claude_auto_compact
@@ -245,7 +249,7 @@ def main():
             if codex:
                 reasoning_effort = 'none' if args.check_local and 'thinking' not in local_capabilities else 'low'
                 (home / 'config.toml').write_text(f'model = "{model}"\nmodel_provider = "fixture"\nmodel_reasoning_effort = "{reasoning_effort}"\n[model_providers.fixture]\nname = "Isolated Gateway"\nbase_url = "{base}/v1"\nenv_key = "GATEWAY_TEST_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n')
-                if args.check_local:
+                if args.check_local or args.check_auth_recovery:
                     with (home / 'config.toml').open('a') as config:
                         config.write('stream_max_retries = 0\nrequest_max_retries = 0\nstream_idle_timeout_ms = 600000\n')
                 if args.check_compact:
@@ -352,7 +356,7 @@ def main():
                 diagnostic = diagnostic.replace(secret, '[credential]')
             (home / 'client-diagnostic.txt').write_text(diagnostic)
             if not cancel:
-                (home / 'client-result.json').write_text(json.dumps({'exit': result.returncode, 'expected_success': success, 'expected_reply_matches': result.stdout.strip() == expected_reply}, indent=2))
+                (home / 'client-result.json').write_text(json.dumps({'exit': result.returncode, 'expected_success': success and not error, 'expected_reply_matches': result.stdout.strip() == expected_reply}, indent=2))
             if live_source:
                 if success and (result.returncode != 0 or result.stdout.strip() != expected_reply):
                     raise RuntimeError(f'{label}: 原{args.client}未完成來源實送，紀錄位於{runtime}')
@@ -365,7 +369,7 @@ def main():
                 if not observed or any(not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
                     raise RuntimeError('壓縮失敗路徑憑證隔離不符')
             elif success or error:
-                if error and (result.returncode != 1 or fixture.error_marker not in diagnostic or not 1 <= after - before <= 6):
+                if error and (result.returncode != 1 or fixture.error_marker not in diagnostic or not 1 <= after - before <= (1 if args.check_auth_recovery else 6)):
                     raise RuntimeError(f'{label}: 原Client未正確回報上游錯誤，退出{result.returncode}、上游{after - before}次')
                 if not error and not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
                     raise RuntimeError(f'{label}: 原Client未完成假串流')
@@ -402,6 +406,8 @@ def main():
                 reject_plaintext(path.read_bytes(), markers)
             query = root / 'queries/test_client_capture_records.sql'
             count = 3 if args.check_owned_compact or args.check_owned_tools else fixture.error_requests if args.check_error else (2 if args.check_tools else 1)
+            if args.check_auth_recovery:
+                count += fixture.recovery_requests
             expected_state = 'incomplete' if args.check_cancel else 'complete'
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
@@ -425,7 +431,7 @@ def main():
             if args.check_tools:
                 runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_tools'](saved, fixture, codex)
             elif args.check_error:
-                runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_errors'](saved, fixture.error_payloads)
+                validation['validate_errors'](saved[:-1] if args.check_auth_recovery else saved, fixture.error_payloads)
                 for content in saved:
                     for leg in ('client_request', 'provider_request'):
                         if expected_reply not in content[leg]:
@@ -446,11 +452,14 @@ def main():
             usage_query = root / 'queries/test_client_capture_usage.sql'
             usage_result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=usage_query.read_text(), capture_output=True, text=True, timeout=5, check=True)
             usage_records = json.loads(usage_result.stdout)
-            if args.check_error and {row['request_id'] for row in usage_records} != set(checks[-1]['ingress_request_ids']):
+            if args.check_error and {row['request_id'] for row in usage_records} != {request_id for check in checks for request_id in check.get('ingress_request_ids', [])}:
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
             if live_source:
                 (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
                 validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
+            elif args.check_auth_recovery:
+                name = 'openai-response.sse' if codex else 'anthropic-response.sse'
+                validation['validate_error_recovery'](saved, fixture.error_payloads, (fixture.fixture_dir / name).read_text(), usage_records, records, codex)
             else:
                 validation['validate_usage'](usage_records, records, args.check_cancel, codex, args.check_error)
             dump = subprocess.run(['pg_dump', database, '--data-only', '--no-owner', '--no-privileges'], capture_output=True, timeout=15, check=True)
@@ -507,11 +516,18 @@ def main():
 
         if args.check_error:
             client('alice', f'{model_prefix}-alice', True, 'upstream-error', error=True)
-            ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == 400]
+            ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == (401 if args.check_auth_recovery else 400)]
             ingress_ids = {event['request_id'] for event in ingress}
             if len(ingress) != fixture.error_requests or len(ingress_ids) != len(ingress):
                 raise RuntimeError('入口錯誤請求與上游嘗試數量不符')
             checks[-1]['ingress_request_ids'] = sorted(ingress_ids)
+            if args.check_auth_recovery:
+                fixture.recovered = True
+                client('alice', f'{model_prefix}-alice', True, 'after-upstream-error')
+                recovered_ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == 200]
+                if fixture.error_requests != 1 or fixture.recovery_requests != 1 or len(recovered_ingress) != 1 or recovered_ingress[0]['request_id'] in ingress_ids:
+                    raise RuntimeError('錯誤後未以唯一新請求恢復')
+                checks[-1]['ingress_request_ids'] = [recovered_ingress[0]['request_id']]
             if args.check_capture:
                 verify_capture()
             (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
@@ -593,7 +609,7 @@ def main():
         raise
     finally:
         if args.check_error:
-            (runtime / 'error-result.json').write_text(json.dumps({'upstream_requests': fixture.error_requests, 'observations': fixture.error_observations, 'error_payloads': fixture.error_payloads}, indent=2))
+            (runtime / 'error-result.json').write_text(json.dumps({'upstream_requests': fixture.error_requests, 'recovery_requests': fixture.recovery_requests, 'observations': fixture.error_observations, 'error_payloads': fixture.error_payloads}, indent=2))
             print(f'錯誤測試證據：{runtime}')
         if args.check_cancel:
             fixture.stop_stream.set()

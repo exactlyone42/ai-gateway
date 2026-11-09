@@ -102,7 +102,12 @@ base_url = "https://aigw.internal.example.com/v1"
 env_key = "AIGW_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
+stream_max_retries = 0
+request_max_retries = 0
+stream_idle_timeout_ms = 600000
 ```
+
+這組設定禁止 Client 自動重送請求，避免已開始的工作再次執行；失敗後由使用者另發新請求。Codex 0.166.0 的本輪原件顯示，未設定時即使上游要求停止重試，仍會把 401 總共送六次；不能只靠 Gateway 的回應提示。設定用途見 [官方說明](https://learn.chatgpt.com/docs/config-file/config-reference)，原件與邊界見 [傳輸驗收](client-roundtrip-evidence.md)。
 
 **實測證據**：0.153.0 指向本機 gateway，再到可控 Responses SSE mock；`codex exec`
 精確輸出 `W06_CODEX_OK`。版本化 capture 顯示 `POST /v1/responses` request 為

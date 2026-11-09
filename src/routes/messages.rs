@@ -798,6 +798,7 @@ fn response_header_allowed(name: &HeaderName) -> bool {
     name == header::CONTENT_TYPE
         || name == header::CONTENT_ENCODING
         || name == header::RETRY_AFTER
+        || name.as_str() == "x-should-retry"
         || name.as_str() == "request-id"
         || name.as_str().starts_with("anthropic-")
 }

@@ -3,7 +3,75 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery
+from pathlib import Path
+
+
+class ErrorRecoveryTest(unittest.TestCase):
+    def sample(self, codex):
+        name = 'openai-response.sse' if codex else 'anthropic-response.sse'
+        stream = (Path(__file__).resolve().parent.parent / 'tests/fixtures/client-roundtrip' / name).read_text()
+        payload = json.dumps({'error': {'type': 'authentication_error'}, 'request_id': 'provider-error-1'})
+        saved = [{'provider_response': payload}, {'provider_response': stream}]
+        records = [{'capture_id': 'failed-1'}, {'capture_id': 'completed-2'}]
+        estimated = {'source': 'estimated', 'input_tokens': 20, 'output_tokens': 10}
+        rows = [
+            {'id': 'failed-1', 'provider_request_id': 'provider-error-1', 'status': 'failed', 'actual_usage': {}, 'estimated_usage': {'input_tokens': 20, 'output_tokens': 10}, 'usage': [estimated]},
+            {'id': 'completed-2', 'status': 'completed', 'actual_usage': {'input_tokens': 1, 'output_tokens': 1}, 'estimated_usage': {'input_tokens': 20, 'output_tokens': 10}, 'usage': [estimated, {'source': 'provider_reported', 'input_tokens': 1, 'output_tokens': 1}]},
+        ]
+        return [saved, [payload], stream, rows, records, codex]
+
+    def test_error_and_separate_success_are_required(self):
+        for codex in (False, True):
+            validate_error_recovery(*self.sample(codex))
+
+    def test_missing_or_reversed_error_is_rejected(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            args[0].reverse()
+            with self.assertRaises(RuntimeError):
+                validate_error_recovery(*args)
+            args = self.sample(codex)
+            args[0].pop(0)
+            with self.assertRaises(RuntimeError):
+                validate_error_recovery(*args)
+
+    def test_truncated_recovery_stream_is_rejected(self):
+        for codex in (False, True):
+            args = self.sample(codex)
+            args[0][1]['provider_response'] = args[2][:-10]
+            with self.assertRaises(RuntimeError):
+                validate_error_recovery(*args)
+
+    def test_duplicate_capture_id_is_rejected(self):
+        args = self.sample(True)
+        args[4][1]['capture_id'] = args[4][0]['capture_id']
+        with self.assertRaises(RuntimeError):
+            validate_error_recovery(*args)
+
+    def test_rejected_request_cannot_report_usage(self):
+        args = self.sample(True)
+        args[3][0]['usage'].append({'source': 'provider_reported', 'input_tokens': 1, 'output_tokens': 1})
+        with self.assertRaises(RuntimeError):
+            validate_error_recovery(*args)
+
+    def test_failed_recovery_cannot_be_completed(self):
+        args = self.sample(True)
+        args[3][1]['status'] = 'failed'
+        with self.assertRaises(RuntimeError):
+            validate_error_recovery(*args)
+
+    def test_missing_recovery_usage_is_rejected(self):
+        args = self.sample(True)
+        args[3][1]['usage'].pop()
+        with self.assertRaises(RuntimeError):
+            validate_error_recovery(*args)
+
+    def test_unmatched_provider_request_id_is_rejected(self):
+        args = self.sample(True)
+        args[3][0]['provider_request_id'] = 'different-error'
+        with self.assertRaises(RuntimeError):
+            validate_error_recovery(*args)
 
 
 class PassthroughStreamTest(unittest.TestCase):
