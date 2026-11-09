@@ -191,6 +191,12 @@ impl IntoResponse for GatewayError {
         )
             .into_response();
         response.extensions_mut().insert(failure);
+        if matches!(self, Self::Unauthorized) {
+            response.headers_mut().insert(
+                "x-should-retry",
+                axum::http::HeaderValue::from_static("false"),
+            );
+        }
         if matches!(
             self,
             Self::QueueFull
@@ -266,9 +272,27 @@ mod tests {
     async fn gateway_errors_expose_the_stable_code_in_the_response() {
         let response = GatewayError::Unauthorized.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get("x-should-retry").unwrap(), "false");
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "unauthorized");
+    }
+
+    #[test]
+    fn temporary_authentication_failures_do_not_disable_client_retries() {
+        for error in [
+            GatewayError::AuthenticationUnavailable(crate::identity::IdentityError::Database(
+                sqlx::Error::PoolTimedOut,
+            )),
+            GatewayError::ProviderUnavailable,
+        ] {
+            let response = error.into_response();
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(response.headers().get("x-should-retry").is_none());
+        }
     }
 
     #[test]

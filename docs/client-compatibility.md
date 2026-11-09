@@ -68,6 +68,8 @@ bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發�
 `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` 控制；長工作需在 Client 設為 `600000`，
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS` 不能取代它。`x-claude-code-agent-id` 是 agent，不是人。
 
+Gateway 判定金鑰缺失、無效或已撤銷時，401 回應另帶 `x-should-retry: false`，讓原 Client 停止重送同一個無效金鑰。認證服務暫時故障仍回 503，不帶停止重試提示。Claude Code 2.1.319 的原版對照與驗證邊界見 [傳輸驗收](client-roundtrip-evidence.md)。
+
 ## Codex CLI
 
 本分支已隔離實測 Ollama 0.34.0 的 `qwen3-coder:30b`。不支援推理的模型須在 Client 設定 `model_reasoning_effort = "none"`，模型清單也要如實標示 `supports_reasoning=false`；Gateway 不會替使用者開啟推理。這不代表所有本機模型均可用，`gpt-oss:20b` 的本輪精確回答與工具驗收未過。新版尚未部署。
