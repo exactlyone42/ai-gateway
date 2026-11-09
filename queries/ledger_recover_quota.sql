@@ -7,7 +7,7 @@ WITH candidates AS (
       AND jsonb_array_length(entry->'attempts') = 0
 )
 SELECT reservation.tenant_id, reservation.gateway_request_id,
-       reservation.id AS reservation_id, reservation.decision,
+       reservation.id AS reservation_id, reservation.decision, reservation.estimated_tokens,
        EXISTS (
            SELECT 1 FROM jsonb_array_elements(reservation.allocations) AS allocation
            WHERE allocation->>'limit_kind' IN ('cost_per_day_microusd', 'cost_per_month_microusd')

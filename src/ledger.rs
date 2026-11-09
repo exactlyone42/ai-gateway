@@ -861,6 +861,9 @@ impl Ledger {
                         envelope.request.quota_reservation_id = Some(row.reservation_id);
                         envelope.request.quota_decision = Some(row.decision.clone());
                         envelope.request.quota_requires_cost = row.requires_cost;
+                        if envelope.request.operation != "count_tokens" {
+                            envelope.request.estimated_tokens = Some(row.estimated_tokens);
+                        }
                         envelope.request.quota_actual_tokens = Some(0);
                         envelope.request.quota_actual_cost_microusd = Some(0);
                     }

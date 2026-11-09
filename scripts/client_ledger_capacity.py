@@ -79,6 +79,8 @@ def verify(api, create, activate, users, fixture, runtime, codex, database):
             checks.append({'request_id': row['id'], 'status': status, 'quota_reserved': False, 'provider_calls': 0})
             continue
         reservation = reservations[row['id']]
+        if row['estimated_tokens'] != reservation['estimated_tokens']:
+            raise RuntimeError('正常請求的帳本估量未對回額度預留')
         events = [event for event in final['quota_reconciliation_events'] if event['reservation_id'] == reservation['id']]
         if reservation['state'] != 'reconciled' or reservation['actual_tokens'] != tokens or len(events) != 1 or events[0]['actual_tokens'] != tokens or len(attempts) != 1:
             raise RuntimeError('帳本容量故障後重複、漏結帳或用量不符')
