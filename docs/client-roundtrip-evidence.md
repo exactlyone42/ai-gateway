@@ -1,5 +1,19 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-10 R2-S3 跨租戶與角色隔離（HTTP）
+
+同一隔離資料庫、同一Gateway，以真管理API建立兩租戶及Admin/Operator/Viewer。兩邊模型與使用者同名、憑證不同；每協定36案，共72案通過。各有6次來源成功、1次無效供應商憑證401且不回退、23次權限拒絕零來源、6次管理允許。此為HTTP合成身分及來源，未重跑原Client或真模型。
+
+| 角色 | 查本租戶使用者 | 建群組 | 讀／設定憑證、加會員 |
+| --- | --- | --- | --- |
+| Admin | 允許 | 允許 | 允許 |
+| Operator | 允許 | 允許 | 拒絕 |
+| Viewer | 允許 | 拒絕 | 拒絕 |
+
+跨租戶物件讀寫刪404；A政策允許B專用模型，仍由租戶模型清單拒絕403。格式有效但秘密變更的Gateway金鑰401不上游，與供應商401的一次來源呼叫分開。B兩份憑證檔保持原輸入；全部入口、帳本歸屬及秘密掃描對回。依[OWASP物件授權指引](https://api-security.owasp.org/editions/2023/en/0xa1-broken-object-level-authorization/)核對物件權限，角色表僅涵蓋本次操作，非所有管理API窮舉。
+
+故意用Admin代Viewer回200，驗收器拒絕冒403。首件因未明列來源可信租戶而503的失敗保留，後續僅明確允許兩測試租戶。新入口 `--check-tenant-access`，角色反例加 `--control-tenant-admin-as-viewer`。只補驗收器；同binary的S1群組歧義/硬限制證據沿用，競態、保存及同版發布仍待。原件、全套與提交狀態：`/home/cash/.local/state/ai-gateway/r2-tenant-access-20261110/summary.json`。
+
 ## 2026-11-10 R2-S2 本人Codex首次使用
 
 原Codex 0.166.0沿目前設定的 `gpt-6.1-sol`，完成管理API建立身分、來源、政策及Gateway金鑰，到本人訂閱首次使用與帳本對回。明確綁定唯一持有人；來源只複製access/account至0600隔離檔，不含refresh，原登入及預設路線未改。[官方說明](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)亦以實際完成推論確認當次模型可用，登入檔存在不足以證明。

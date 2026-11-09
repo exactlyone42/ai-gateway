@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--check-codex-held', action='store_true')
     parser.add_argument('--check-local', action='store_true')
     parser.add_argument('--check-access-matrix', action='store_true')
+    parser.add_argument('--check-tenant-access', action='store_true')
+    parser.add_argument('--control-tenant-admin-as-viewer', action='store_true')
     parser.add_argument('--control-access-foreign-source', action='store_true')
     parser.add_argument('--check-owned-tools', action='store_true')
     parser.add_argument('--check-owned-compact', action='store_true')
@@ -52,8 +54,12 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
-    if args.check_access_matrix and any((live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+    if args.check_access_matrix and any((args.check_tenant_access, live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
         parser.error('權限矩陣與原Client及其他模式分開驗收')
+    if args.check_tenant_access and any((live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+        parser.error('租戶角色矩陣與原Client及其他模式分開驗收')
+    if args.control_tenant_admin_as_viewer and not args.check_tenant_access:
+        parser.error('角色反例僅供租戶角色矩陣')
     if args.control_access_foreign_source and not args.check_access_matrix:
         parser.error('錯用他人來源反例僅供權限矩陣')
     owned_cancel = args.check_local and args.check_cancel
@@ -140,6 +146,8 @@ def main():
     captures = runtime / 'captures'
     captures.mkdir()
     fixture = runpy.run_path(str(root / 'scripts/client-roundtrip-mock.py'))['FixtureHandler']
+    if args.check_tenant_access:
+        fixture = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['handler'](fixture)
     if args.check_tools:
         fixture = runpy.run_path(str(root / 'scripts/client_tool_roundtrip_fixture.py'))['handler'](fixture)
     if args.check_slow_reader:
@@ -203,9 +211,11 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
-    if args.check_access_matrix:
+    if args.check_access_matrix or args.check_tenant_access:
         environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
         fixture.provider_credentials.add('fixture-tenant-api')
+    if args.check_tenant_access:
+        environment['PROVIDER_ALLOWED_TENANT_IDS'] = '00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002'
     if args.check_codex_held:
         environment.update({'CODEX_AUTH_FILE': str(args.codex_auth_file.resolve()), 'CODEX_ACCOUNT_ID': source_auth['tokens']['account_id'], 'CODEX_OWNER_USER_ID': str(uuid.uuid4()), 'PROVIDER_ALLOWED_TENANT_IDS': environment['ADMIN_BOOTSTRAP_TENANT_ID']})
         fixture.provider_credentials.update((source_auth['tokens']['access_token'], source_auth['tokens']['account_id']))
@@ -219,7 +229,7 @@ def main():
     if owned_cancel:
         cancel_marker = 'owned-cancel-' + uuid.uuid4().hex
 
-    def api(path, method='GET', body=None, token=None, expected=200, raw_response=False):
+    def api(path, method='GET', body=None, token=None, expected=200, raw_response=False, response_metadata=None):
         headers = {'x-request-id': str(uuid.uuid4())}
         if token:
             headers['authorization'] = f'Bearer {token}'
@@ -229,9 +239,13 @@ def main():
         try:
             with urlopen(Request(base + path, data=data, headers=headers, method=method), timeout=8) as response:
                 status, raw = response.status, response.read()
+                request_id = response.headers.get('x-request-id')
         except HTTPError as error:
             status, raw = error.code, error.read()
-        if status != expected:
+            request_id = error.headers.get('x-request-id')
+        if response_metadata is not None:
+            response_metadata.update(status=status, request_id=request_id)
+        if expected is not None and status != expected:
             raise RuntimeError(f'{method} {path}: {status}, expected {expected}')
         if raw_response:
             return raw.decode()
@@ -248,11 +262,11 @@ def main():
         login = api('/admin/v1/bootstrap', 'POST', {'display_name': '隔離管理者', 'credential_name': '隔離登入'}, bootstrap, 201)['login_token']
         admin = api('/admin/v1/sessions', 'POST', token=login, expected=201)['access_token']
 
-        def create(kind, body):
-            return api('/admin/v1/' + kind, 'POST', body, admin, 201)
+        def create(kind, body, token=admin):
+            return api('/admin/v1/' + kind, 'POST', body, token, 201)
 
-        def activate(kind, resource):
-            api(f'/admin/v1/{kind}/{resource["id"]}/lifecycle', 'POST', {'version': resource['version'], 'state': 'active'}, admin)
+        def activate(kind, resource, token=admin):
+            api(f'/admin/v1/{kind}/{resource["id"]}/lifecycle', 'POST', {'version': resource['version'], 'state': 'active'}, token)
 
         provider = create('providers', {'provider_key': provider_key, 'display_name': '本機模型' if args.check_local else '本人來源' if args.check_codex_held else '假供應商', 'provider_type': 'local' if args.check_local else 'openai' if codex else 'anthropic', 'base_url': 'http://127.0.0.1:11434' if args.check_local else 'https://chatgpt.com/backend-api/codex' if args.check_codex_held else environment['OPENAI_BASE_URL' if codex else 'ANTHROPIC_BASE_URL'], 'credential_ref': 'env://LOCAL_OLLAMA' if args.check_local else 'env://CODEX_AUTH_FILE' if args.check_codex_held else ('env://OPENAI_API_KEY' if codex else 'env://ANTHROPIC_API_KEY'), 'supported_operations': [operation]})['resource']
         activate('providers', provider)
@@ -272,6 +286,22 @@ def main():
             activate('policies', policy)
             if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_tenant_access:
+            print(f'租戶角色矩陣證據：{runtime}', flush=True)
+            gateway.terminate()
+            gateway.wait(timeout=7)
+            environment['ADMIN_BOOTSTRAP_TENANT_ID'] = '00000000-0000-0000-0000-000000000002'
+            gateway = subprocess.Popen(['timeout', '--kill-after=5s', '240s', str(binary)], cwd=root, env=environment, stdout=log, stderr=log)
+            time.sleep(2)
+            if gateway.poll() is not None or api('/health')['revision'] != args.revision:
+                raise RuntimeError('第二租戶Gateway啟動失敗')
+            other_login = api('/admin/v1/bootstrap', 'POST', {'display_name': '租戶B管理者', 'credential_name': '租戶B登入'}, bootstrap, 201)['login_token']
+            other_admin = api('/admin/v1/sessions', 'POST', token=other_login, expected=201)['access_token']
+            matrix = runpy.run_path(str(root / 'scripts/client_tenant_access.py'))['verify']
+            rows = matrix(api, create, activate, users, provider, fixture, runtime, admin, other_admin, codex, args.control_tenant_admin_as_viewer)
+            print(f'租戶角色矩陣通過{len(rows)}項；證據：{runtime}')
+            return
 
         if args.check_access_matrix:
             print(f'隔離HTTP權限矩陣證據：{runtime}', flush=True)
