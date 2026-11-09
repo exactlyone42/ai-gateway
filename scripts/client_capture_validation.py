@@ -1,6 +1,13 @@
 import json
 
 
+def validate_passthrough_stream(provider, client):
+    provider_frames = [frame for frame in provider.split('\n\n') if frame != ': keepalive']
+    client_frames = [frame for frame in client.split('\n\n') if frame != ': keepalive']
+    if provider_frames != client_frames:
+        raise RuntimeError('供應商與Client保存串流不一致')
+
+
 def validate_owned_compact(saved, fields):
     if len(saved) != 3 or len(fields) != 4 or len(set(fields)) != 4:
         raise RuntimeError('真摘要驗收缺少三輪或四項不同內容')

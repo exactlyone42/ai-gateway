@@ -15,6 +15,22 @@
 3. 程式識別字不變：`aigw_` 金鑰、`*_API_KEY`、`ANTHROPIC_SUBSCRIPTION_TOKEN_FILE`。
 4. 舊稱「virtual key」「client key」「credential」指 Gateway 金鑰時，改寫為「Gateway 金鑰」。`credentials` 資料表名稱與 `/admin/v1/credentials` 路徑是程式識別字，維持不動。
 
+## Gateway 金鑰在本機的存放（2026-11-06）
+
+舊金鑰遺失過一次：Gateway 資料庫只存雜湊，原文只在發出當下顯示。現在本機只有一個存放處，所有 Client 都從這裡讀。
+
+| 名稱 | 是什麼 | 在哪裡 |
+| --- | --- | --- |
+| `gateway-key` 檔 | 本機這把 Gateway 金鑰的原文，一行，無其他內容 | `~/.config/agent-pool-gateway/gateway-key`，權限 0600 |
+| `ANTHROPIC_AUTH_TOKEN` | Claude Code 讀取的變數名稱，值就是 Gateway 金鑰，不是權杖 | 執行 `aigw` 時由 `~/.zshrc` 從上一個檔案設定 |
+| systemd 環境檔 | `AGENT_API_KEY` 的值，供登入後的程式使用；環境檔不能讀別的檔，只能放一份副本 | `~/.config/environment.d/90-agent-gateway.conf`，權限 0600 |
+| Codex | `~/.codex/config.toml` 的 `gateway-subscription` 用 `cat` 讀同一個檔 | 同上 |
+
+- 金鑰原文不寫進文件、日誌、`settings.json` 或 git。
+- 部署腳本的原生 Client 探測沿用 `ANTHROPIC_AUTH_TOKEN`；部署前先執行 `aigw`。
+- 換金鑰：發新的、同步改寫 `gateway-key` 與 `90-agent-gateway.conf`、再撤銷舊的。除這兩處外不得另建副本。
+- 撤銷舊金鑰前，先搜尋 `~/.codex`、`~/.zshrc`、`~/.config` 有沒有其他地方引用它。
+
 ## 權杖的更新方式
 
 管理者呼叫 `PUT /admin/v1/provider-tokens/anthropic`，內容 `{"token": "sk-ant-oat..."}`。

@@ -187,7 +187,6 @@ pub(super) async fn proxy(
         );
     }
     let routing_reason = prepared_quota.routing_reason;
-    let routing_claim = prepared_quota.routing_claim;
     let task_routing = prepared_quota.task_routing;
     let translation = prepared_quota.translation;
     let crate::quota::QuotaAdmission {
@@ -286,11 +285,7 @@ pub(super) async fn proxy(
     )
     .await?;
     let provider_request_at = Utc::now();
-    reservation.attach_routing_lease(state.routing.begin(
-        &provider,
-        provider_request_at,
-        routing_claim,
-    )?);
+    reservation.attach_routing_lease(state.routing.begin(&provider, provider_request_at)?);
     let mut attempt = ProviderAttempt::begin(
         provider.clone(),
         provider_model.clone(),

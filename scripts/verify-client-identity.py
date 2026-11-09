@@ -92,7 +92,7 @@ def main():
         if 'completion' not in local_capabilities or (args.check_owned_tools and 'tools' not in local_capabilities):
             raise RuntimeError('本機模型未宣告所需的文字或工具能力')
     version = subprocess.check_output([args.client, '--version'], text=True).strip()
-    required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.318 '
+    required = 'codex-cli 0.166.0' if args.client == 'codex' else '2.1.319 '
     if not version.startswith(required):
         raise RuntimeError('Client版本不符')
     codex = args.client == 'codex'
@@ -382,6 +382,7 @@ def main():
             return
 
         def verify_capture():
+            validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
             markers = owned_fields if args.check_owned_compact else [expected_reply] if live_source else [fixture.expected_value, fixture.context_marker, expected_reply] if args.check_tools else ([fixture.error_marker, expected_reply] if args.check_error else ['CANCEL_STREAM_PENDING', expected_reply])
             reject_plaintext = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['reject_plaintext']
             spool_files = list((runtime / 'encrypted-spool').glob('*.capture'))
@@ -409,8 +410,7 @@ def main():
                     content[leg] = api(f'/admin/v1/request-captures/{record["capture_id"]}/content?leg={leg}', token=admin, raw_response=True)
                     if not content[leg]:
                         raise RuntimeError('加密讀回內容為空：' + leg)
-                if content['provider_response'] != content['client_response']:
-                    raise RuntimeError('供應商與Client保存串流不一致')
+                validation['validate_passthrough_stream'](content['provider_response'], content['client_response'])
                 saved.append(content)
             if args.check_tools:
                 runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_tools'](saved, fixture, codex)
@@ -437,7 +437,6 @@ def main():
             usage_records = json.loads(usage_result.stdout)
             if args.check_error and {row['request_id'] for row in usage_records} != set(checks[-1]['ingress_request_ids']):
                 raise RuntimeError('錯誤帳本未涵蓋所有入口請求')
-            validation = runpy.run_path(str(root / 'scripts/client_capture_validation.py'))
             if live_source:
                 (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
                 validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
@@ -448,7 +447,7 @@ def main():
             reject_plaintext((runtime / 'gateway.log').read_bytes(), markers)
             (runtime / 'plaintext-result.json').write_text(json.dumps({'spool_files': len(spool_files), 'capture_ids': sorted(path.stem for path in spool_files), 'database_dump_bytes': len(dump.stdout), 'gateway_log_bytes': (runtime / 'gateway.log').stat().st_size, 'markers': len(markers), 'plaintext_absent': True}, indent=2))
             (runtime / 'usage-result.json').write_text(json.dumps(usage_records, indent=2))
-            (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': True}, indent=2))
+            (runtime / 'capture-result.json').write_text(json.dumps({'records': records, 'legs_read': len(saved) * 4, 'stream_legs_equal': all(content['provider_response'] == content['client_response'] for content in saved), 'stream_events_equal': True}, indent=2))
             checks[-1]['capture_records'] = records
 
         if live_source:

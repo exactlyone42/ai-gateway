@@ -1,5 +1,28 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-09 R1-S1 同版基準
+
+本次使用 Claude Code 2.1.319、Codex CLI 0.166.0 與本機 `qwen3.8:27b`，不呼叫付費來源。整合來源為 #108 的 3ca21da 與 main 的 68d7569；編譯版本 `r1s1-1278965c59eb` 對應整合樹 1278965c59ebd1c91b607eac054fcfdc8537f43f。完整差異與驗收原件位於 `/home/cash/.local/state/ai-gateway/r1-s1-20261109`，尚未發布。
+
+`verify-client-identity.py` 固定核對上述 Client 版本；舊的 `verify-client-roundtrip.sh` 與歷史假供應商紀錄繼續固定 2.1.318，不能當成本次版本證據。兩種驗收不修改使用者的原 Client 設定或登入資料。
+
+兩個 Client 使用獨立且新建的本機測試庫，名稱須以 `gateway_client_identity_validation_` 開頭；先設定 `DATABASE_URL` 指向該庫，再從整合工作樹執行：
+
+```sh
+python3 ~/tools/temp-service.py start --name gateway-r1-baseline-claude --ttl 20m --purpose 原Claude同版基準 -- env DATABASE_URL="$DATABASE_URL" CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION=1 python3 scripts/verify-client-identity.py --gateway-binary /home/cash/work_space/private/ai-gateway/target/debug/agent-pool-gateway --revision r1s1-1278965c59eb --client claude --check-local --source-model qwen3.8:27b --check-capture
+python3 ~/tools/temp-service.py start --name gateway-r1-baseline-codex --ttl 20m --purpose 原Codex同版基準 -- env DATABASE_URL="$DATABASE_URL" CLIENT_IDENTITY_ALLOW_DATABASE_MUTATION=1 python3 scripts/verify-client-identity.py --gateway-binary /home/cash/work_space/private/ai-gateway/target/debug/agent-pool-gateway --revision r1s1-1278965c59eb --client codex --check-local --source-model qwen3.8:27b --check-capture
+```
+
+先完成並停止第一項，再換另一個新庫執行第二項。每個 Client 成功請求上限 600 秒，拒絕請求上限 30 秒，Gateway 上限 900 秒；只送腳本內的隔離短答，預期 Claude 輸出 `W05_CLAUDE_CODE_OK`、Codex 輸出 `W06_CODEX_OK`。每個 Client 各一個成功來源請求；拒絕請求必須沒有上游嘗試。停止測試不刪除資料庫及原件。
+
+初件兩個原 Client 都正常輸出預期文字，保存內容與供應商用量逐筆相符；舊驗證器卻把 Gateway 的保活訊息當作資料差異而停止。原件保留於 `/tmp/gateway-client-identity-h5az6qxf` 與 `/tmp/gateway-client-identity-r3_jn10s`，修正後直接重播原件，不用新模型回覆取代失敗歷史。
+
+Gateway 只在 Client 串流加入完整的 `: keepalive\n\n`。這是 [SSE 規格](https://html.spec.whatwg.org/dev/server-sent-events.html) 定義的註解，讓連線在等待時保持活動。驗證器只排除兩側恰為 `: keepalive` 的完整區塊，其餘資料、順序、註解與分隔符仍逐字比較；原始兩側內容各自完整保存。`stream_legs_equal` 回報原始字串是否相等，`stream_events_equal` 回報排除固定保活後是否相等；不能將後者當成原始位元組相等。
+
+新增六項對照，確認保活可插入，但改資料、刪結尾、加其他註解、改區塊內文字與缺結束分隔符仍被拒絕。相等檢查本身不證明串流完成；既有完成事件與實際用量驗證繼續執行。多輪、工具、長串流、取消、全部故障及正式環境均仍待 R1 後續步驟驗收。
+
+## 2026-11-05 歷史假供應商基準
+
 2026-11-05 以 Claude Code 2.1.318、Codex CLI 0.166.0，經 Gateway d7c7cfd 連本機假供應商。兩個原 Client 各自讀到固定串流並輸出預期文字；沒有呼叫正式供應商或做模型運算。舊版本紀錄保留供追溯。
 
 ## 執行方式

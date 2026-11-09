@@ -3,7 +3,37 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_compact
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_compact, validate_passthrough_stream
+
+
+class PassthroughStreamTest(unittest.TestCase):
+    stream = 'event: message_start\ndata: {"text":"keepalive"}\n\nevent: message_stop\ndata: {}\n\n'
+
+    def test_only_keepalive_frames_are_ignored(self):
+        client = ': keepalive\n\n' + self.stream.replace('event: message_stop', ': keepalive\n\nevent: message_stop') + ': keepalive\n\n'
+        validate_passthrough_stream(self.stream, client)
+        validate_passthrough_stream(client, self.stream)
+
+    def test_changed_data_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            validate_passthrough_stream(self.stream, self.stream.replace('keepalive', 'changed'))
+
+    def test_missing_terminal_event_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            validate_passthrough_stream(self.stream, self.stream.split('event: message_stop')[0])
+
+    def test_other_comments_are_preserved(self):
+        with self.assertRaises(RuntimeError):
+            validate_passthrough_stream(self.stream, ': other\n\n' + self.stream)
+
+    def test_keepalive_text_inside_data_is_preserved(self):
+        stream = 'data: first\n: keepalive\n\n'
+        with self.assertRaises(RuntimeError):
+            validate_passthrough_stream(stream, 'data: first\n\n')
+
+    def test_missing_final_separator_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            validate_passthrough_stream(self.stream, self.stream[:-2])
 
 
 class CaptureValidationTest(unittest.TestCase):

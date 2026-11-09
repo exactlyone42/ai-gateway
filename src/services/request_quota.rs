@@ -10,7 +10,6 @@ use crate::{
     model_registry::{CapabilityRequirements, GatewayOperation},
     policy::value_text,
     quota::{QuotaAdmission, QuotaEstimate, QuotaOutcome, QuotaRejection},
-    routing::HalfOpenClaim,
     services::request_policy::PreparedPolicy,
     state::AppState,
     task_classification::{self, ClassifierMode},
@@ -20,7 +19,6 @@ pub struct PreparedQuota {
     pub admission: QuotaAdmission,
     pub translation: ValidatedTranslationPlan,
     pub routing_reason: &'static str,
-    pub routing_claim: Option<HalfOpenClaim>,
     pub task_routing: Value,
 }
 
@@ -214,7 +212,7 @@ pub async fn admit(
         jev_attempted,
         jev_elapsed_ms,
     };
-    let mut ranked = state.routing.rank(candidates)?;
+    let ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
     let first = candidates.first().ok_or(GatewayError::ModelForbidden)?;
     super::request_policy::enforce_selected_model(
@@ -241,7 +239,6 @@ pub async fn admit(
         let translation = validate_for_provider(request, &selection)?;
         let routing_reason = routing_reason
             .unwrap_or_else(|| ranked.reason_for(&selection, state.routing.quota_aware()));
-        let routing_claim = ranked.take_claim_for(&selection);
         let task_routing = task_routing_snapshot(
             &task_decision,
             required,
@@ -252,7 +249,6 @@ pub async fn admit(
         );
         return Ok(PreparedQuota {
             routing_reason,
-            routing_claim,
             task_routing,
             admission: QuotaAdmission {
                 selection,
@@ -293,7 +289,6 @@ pub async fn admit(
             let routing_reason = routing_reason.unwrap_or_else(|| {
                 ranked.reason_for(&admission.selection, state.routing.quota_aware())
             });
-            let routing_claim = ranked.take_claim_for(&admission.selection);
             let task_routing = task_routing_snapshot(
                 &task_decision,
                 required,
@@ -304,7 +299,6 @@ pub async fn admit(
             );
             Ok(PreparedQuota {
                 routing_reason,
-                routing_claim,
                 task_routing,
                 admission: *admission,
                 translation,
