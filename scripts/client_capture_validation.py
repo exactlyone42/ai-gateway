@@ -231,7 +231,7 @@ def validate_errors(saved, payloads):
         raise RuntimeError('錯誤保存與實際上游回應未逐筆相符')
 
 
-def validate_error_recovery(saved, payloads, recovery_stream, usage_records, records, codex, interrupted=False, upstream_request_id=None):
+def validate_error_recovery(saved, payloads, recovery_stream, usage_records, records, codex, interrupted=False, upstream_request_id=None, rejection_status=None):
     if len(saved) != 2 or len(payloads) != 1 or len(records) != 2 or len(usage_records) != 2 or len({row['capture_id'] for row in records}) != 2:
         raise RuntimeError('錯誤與恢復不是兩個獨立請求')
     if interrupted:
@@ -249,7 +249,29 @@ def validate_error_recovery(saved, payloads, recovery_stream, usage_records, rec
         expected_id = upstream_request_id or (json.loads(payloads[0])['request_id'] if failed else None)
         if failed and selected[0]['provider_request_id'] != expected_id:
             raise RuntimeError('上游錯誤編號與嘗試紀錄不一致')
+        if failed and rejection_status is not None and selected[0].get('error_type') != str(rejection_status):
+            raise RuntimeError('上游拒絕狀態與帳本失敗原因不符')
         if selected[0]['status'] != ('failed' if failed else 'completed'):
             raise RuntimeError('失敗或恢復請求的結帳狀態不符')
         if interrupted and failed and selected[0].get('error_type') != 'upstream_body_error':
             raise RuntimeError('串流中斷缺少正確失敗原因')
+
+
+def validate_idle_timeout(proof):
+    idle = proof.get('idle_timeout_ms', 0)
+    elapsed = proof.get('elapsed_seconds')
+    if not proof.get('peer_closed') or idle <= 0 or elapsed is None or not .8 * idle / 1000 <= elapsed < proof['source_wait_seconds'] - .25:
+        raise RuntimeError('未證明Gateway在來源自行結束前因閒置逾時關閉')
+
+
+def validate_rate_limit_diagnostic(diagnostic, ingress_request_id):
+    failures = []
+    for line in diagnostic.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get('type') == 'turn.failed':
+            failures.append((event.get('error') or {}).get('message', ''))
+    if len(failures) != 1 or 'last status: 429 Too Many Requests' not in failures[0] or not ingress_request_id or not failures[0].endswith('request id: ' + ingress_request_id):
+        raise RuntimeError('Codex限流錯誤未顯示正確狀態及Gateway請求編號')

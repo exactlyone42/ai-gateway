@@ -1,5 +1,19 @@
 # 原 Client 傳輸驗收
 
+## 2026-11-10 R1-S4 暫時故障後的新請求
+
+原Claude 2.1.319及Codex 0.166.0，沿用固定執行檔 `r1s3read-8f04a37-idempotent` 與隔離零自動重送設定，各完成429限流、503暫時不可用，以及部分文字後完全停止送資料的閒置逾時。六組各一次失敗退出1，再另發一次新請求成功退出0；來源各一次，兩個入口及嘗試編號、保存與用量可逐筆對回。來源為受控假供應商，不是正式模型故障或預設Client重試策略的驗收。
+
+429/503的錯誤JSON有完整保存，帳本仍為失敗；完整保存不等於請求成功。逾時的首筆保存不完整，恢復筆完整且成功。已收到的部分用量照實保留，未收到者仍只有估算，不把0當免費或最終費用。429/503來源附等待1秒提示；測試在錯誤後等待1秒才另發新請求，不宣稱Client自行等候或重送。
+
+新選項為 `--check-error --check-capture --check-transient-recovery rate-limit|unavailable|timeout`，兩Client與每個模式分開用新隔離庫及臨時服務。逾時模式只在隔離Gateway設定 `PROVIDER_IDLE_TIMEOUT_MS=250`；[程式所用reqwest 0.12.28說明](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html#method.read_timeout)明定這是每次讀取的等待上限。來源保持連線最多2秒，兩個案例實際約257毫秒收到Gateway提前關閉；另用 `--control-timeout-not-enforced` 將等待改5000毫秒，來源2秒自行結束，即使Client仍退出1，驗收也確實拒絕冒稱閒置逾時。
+
+Codex429初件只因驗收器要求來源測試字串而失敗；原Client實際已顯示429及Gateway請求編號。原JSON失敗事件重播與入口編號一致，初件整個命令仍保留失敗；修正只接受單一429失敗事件與實際完整編號，不放寬其他錯誤，新案例才完成恢復。SDK的「exceeded retry limit」文字不證明真的重送，這裡實測只有一次來源呼叫；[官方錯誤格式](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/error.rs)只輔助說明，本機固定版實際輸出才是證據。
+
+本輪只補驗收器，局部88項通過，含7項新失敗對照；完整檢查、提交推送與CI見 `/home/cash/.local/state/ai-gateway/r1-s4-transient-recovery-20261109/summary.json`。獨立qwen3-coder審查未指出缺陷，但未逐段說明必要性，不冒完整簡化通過。Rust、Client執行檔、使用者預設與正式環境未改，未合main或部署。
+
+限制保留：候選一般日誌及帳本仍把斷線/閒置統稱傳輸錯誤，本輪來源觀察才可區分；只有Codex429/503此次顯示Gateway編號，其他四案沒有，但API及帳本可對回。連線與回應頭等待逾時、所有5xx種類、原Claude503歷史因果、S2格式、整體同版、安全/恢復/發布及舊範圍仍未全驗，不將六組通過冒稱產品完成。
+
 ## 2026-11-09 R1-S3 慢速接收與取消後恢復
 
 新增容量模式 `--check-slow-reader --check-cancel --check-capture`，以原有固定執行檔 `r1s3read-8f04a37-idempotent`、新隔離庫及受控假來源測試。先由原始HTTP接收端暫停、每250毫秒讀16KiB，再有界追上一段並再次暫停；原Claude／Codex只執行取消後的新請求，不冒稱原Client本身被限速或真模型已驗。

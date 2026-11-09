@@ -43,13 +43,19 @@ def main():
     parser.add_argument('--check-capture', action='store_true')
     parser.add_argument('--check-error', action='store_true')
     parser.add_argument('--check-auth-recovery', action='store_true')
+    parser.add_argument('--check-transient-recovery', choices=('rate-limit', 'unavailable', 'timeout'))
+    parser.add_argument('--control-timeout-not-enforced', action='store_true')
     parser.add_argument('--check-stream-failure', action='store_true')
     parser.add_argument('--control-error-as-success', action='store_true')
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
     owned_cancel = args.check_local and args.check_cancel
-    recovery_mode = args.check_auth_recovery or args.check_stream_failure
+    recovery_mode = args.check_auth_recovery or args.check_stream_failure or bool(args.check_transient_recovery)
+    interrupted_mode = args.check_stream_failure or args.check_transient_recovery == 'timeout'
+    error_status = 200 if interrupted_mode else 429 if args.check_transient_recovery == 'rate-limit' else 503 if args.check_transient_recovery == 'unavailable' else 401 if args.check_auth_recovery else 400
+    if args.control_timeout_not_enforced and args.check_transient_recovery != 'timeout':
+        parser.error('延長等待反例僅供串流閒置逾時驗收')
     cancel_recovery = owned_cancel or args.check_slow_reader
     if args.check_slow_reader and (not (args.check_cancel and args.check_capture) or any((live_source, args.check_tools, args.check_error, args.check_compact, args.check_long_stream, args.control_force_client_kill))):
         parser.error('慢讀必須搭配取消與保存，且與其他模式分開')
@@ -59,7 +65,7 @@ def main():
         parser.error('長串流必須搭配保存驗收，且與其他模式分開')
     if recovery_mode and not (args.check_error and args.check_capture):
         parser.error('認證或串流恢復驗收必須搭配 --check-error 與 --check-capture')
-    if args.check_auth_recovery and args.check_stream_failure:
+    if sum(map(bool, (args.check_auth_recovery, args.check_stream_failure, args.check_transient_recovery))) > 1:
         parser.error('認證拒絕與串流中斷必須分開驗收')
     if args.check_local and (args.check_codex_held or not args.source_model or any((args.check_compact, args.check_owned_compact, args.check_tools, args.check_error))):
         parser.error('local source requires a source model separately from fixture and subscription modes')
@@ -141,9 +147,10 @@ def main():
         fixture = runpy.run_path(str(root / 'scripts/client_error_fixture.py'))['handler'](fixture)
         fixture.success_control = args.control_error_as_success
         fixture.auth_recovery = args.check_auth_recovery
+        fixture.transient_error = args.check_transient_recovery
         fixture.stream_failure = args.check_stream_failure
-        if args.check_stream_failure:
-            fixture.error_marker = 'INTERRUPTED_STREAM_STARTED'
+        if interrupted_mode:
+            fixture.error_marker = 'IDLE_TIMEOUT_STREAM_STARTED' if args.check_transient_recovery else 'INTERRUPTED_STREAM_STARTED'
     if args.check_compact:
         fixture = runpy.run_path(str(root / 'scripts/client_compact_fixture.py'))['handler'](fixture)
         fixture.auto_claude = args.claude_auto_compact
@@ -197,6 +204,8 @@ def main():
         environment['EXTRA_PROVIDER_PROFILES_JSON'] = json.dumps([{'kind': 'ollama', 'credential_ref': 'env://LOCAL_OLLAMA', 'provider_key': provider_key, 'base_url': 'http://127.0.0.1:11434', 'operations': [operation]}])
     if args.check_slow_reader:
         environment.update({'SCHEDULER_PASSTHROUGH': 'false', 'SCHEDULER_PER_PROVIDER': '1', 'SCHEDULER_PER_MODEL': '1'})
+    if args.check_transient_recovery == 'timeout':
+        environment['PROVIDER_IDLE_TIMEOUT_MS'] = '5000' if args.control_timeout_not_enforced else '250'
     checks = []
     if owned_cancel:
         cancel_marker = 'owned-cancel-' + uuid.uuid4().hex
@@ -302,7 +311,7 @@ def main():
                     'ANTHROPIC_AUTH_TOKEN': users[name][1], 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                     'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1',
                 }
-                if args.check_stream_failure or args.check_long_stream or owned_cancel or args.check_slow_reader:
+                if args.check_stream_failure or args.check_transient_recovery or args.check_long_stream or owned_cancel or args.check_slow_reader:
                     client_environment['CLAUDE_CODE_MAX_RETRIES'] = '0'
                     client_environment['CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK'] = '1'
                 if args.check_long_stream:
@@ -411,7 +420,7 @@ def main():
                 if not observed or any(not capture['provider_credential_matches_fixture'] or not capture['client_credential_absent'] for capture in observed):
                     raise RuntimeError('壓縮失敗路徑憑證隔離不符')
             elif success or error:
-                if error and (result.returncode != 1 or (not args.check_stream_failure and fixture.error_marker not in diagnostic) or not 1 <= after - before <= (1 if recovery_mode else 6)):
+                if error and (result.returncode != 1 or (not interrupted_mode and not (codex and args.check_transient_recovery == 'rate-limit') and fixture.error_marker not in diagnostic) or not 1 <= after - before <= (1 if recovery_mode else 6)):
                     raise RuntimeError(f'{label}: 原Client未正確回報上游錯誤，退出{result.returncode}、上游{after - before}次')
                 if not error and not cancel and (result.returncode != 0 or result.stdout.strip() != expected_reply or after <= before):
                     raise RuntimeError(f'{label}: 原Client未完成假串流')
@@ -458,7 +467,7 @@ def main():
             for _ in range(250):
                 result = subprocess.run(['psql', database, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-v', 'user=' + users['alice'][0]], input=query.read_text(), capture_output=True, text=True, timeout=5, check=True)
                 records = json.loads(result.stdout)
-                states = ['incomplete', 'complete'] if args.check_stream_failure or cancel_recovery else [expected_state] * count
+                states = ['incomplete', 'complete'] if interrupted_mode or cancel_recovery else [expected_state] * count
                 if len(records) == count and [record['state'] for record in records] == states:
                     break
                 time.sleep(0.2)
@@ -521,7 +530,7 @@ def main():
                     validation['validate_owned_usage'](saved, usage_records, records, expected_reply, codex)
             elif recovery_mode:
                 name = 'openai-response.sse' if codex else 'anthropic-response.sse'
-                validation['validate_error_recovery'](saved, fixture.error_payloads, (fixture.fixture_dir / name).read_text(), usage_records, records, codex, interrupted=args.check_stream_failure, upstream_request_id=fixture.error_request_ids[0])
+                validation['validate_error_recovery'](saved, fixture.error_payloads, (fixture.fixture_dir / name).read_text(), usage_records, records, codex, interrupted=interrupted_mode, upstream_request_id=fixture.error_request_ids[0], rejection_status=error_status if args.check_transient_recovery and not interrupted_mode else None)
             elif args.check_slow_reader:
                 if len(usage_records) != 2 or [row['status'] for row in usage_records] != ['cancelled', 'completed']:
                     raise RuntimeError('慢讀取消與新請求的帳本狀態不符')
@@ -584,11 +593,21 @@ def main():
 
         if args.check_error:
             client('alice', f'{model_prefix}-alice', True, 'upstream-error', error=True)
-            ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == (200 if args.check_stream_failure else 401 if args.check_auth_recovery else 400)]
+            ingress = [event for line in (runtime / 'gateway.log').read_text().splitlines() if (event := json.loads(line)).get('http', {}).get('route') == response_path and event.get('http', {}).get('response', {}).get('status_code') == error_status]
             ingress_ids = {event['request_id'] for event in ingress}
             if len(ingress) != fixture.error_requests or len(ingress_ids) != len(ingress):
                 raise RuntimeError('入口錯誤請求與上游嘗試數量不符')
             checks[-1]['ingress_request_ids'] = sorted(ingress_ids)
+            if codex and args.check_transient_recovery == 'rate-limit':
+                diagnostic = (runtime / 'upstream-error/client-diagnostic.txt').read_text()
+                runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_rate_limit_diagnostic'](diagnostic, checks[-1]['ingress_request_ids'][0])
+            if args.check_transient_recovery == 'timeout':
+                closed = fixture.timeout_peer_closed.wait(2)
+                idle_proof = {'peer_closed': closed, 'elapsed_seconds': fixture.timeout_elapsed_seconds, 'idle_timeout_ms': int(environment['PROVIDER_IDLE_TIMEOUT_MS']), 'source_wait_seconds': 2}
+                (runtime / 'idle-timeout-result.json').write_text(json.dumps(idle_proof, indent=2))
+                runpy.run_path(str(root / 'scripts/client_capture_validation.py'))['validate_idle_timeout'](idle_proof)
+            if args.check_transient_recovery in ('rate-limit', 'unavailable'):
+                time.sleep(1)
             if recovery_mode:
                 fixture.recovered = True
                 client('alice', f'{model_prefix}-alice', True, 'after-upstream-error')
@@ -598,7 +617,7 @@ def main():
                 checks[-1]['ingress_request_ids'] = [recovered_ingress[0]['request_id']]
             if args.check_capture:
                 verify_capture()
-            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'checks': checks}, indent=2))
+            (runtime / 'result.json').write_text(json.dumps({'revision': args.revision, 'client_version': version, 'transient_error': args.check_transient_recovery, 'checks': checks}, indent=2))
             print(f'原Client上游錯誤通過；證據：{runtime}')
             return
         if args.check_long_stream:

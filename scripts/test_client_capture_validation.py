@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from scripts.client_local_cancel import slots
 
-from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery, validate_long_stream, validate_owned_cancel
+from scripts.client_capture_validation import validate_tools, validate_usage, reject_plaintext, validate_errors, validate_owned_usage, validate_owned_tools, validate_owned_followup, validate_owned_compact, validate_passthrough_stream, validate_error_recovery, validate_long_stream, validate_owned_cancel, validate_idle_timeout, validate_rate_limit_diagnostic
 from pathlib import Path
 
 
@@ -694,3 +694,55 @@ class OwnedCompactValidationTest(unittest.TestCase):
         saved, fields = self.sample()
         with self.assertRaisesRegex(RuntimeError, '三輪'):
             validate_owned_compact(saved[:2], fields)
+
+
+class IdleTimeoutTest(unittest.TestCase):
+    def sample(self):
+        return {'peer_closed': True, 'elapsed_seconds': .3, 'idle_timeout_ms': 250, 'source_wait_seconds': 2}
+
+    def test_peer_closed_inside_configured_window(self):
+        validate_idle_timeout(self.sample())
+
+    def test_source_close_or_missing_deadline_is_rejected(self):
+        for key, value in (('peer_closed', False), ('idle_timeout_ms', 0), ('idle_timeout_ms', 5000)):
+            proof = self.sample()
+            proof[key] = value
+            with self.assertRaises(RuntimeError):
+                validate_idle_timeout(proof)
+
+    def test_early_and_late_closure_rejected(self):
+        for seconds in (.01, 1.9):
+            proof = self.sample()
+            proof['elapsed_seconds'] = seconds
+            with self.assertRaises(RuntimeError):
+                validate_idle_timeout(proof)
+
+    def test_rejection_reason_must_match_http_status(self):
+        for codex in (False, True):
+            args = ErrorRecoveryTest().sample(codex)
+            args[3][0]['error_type'] = '429'
+            validate_error_recovery(*args, rejection_status=429)
+            with self.assertRaises(RuntimeError):
+                validate_error_recovery(*args, rejection_status=503)
+
+
+class RateLimitDiagnosticTest(unittest.TestCase):
+    def diagnostic(self, message, kind='turn.failed'):
+        return json.dumps({'type': kind, 'error': {'message': message}})
+
+    def test_actual_status_and_matching_id_are_required(self):
+        text = self.diagnostic('exceeded retry limit, last status: 429 Too Many Requests, request id: gateway-1')
+        validate_rate_limit_diagnostic(text + '\nnon-JSON stderr', 'gateway-1')
+        for expected in ('gateway-2', 'gateway', ''):
+            with self.assertRaises(RuntimeError):
+                validate_rate_limit_diagnostic(text, expected)
+
+    def test_other_status_or_nonfailure_is_rejected(self):
+        for text in (self.diagnostic('last status: 503 Service Unavailable, request id: gateway-1'), self.diagnostic('last status: 429 Too Many Requests, request id: gateway-1', 'error')):
+            with self.assertRaises(RuntimeError):
+                validate_rate_limit_diagnostic(text, 'gateway-1')
+
+    def test_duplicate_failure_is_rejected(self):
+        text = self.diagnostic('last status: 429 Too Many Requests, request id: gateway-1')
+        with self.assertRaises(RuntimeError):
+            validate_rate_limit_diagnostic(text + '\n' + text, 'gateway-1')
