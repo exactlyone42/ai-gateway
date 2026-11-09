@@ -25,6 +25,8 @@ def main():
     parser.add_argument('--client', choices=('claude', 'codex'), default='claude')
     parser.add_argument('--check-codex-held', action='store_true')
     parser.add_argument('--check-local', action='store_true')
+    parser.add_argument('--check-access-matrix', action='store_true')
+    parser.add_argument('--control-access-foreign-source', action='store_true')
     parser.add_argument('--check-owned-tools', action='store_true')
     parser.add_argument('--check-owned-compact', action='store_true')
     parser.add_argument('--codex-auth-file', type=Path)
@@ -50,6 +52,10 @@ def main():
     parser.add_argument('--control-force-client-kill', action='store_true')
     args = parser.parse_args()
     live_source = args.check_codex_held or args.check_local
+    if args.check_access_matrix and any((live_source, args.check_capture, args.check_tools, args.check_cancel, args.check_error, args.check_compact, args.check_long_stream, args.check_owned_tools, args.check_owned_compact)):
+        parser.error('權限矩陣與原Client及其他模式分開驗收')
+    if args.control_access_foreign_source and not args.check_access_matrix:
+        parser.error('錯用他人來源反例僅供權限矩陣')
     owned_cancel = args.check_local and args.check_cancel
     recovery_mode = args.check_auth_recovery or args.check_stream_failure or bool(args.check_transient_recovery)
     interrupted_mode = args.check_stream_failure or args.check_transient_recovery == 'timeout'
@@ -197,6 +203,9 @@ def main():
         (runtime / 'capture-initialize.log').write_text(initialization.stdout + initialization.stderr)
         if initialization.returncode:
             raise RuntimeError(f'保存初始化失敗，紀錄位於{runtime}')
+    if args.check_access_matrix:
+        environment['OPENAI_API_KEY' if codex else 'ANTHROPIC_API_KEY'] = 'fixture-tenant-api'
+        fixture.provider_credentials.add('fixture-tenant-api')
     if args.check_codex_held:
         environment.update({'CODEX_AUTH_FILE': str(args.codex_auth_file.resolve()), 'CODEX_ACCOUNT_ID': source_auth['tokens']['account_id'], 'CODEX_OWNER_USER_ID': str(uuid.uuid4()), 'PROVIDER_ALLOWED_TENANT_IDS': environment['ADMIN_BOOTSTRAP_TENANT_ID']})
         fixture.provider_credentials.update((source_auth['tokens']['access_token'], source_auth['tokens']['account_id']))
@@ -263,6 +272,14 @@ def main():
             activate('policies', policy)
             if name != 'missing' and not live_source:
                 api(f'/admin/v1/provider-api-keys/{provider_key}/{user["id"]}', 'PUT', {'token': fixture.provider_keys_by_model[model]}, admin)
+
+        if args.check_access_matrix:
+            print(f'隔離HTTP權限矩陣證據：{runtime}', flush=True)
+            matrix_users = {name: (*value, credential_versions[name][0]) for name, value in users.items()}
+            matrix = runpy.run_path(str(root / 'scripts/client_access_matrix.py'))['verify']
+            rows = matrix(base, api, create, activate, matrix_users, provider, fixture, runtime, admin, codex, args.control_access_foreign_source)
+            print(f'隔離HTTP權限矩陣通過{len(rows)}項；證據：{runtime}')
+            return
 
         if args.check_codex_held:
             gateway.terminate()
