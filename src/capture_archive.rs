@@ -504,7 +504,10 @@ async fn open_admin_verified<'a>(
         .map_err(|_| CaptureArchiveError)?;
     let record: Option<(Vec<u8>, String)> = sqlx::query_as("SELECT r.wrapped_key, r.state FROM capture_records r JOIN admin_sessions s ON s.tenant_id = r.tenant_id JOIN admin_accounts a ON (a.tenant_id, a.id) = (s.tenant_id, s.admin_account_id) AND a.version = s.account_version JOIN admin_login_credentials c ON (c.tenant_id, c.id, c.admin_account_id) = (s.tenant_id, s.login_credential_id, s.admin_account_id) AND c.version = s.login_credential_version WHERE r.tenant_id = $1 AND r.capture_id = $2 AND r.user_id = $3 AND s.id = $4 AND a.id = $5 AND a.role = 'admin' AND a.status = 'active' AND s.revoked_at IS NULL AND s.expires_at > now() AND c.status = 'active' AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > now()) AND r.state IN ('complete', 'incomplete') AND r.expires_at > now() AND r.created_at = to_timestamp($6::bigint::double precision / 1000) AND r.expires_at = r.created_at + make_interval(days => $7) AND r.key_fingerprint = $8 FOR SHARE OF r, s, a, c")
         .bind(identity.tenant).bind(identity.capture).bind(identity.user).bind(context.session_id).bind(context.account_id).bind(identity.created_ms).bind(i32::from(identity.retention_days)).bind(sha2::Sha256::digest(master).as_slice())
-        .fetch_optional(&mut *tx).await.map_err(|_| CaptureArchiveError)?;
+        .fetch_optional(&mut *tx).await.map_err(|error| {
+            tracing::warn!(error.type = "capture_content_verification_failed", capture.phase = "authorization_snapshot", database.error_code = error.as_database_error().and_then(|database| database.code()).as_deref().unwrap_or("not_reported"));
+            CaptureArchiveError
+        })?;
     let (wrapped, state) = record.ok_or(CaptureArchiveError)?;
     let limit = i64::try_from(max_bytes).map_err(|_| CaptureArchiveError)?;
     let size: i64 = sqlx::query_scalar("SELECT 158 + COALESCE(sum(octet_length(sealed) + 21), 0) FROM capture_blocks WHERE tenant_id = $1 AND capture_id = $2")
@@ -989,17 +992,19 @@ pub(crate) async fn import_spool(
     if usize::try_from(count).ok() != Some(verified.blocks.len()) {
         return Err(CaptureArchiveError);
     }
-    sqlx::query("UPDATE capture_records SET state = $3 WHERE tenant_id = $1 AND capture_id = $2")
-        .bind(identity.tenant)
-        .bind(identity.capture)
-        .bind(if verified.complete {
+    sqlx::query_file!(
+        "queries/capture_import_state.sql",
+        identity.tenant,
+        identity.capture,
+        if verified.complete {
             "complete"
         } else {
             "incomplete"
-        })
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| CaptureArchiveError)?;
+        }
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| CaptureArchiveError)?;
     tx.commit().await.map_err(|_| CaptureArchiveError)
 }
 
@@ -1713,6 +1718,35 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state, "incomplete");
+        let mut snapshot = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        let initial = sqlx::query_file_scalar!(
+            "queries/test_capture_snapshot_state.sql",
+            identity.tenant,
+            identity.capture
+        )
+        .fetch_one(&mut *snapshot)
+        .await
+        .unwrap();
+        import_spool(&pool, &partial, identity.user, 30)
+            .await
+            .unwrap();
+        let locked = sqlx::query_file_scalar!(
+            "queries/test_capture_snapshot_lock.sql",
+            identity.tenant,
+            identity.capture
+        )
+        .fetch_one(&mut *snapshot)
+        .await;
+        assert!(
+            locked.is_ok(),
+            "unchanged import invalidated capture read: {locked:?}"
+        );
+        assert_eq!(initial, locked.unwrap());
+        snapshot.commit().await.unwrap();
         assert!(
             read_verified(&pool, identity, Uuid::new_v4(), credential, &master, 4096)
                 .await

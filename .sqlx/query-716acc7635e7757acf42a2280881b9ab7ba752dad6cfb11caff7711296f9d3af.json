@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE capture_records SET state = $3 WHERE tenant_id = $1 AND capture_id = $2 AND state IS DISTINCT FROM $3\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "716acc7635e7757acf42a2280881b9ab7ba752dad6cfb11caff7711296f9d3af"
+}
