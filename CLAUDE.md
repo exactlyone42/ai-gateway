@@ -15,6 +15,13 @@
 | PR 前檢查 | `./scripts/check.sh all` |
 | 記帳 | `docs/task-ledger.md`，由 `./scripts/token-ledger.sh` 產生 |
 
+## 檔案放哪裡
+
+- 建檔或建資料夾前先看目錄地圖：[docs/directory-structure.md](docs/directory-structure.md)。地圖沒寫的位置不要自己發明，先沿用同類檔案現在的位置。
+- 暫存檔、試跑輸出與審查收據放 `.artifacts/`（已被 .gitignore 排除），不放根目錄。
+- 新增根目錄項目、模組或改依賴方向時，同一次修改更新那份地圖與 `scripts/check.sh` 的 `layout` 白名單，交付時列出原因。不開 `utils`、`common`、`misc`、`temp` 這類看不出職責的資料夾。
+- commit 時 `~/.agents/guards/git_guard.py` 會擋下地圖沒寫的根目錄新增項目，以及上述名稱的新資料夾；`./scripts/check.sh layout` 做同樣的檢查。
+
 ## 文件索引（遇到什麼問題才讀，不要一開始全載）
 
 「產出段落」欄標 `—` 的是現在就有；標段落的還不存在，**不要引用它**。
