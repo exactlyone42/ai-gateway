@@ -108,6 +108,8 @@ for which problem, so you do not have to load everything.
 - `docs/engineering-standards.md` — quality gates and rules, machine-checkable
 - `docs/task-ledger.md` — time and token cost per segment, plus trade-offs
 - `docs/architecture.md` — three planes, request path, failure model
+- [上線優先計畫](loops/gateway-completion/07-priority-audit.md) — 預算受限時先做哪三項功能、驗收與延後事項；[母檔](loops/gateway-completion.loop.md)、[執行 prompt](loops/gateway-completion/08-execution-prompt.md)
+- [三項功能的 PLAN／TODO／LOOP 索引](loops/README.md) — 要獨立接續模型工作、帳號權限或保存恢復時閱讀；各項目前只有計畫，尚未執行
 - [連線與業務拆分草案](docs/gateway-connection-logic-split-plan.md) — 評估分開部署、容器擴充與多副本驗收時閱讀；尚未實作
 - `docs/security-and-compliance.md` — credential and subscription boundary
 - `docs/admin.md` — Admin authentication, RBAC and control-plane API contract

@@ -19,6 +19,7 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
+| [gateway-completion](gateway-completion.loop.md) | — | PLANNED；R1 READY | P0 | 三項核心功能收斂的唯一母檔 |
 | [src-layering](./src-layering.loop.md) | 整理 | 暫停（等 gateway-completion 整合） | P1 | 整理程式分層並將 SQL 移到獨立檔案 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
@@ -45,8 +46,8 @@
 
 ## 現在該做哪一個
 
-2026-11-05 已重查：唯一整體母檔為 [gateway-completion](../../agent-pool-gateway-completion/loops/gateway-completion.loop.md)，盤點與完成門檻見 [優先工作](../../agent-pool-gateway-completion/loops/gateway-completion/07-priority-audit.md)，接續指令見 [執行 prompt](../../agent-pool-gateway-completion/loops/gateway-completion/08-execution-prompt.md)。
+2026-11-09 recall：唯一母檔是 [gateway-completion](gateway-completion.loop.md)，接手先讀 [HANDOFF](../HANDOFF.md) 與 [短提示](gateway-completion/08-execution-prompt.md)。本輪只更新交接，未啟動功能開發或排程。
 
-優先順序：修復 #108 CI 並整合現有 Codex／群組成果 → 個人與群組憑證隔離及加密保存、可恢復備份 → 原 Client 全流程與發布。分層整理排在整合後。
+依 R1 日常使用→R2 本人帳號權限→R3 保存恢復推進；先做 R1-S1 的整合基準及最小重現。各項 PLAN／TODO／LOOP 從母檔進入。必要檢查通過就推進核心使用流程，不追測試覆蓋率或無關重構；歷史勾選不當成本版驗收。
 
-W21 S01–S03 已有 groups 工作樹提交，不能再寫尚未開工；本工作樹的 W21 檔是舊副本，S04 尚待整合。W20 的舊等待理由須重查：現有 Codex 正式驗收紀錄不等於 W20 全部條件通過。公開版本為 63fe6d0bef32，遠端 main 為 71f746c，舊交接版本已過時。每次只接一個 writer、一張可驗收票，不重複啟動長任務。
+公開版本 153ac60b58b3，遠端 main 68d7569，#108 仍衝突且檢查清單為空；這是盤點時點，開工再查。舊 01–07 保留作歷史，跨程序拆分與全面分層繼續延後；未完成與未驗項仍保留。

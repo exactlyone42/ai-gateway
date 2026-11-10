@@ -43,7 +43,7 @@
 | `scripts/check.sh`、`.github/workflows/ci.yml` | 本機品質門檻與 CI 入口 |
 | `deploy/`、`docs/operations.md` | 部署設定與操作說明 |
 
-- 改動前先確認 `pwd`、`git status --short`、`git worktree list --porcelain` 與既有程序；不同工作樹的檔案和成果不可混用。接手核心收斂時先找有效的 `gateway-completion.loop.md`，目前位於相鄰的 `agent-pool-gateway-completion` 工作樹；不複製另一份母檔。
+- 改動前先確認 `pwd`、`git status --short`、`git worktree list --porcelain` 與既有程序；不同工作樹的檔案和成果不可混用。接手核心收斂先讀 `loops/gateway-completion.loop.md`；2026-11-05 23:00 原 completion 工作樹已不存在，既有母子檔已從遠端取回目前工作樹。不另建母檔，若再遷移須同步索引並保留歷史。
 - `./scripts/check.sh gate` 用於迭代；`./scripts/check.sh all` 是提交 PR 前的完整門檻，實際內容以該工作樹的腳本為準。前端專項可用 `./scripts/check.sh frontend`。
 - 資料庫測試使用本機隔離測試庫及明確的 `DATABASE_URL`，不可指向正式資料庫。啟動會執行 migration，不能把啟動當成唯讀檢查。
 - 同 repo 各工作樹共用 Rust 建置目錄，build、check 與 push 掛鉤必須全程序列執行；Cargo 編譯鎖不能避免測試期間的程式被另一工作樹覆蓋。
