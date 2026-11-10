@@ -19,8 +19,8 @@
 
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
-| [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 已完成 | P1 | 運行中取得 Codex 憑證 |
-| [gateway-completion](./gateway-completion.loop.md) | — | 進行中 | P0 | 母檔：從 Gateway 現況到目標，子檔分別處理並整合驗收 |
+| [gateway-completion](gateway-completion.loop.md) | — | PLANNED；R1 READY | P0 | 三項核心功能收斂的唯一母檔 |
+| [src-layering](./src-layering.loop.md) | 整理 | 暫停（等 gateway-completion 整合） | P1 | 整理程式分層並將 SQL 移到獨立檔案 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
@@ -43,7 +43,8 @@
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
 | [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
-| [identity-groups](./identity-groups.loop.md) | W21 | S01–S03 已完成；S04 待個人權杖整合 | P1 | 使用者、群組與額度管理 |
+| [identity-groups](./identity-groups.loop.md) | W21 | S01–S03 有本機成果；S04 待整合，見總母檔 | P1 | 員工加 email、群組共用額度與權限、credential 啟停不刪除 |
+| [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 已完成 | P1 | 運行中取得 Codex 憑證 |
 | [request-evidence](./request-evidence.loop.md) | S08 | 已完成 | P1 | 記錄安全請求參數與可比較的可靠度、延遲及成本證據。卡 #64 |
 | [jev-fail-open](./jev-fail-open.loop.md) | S09 | 程式完成，實送受本機憑證阻擋 | P0 | Jev 無額度或不可用時仍沿用正常路由完成請求 |
 | [model-routing-admin](./model-routing-admin.loop.md) | S10 | 已完成 | P0 | 依能力與實測資料選模型，不把單一品質等級當成模型能力 |
@@ -57,12 +58,10 @@
 
 ## 現在該做哪一個
 
-W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因修復與真實長工作驗收。
+2026-11-09 recall：唯一母檔是 [gateway-completion](gateway-completion.loop.md)，接手先讀 [HANDOFF](../HANDOFF.md) 與 [短提示](gateway-completion/08-execution-prompt.md)。本輪只更新交接，未啟動功能開發或排程。
 
-一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
+依 R1 日常使用→R2 本人帳號權限→R3 保存恢復推進；先做 R1-S1 的整合基準及最小重現。各項 PLAN／TODO／LOOP 從母檔進入。必要檢查通過就推進核心使用流程，不追測試覆蓋率或無關重構；歷史勾選不當成本版驗收。
+
+公開版本 153ac60b58b3，遠端 main 68d7569，#108 仍衝突且檢查清單為空；這是盤點時點，開工再查。舊 01–07 保留作歷史，跨程序拆分與全面分層繼續延後；未完成與未驗項仍保留。
 
 - [jev-local](jev-local.loop.md)：本機 Jev 接入。
-
-## 2026-11-05 整體優先順序
-
-以 [gateway-completion.loop.md](gateway-completion.loop.md) 為唯一母檔。依序處理 #108 CI 與既有成果整合、憑證隔離及保存還原、原 Client 全流程與發布。盤點見 [07](gateway-completion/07-priority-audit.md)，執行 prompt 見 [08](gateway-completion/08-execution-prompt.md)；舊版本與暫停敘述須以新盤點核對。

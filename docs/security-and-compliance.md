@@ -2,17 +2,26 @@
 
 ## Supported credential sources
 
-- Provider organization API keys and service accounts.
+- Each user's own API keys and service accounts.
 - Enterprise cloud model endpoints such as approved Azure/AWS/GCP deployments.
 - Contractually approved provider gateways.
-- A single owner's Claude OAuth, validated by Anthropic on every request and
-  forwarded only to Anthropic without persistence. It maps to one existing
-  Gateway principal and cannot be pooled across users.
+- The owner's own Claude Code subscription, held by the gateway container
+  (decided 2026-10-29; terms in `terminology.md`). The container keeps the
+  `sk-ant-oat` token in the file named by `ANTHROPIC_SUBSCRIPTION_TOKEN_FILE`
+  (mode 0600), never in the database or logs and never returned to a client.
+  An admin replaces it with `PUT /admin/v1/provider-tokens/anthropic`; each
+  replacement is audited by fingerprint only. Clients send only a Gateway key,
+  which identifies the person and is not a model credential.
+- Before this change the running container used `ANTHROPIC_CLIENT_OAUTH`
+  (the client's own token was forwarded). That mode still exists and cannot be
+  combined with the held token.
+- Not verified: whether Anthropic's terms allow a server to use a
+  `claude setup-token` token on the owner's behalf. See `terminology.md`.
 
 ## Explicitly unsupported
 
-- Pooling or rotating individual Claude Code, ChatGPT/Codex, or similar
-  subscription logins.
+- Logging in for other people, pooling or rotating subscription logins, or using
+  one person's login for another person's requests.
 - Capturing browser cookies, OAuth refresh tokens or desktop session tokens.
 - Sharing named seats between employees or bypassing product usage limits.
 - Concealing automation from a provider or evading throttling.
@@ -24,8 +33,8 @@ a distinct integration only after legal/security review.
 
 | Client mode | What pays for inference | Gateway policy |
 | --- | --- | --- |
-| Claude Code with gateway credential | Provider account behind that credential; claude.ai subscription is not used | Supported |
-| Claude Code with only a base URL override | Developer's saved claude.ai login remains active | Supported only for the configured single-owner OAuth principal; access tokens are validated and relayed without persistence |
+| Claude Code with a Gateway key only | The owner's subscription token held by the container (see `architecture.md`); the client's own claude.ai login is not used | Running in production; per-user token isolation is not implemented |
+| Claude Code with only a base URL override | Developer's saved claude.ai login stays active; the subscription pays | Legacy mode while `ANTHROPIC_CLIENT_OAUTH` is on: the client's token is validated and forwarded, never stored; cannot be combined with the held token |
 | Codex signed in with ChatGPT | ChatGPT plan allowance and billing | Outside this gateway credential path |
 | Codex with an OpenAI API key against OpenAI | OpenAI API pricing, billed separately from ChatGPT | Outside the gateway credential path |
 | Codex custom provider with `env_key`/`auth` and `requires_openai_auth = false` | Gateway/provider contract; client-side ChatGPT plan-meter interaction is undocumented | Supported; no ChatGPT login token is forwarded |
@@ -60,8 +69,9 @@ Sources, verified 2026-09-11:
 - Virtual keys prefixed by environment and tenant, stored as keyed hashes.
 - Provider credentials in a managed secret store with rotation and access logs.
 - Least-privilege RBAC; SSO MFA for admins; break-glass accounts monitored.
-- Request/response bodies disabled from logs by default. Optional content
-  retention requires a policy, encryption key, purpose and expiry.
+- Request/response bodies never enter logs, traces or metrics. Content goes
+  only to the dedicated encrypted store (trial default on, 2026-10-29; see
+  `request-response-storage.md`), with expiry and deletion.
 - Secrets and common personal data redacted before telemetry export.
 - Immutable audit events for key creation/revocation, policy edits, routing and
   administrative access.
@@ -75,6 +85,6 @@ dependency compromise are release-blocking threat-model areas.
 
 ## Retention
 
-Usage metadata and audit logs have separate retention periods. Content is not
-retained by default. Deletion and legal-hold workflows must be tested before
+Usage metadata and audit logs have separate retention periods. Content lives only in
+the encrypted store with a per-tenant expiry (default 30 days). Deletion and legal-hold workflows must be tested before
 production.

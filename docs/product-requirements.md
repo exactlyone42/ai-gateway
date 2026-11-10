@@ -23,7 +23,7 @@ data-retention class and priority.
 5. Usage is reconciled and queryable by principal, team, model and provider.
 6. Provider failure triggers bounded fallback without exposing secrets.
 7. Every admin mutation and route decision has a correlation ID and audit event.
-8. No request content is stored unless an explicit retention policy enables it.
+8. Request content never enters logs, traces or metrics; it is stored only in the encrypted content store (trial default on, 2026-10-29) with expiry and deletion.
 
 ## Later phases
 

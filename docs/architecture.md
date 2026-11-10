@@ -2,14 +2,30 @@
 
 ## 目標
 
-每個人／每台設備／每個 Agent 拿一把可撤銷的閘道金鑰，把公司核准的官方 API 容量集中調度，
+每個人／每台設備／每個 Agent 拿一把可撤銷的閘道金鑰，把使用者自己的模型帳號（Claude 訂閱、API 金鑰、本機模型）集中調度，
 依政策決定「誰先跑、用哪個模型、花多少」，並留下完整的用量與稽核軌跡——**Provider 憑證永不外流**。
 
-## 架構圖
+## Claude 請求流程（本專案唯一的流程說明，其他文件只連到這裡）
 
-![AI Gateway 系統架構](architecture-diagram.svg)
+使用者 2026-10-29 確認的設計：
 
-PDF 版：[architecture-diagram.pdf](architecture-diagram.pdf)。圖只畫目前已有的元件；改元件時一起改圖。
+1. Client 只帶 Gateway 金鑰（`aigw_`），不帶任何 Anthropic 的東西。
+2. 請求送到 `https://gateway.exactlyone.dev`，Caddy 轉給 Gateway 容器。
+3. 容器驗證 Gateway 金鑰、認出是誰、套用政策與選路；正式環境目前設定直接轉送，不使用 Gateway 排隊。
+4. Anthropic 轉接器換上容器自己持有的權杖（`ANTHROPIC_SUBSCRIPTION_TOKEN_FILE`），
+   由容器發出一般的 HTTPS 請求到 `api.anthropic.com`，並把回應原樣串流回 Client。
+5. 管理者（由 AI 操作）用 `PUT /admin/v1/provider-tokens/anthropic` 更換權杖，下一個請求立即生效。
+
+三個詞（Gateway 金鑰、API 金鑰、權杖）的定義見 `terminology.md`。
+
+## 現況盤點（2026-11-01）
+
+- 正式環境與 `main` 都在 `d1c29e89990d`，`/health` 於 2026-11-01 讀回該版本。已有：一份由容器持有的訂閱權杖、Gateway 金鑰驗證、政策、配額、排程、帳本。
+- 尚未進 `main`：多人各用自己的權杖、加密保存層、本機模型與工具往返驗收。這些在另一工作樹 `agent-pool-gateway-completion`（分支 `feature/gateway-completion`，比 `main` 多 1 個已提交變更與約 26 個未提交檔案，使用者 2026-10-30 令其暫停）；程式存在不代表已驗收，文件仍以 `main` 為準。
+- 本工作樹 `feature/identity-groups` 只有文件與 `prelude` 重構，W21 的 email、群組、Credential 啟停尚未開始；`src/routes.rs` 的測試搬到 `src/routes/tests.rs` 尚未提交。
+- 兩工作樹都大改 `src/routes.rs`，合併前必須先定順序，見 `src-architecture-refactor-plan.md`。
+
+正式環境於 2026-10-29 切到 `d1c29e89990d`，Claude Code 帶 Gateway 金鑰實送成功，切換期間串流完整。現行版本只有一份共用的訂閱權杖，尚未實作依使用者選擇各自權杖；多人各用自己的訂閱仍是目標，不能視為已完成。
 
 ## 三個 Plane
 
@@ -24,7 +40,7 @@ PDF 版：[architecture-diagram.pdf](architecture-diagram.pdf)。圖只畫目前
 
 ### 控制面（Control Plane）
 
-User／Device／Client／Agent／身分／憑證／API Key／Access Token／模型註冊表／Provider／
+User／Device／Client／Agent／身分／Gateway 金鑰／API 金鑰／權杖／模型註冊表／Provider／
 政策／配額／排程設定／Admin UI／RBAC／稽核。
 
 **控制面掛掉時，已經進行中的推論串流不得跟著中斷。**
@@ -83,6 +99,9 @@ source-scoped and cannot be silently translated.
 Content-bearing canonical values are in-memory request data. They are not
 serializable, their debug output is redacted, and they never enter the ledger,
 logs, traces, or spool by default.
+
+This describes current code. Content will move to a dedicated encrypted store
+(decision 2026-10-29, not implemented); see `request-response-storage.md`.
 
 旁路（不擋主路徑）：
 
@@ -183,6 +202,25 @@ Global 預設 → User → Device → Client → Agent → Credential → Reques
 **帳務不得無聲遺失**，spool 必須有上限（不是無上限記憶體佇列）。
 
 ## 部署
+
+**Agent 與 Gateway 的位置有兩種，兩種都要支援**（使用者 2026-10-28 定）：
+
+- 同一台電腦：單機使用者在本機裝 Agent 與 Gateway（含 PostgreSQL，放容器），本機模型也經 Gateway。
+- Gateway 在遠端：Agent 只改連線位址，其餘不變。
+
+Agent 一律只認 Gateway 的位址，不分本機或遠端。保存層的暫存區和資料庫都在 Gateway 那台機器上。
+
+### 工具執行分工（2026-10-29）
+
+架構圖：[現況](agent-pool-gateway-現況.pdf)與[目標](agent-pool-gateway-目標.pdf)。兩圖採用 architecture-diagrams 技能的 `variants.py` 手繪風格 `--themes=sketch --pdf`；對應資料分別為 `gateway-current-diagram.json`、`gateway-target-diagram.json`。修改前先對照程式與使用者決策，輸出後檢查畫面、文字及每頁不透明白底。目標圖是規劃，不表示功能已完成。
+
+目標的上下文分工：Claude Code 與 Codex 自行決定何時壓縮並呼叫模型產生摘要，Gateway 不重複壓縮；自家 Agent 自行決定何時壓縮並呼叫模型，摘要可評估供應商功能或自行選擇模型。這是目標設計，尚未完成實作與原 Client 驗收。
+
+- Gateway 負責模型連線、身分、政策、額度，以及請求和回應的協定轉換；工具由 Agent 端依使用者授權執行。Gateway 在遠端時不直接操作使用者電腦，也不代管 Agent 的工具執行。
+- Gateway 要保留模型的工具名稱、參數、呼叫識別與執行結果，讓 Agent 能把結果交回模型；串流、錯誤與協定轉換不得遺失或錯配。各模型與 Client 實際支援範圍需逐項驗證，不能推定全部相容。
+- 連線設定應讓支援自訂服務的 IDE、CLI 與 Agent 能容易填入 Gateway 網址和自己的 Gateway 金鑰；各產品設定方式與能力需分別查證。Gateway 金鑰與模型供應商的憑證用途不同，後者不提供給 Client。
+- 驗收：真實 Agent 經本機及遠端 Gateway，完成模型要求工具、Agent 執行、結果回傳與最終回答；涵蓋多次工具呼叫、串流與錯誤，以及拒絕或取消後不誤報成功。Claude Code、其他 IDE 和自建 Agent 分開記錄，不把健康檢查當成完整驗收。
+- claude.ai 帳號連接工具在目前 Gateway 金鑰登入方式下不會自動載入；是否能沿用既有服務授權尚未驗證，不承諾免重新授權。Agent 與服務連接的安裝及授權工作記於 agent-platform 的 `PLAN.md`。
 
 **第一版：單一閘道實例。**
 

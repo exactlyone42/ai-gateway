@@ -324,7 +324,7 @@ in_list() {
 layout() {
   step "directory layout"
   local root_dirs=(.github .repo-policy .sqlx deploy docs loops migrations queries scripts src tests web)
-  local root_files=(.dockerignore .env.example .gitattributes .gitignore AGENTS.md CLAUDE.md Cargo.lock Cargo.toml DEVELOPMENT.md Dockerfile LICENSE README.md build.rs)
+  local root_files=(.dockerignore .env.example .gitattributes .gitignore AGENTS.md CLAUDE.md Cargo.lock Cargo.toml DEVELOPMENT.md Dockerfile HANDOFF.md LICENSE README.md build.rs)
   local src_dirs=(adapters admin orchestration routes services)
   local doc=docs/directory-structure.md
   local paths kind name failed=0

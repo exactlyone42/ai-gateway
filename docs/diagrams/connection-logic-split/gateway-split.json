@@ -1,0 +1,25 @@
+{
+  "name": "gateway-split",
+  "title": "連線與業務分開部署",
+  "subtitle": "目標示意，尚未實作",
+  "nodes": [
+    {"id":"client","text":"原 Client","sub":"Claude Code／Codex","col":0,"row":1},
+    {"id":"entry","text":"統一入口","sub":"加密連線與分流","col":1,"row":1},
+    {"id":"edge","text":"連線服務 × N","sub":"收送串流、取消、流量限制","col":2,"row":1},
+    {"id":"logic","text":"業務服務 × M","sub":"權限、配額、選模型、記帳","col":3,"row":1,"focus":true},
+    {"id":"model","text":"指定模型服務","sub":"本地或獲准的遠端服務","col":4,"row":1},
+    {"id":"database","text":"共用資料庫","sub":"身分、配額與帳本","col":3,"row":0},
+    {"id":"storage","text":"加密保存","sub":"持久資料與備份","col":3,"row":2}
+  ],
+  "groups": [
+    {"id":"deployment","text":"Gateway 部署範圍（目標）","col":1,"row":0,"w":3,"h":3}
+  ],
+  "edges": [
+    {"from":"client","to":"entry","label":"請求／回應","both":true},
+    {"from":"entry","to":"edge","label":"連線分流","both":true},
+    {"from":"edge","to":"logic","label":"請求／串流","both":true},
+    {"from":"logic","to":"model","label":"呼叫／回覆","both":true},
+    {"from":"logic","to":"database","label":"交易與配額","both":true,"dashed":true},
+    {"from":"logic","to":"storage","label":"先存後送","both":true,"dashed":true}
+  ]
+}

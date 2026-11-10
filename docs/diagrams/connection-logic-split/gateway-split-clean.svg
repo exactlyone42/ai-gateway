@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="726" viewBox="0 0 1500 726" font-family="'Noto Sans CJK TC','Noto Sans TC','Droid Sans Fallback',sans-serif">
+<defs><marker id="e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3b5b8c"/></marker>
+</defs>
+<rect width="1500" height="726" fill="#ffffff"/>
+<text x="40" y="78" font-size="28" font-weight="700" fill="#1f2937">連線與業務分開部署</text>
+<text x="40" y="108" font-size="15" fill="#5b6472">目標示意，尚未實作</text>
+<g>
+<rect x="334" y="124" width="832" height="542" rx="14" fill="none" stroke="#8aa0bf" stroke-width="2" stroke-dasharray="9 7"/>
+<rect x="40" y="330" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="350" y="330" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="660" y="330" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="970" y="330" width="180" height="130" rx="10" fill="#dbe8f8" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="1280" y="330" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="970" y="140" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<rect x="970" y="520" width="180" height="130" rx="10" fill="#f3f6fb" stroke="#3b5b8c" stroke-width="2"/>
+<line x1="220" y1="395.0" x2="350" y2="395.0" stroke="#3b5b8c" stroke-width="2" marker-start="url(#e)" marker-end="url(#e)"/>
+<line x1="530" y1="395.0" x2="660" y2="395.0" stroke="#3b5b8c" stroke-width="2" marker-start="url(#e)" marker-end="url(#e)"/>
+<line x1="840" y1="395.0" x2="970" y2="395.0" stroke="#3b5b8c" stroke-width="2" marker-start="url(#e)" marker-end="url(#e)"/>
+<line x1="1150" y1="395.0" x2="1280" y2="395.0" stroke="#3b5b8c" stroke-width="2" marker-start="url(#e)" marker-end="url(#e)"/>
+<line x1="1060.0" y1="330" x2="1060.0" y2="270" stroke="#3b5b8c" stroke-width="2" stroke-dasharray="7 6" marker-start="url(#e)" marker-end="url(#e)"/>
+<line x1="1060.0" y1="460" x2="1060.0" y2="520" stroke="#3b5b8c" stroke-width="2" stroke-dasharray="7 6" marker-start="url(#e)" marker-end="url(#e)"/>
+</g>
+<text x="340" y="116" font-size="15" font-weight="700" fill="#5b6472">Gateway 部署範圍（目標）</text>
+<text x="130.0" y="391.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">原 Client</text>
+<text x="130.0" y="417.5" font-size="13" text-anchor="middle" fill="#5b6472">Claude Code／Codex</text>
+<text x="440.0" y="391.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">統一入口</text>
+<text x="440.0" y="417.5" font-size="13" text-anchor="middle" fill="#5b6472">加密連線與分流</text>
+<text x="750.0" y="391.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">連線服務 × N</text>
+<text x="750.0" y="417.5" font-size="13" text-anchor="middle" fill="#5b6472">收送串流、取消、流量限制</text>
+<text x="1060.0" y="391.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">業務服務 × M</text>
+<text x="1060.0" y="417.5" font-size="13" text-anchor="middle" fill="#5b6472">權限、配額、選模型、記帳</text>
+<text x="1370.0" y="391.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">指定模型服務</text>
+<text x="1370.0" y="417.5" font-size="13" text-anchor="middle" fill="#5b6472">本地或獲准的遠端服務</text>
+<text x="1060.0" y="201.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">共用資料庫</text>
+<text x="1060.0" y="227.5" font-size="13" text-anchor="middle" fill="#5b6472">身分、配額與帳本</text>
+<text x="1060.0" y="581.5" font-size="18" font-weight="700" text-anchor="middle" fill="#1f2937">加密保存</text>
+<text x="1060.0" y="607.5" font-size="13" text-anchor="middle" fill="#5b6472">持久資料與備份</text>
+<text x="285.0" y="385.0" font-size="14" text-anchor="middle" fill="#5b6472">請求／回應</text>
+<text x="595.0" y="385.0" font-size="14" text-anchor="middle" fill="#5b6472">連線分流</text>
+<text x="905.0" y="385.0" font-size="14" text-anchor="middle" fill="#5b6472">請求／串流</text>
+<text x="1215.0" y="385.0" font-size="14" text-anchor="middle" fill="#5b6472">呼叫／回覆</text>
+<text x="1070.0" y="305.0" font-size="14" text-anchor="start" fill="#5b6472">交易與配額</text>
+<text x="1070.0" y="495.0" font-size="14" text-anchor="start" fill="#5b6472">先存後送</text>
+</svg>

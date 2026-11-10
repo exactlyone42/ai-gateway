@@ -19,7 +19,7 @@
 | `.github/` | CI 流程 | 其他工具設定 |
 | `.repo-policy/` | Git hook 規則與其測試 | 專案程式 |
 
-根目錄的檔案只有設定與入口：`Cargo.toml`、`Cargo.lock`、`build.rs`、`Dockerfile`、`.dockerignore`、`.env.example`、`.gitattributes`、`.gitignore`、`LICENSE`、`README.md`、`AGENTS.md`、`CLAUDE.md`、`DEVELOPMENT.md`。實作檔、筆記、輸出檔不放根目錄。
+根目錄的檔案只有設定與入口：`Cargo.toml`、`Cargo.lock`、`build.rs`、`Dockerfile`、`.dockerignore`、`.env.example`、`.gitattributes`、`.gitignore`、`LICENSE`、`README.md`、`AGENTS.md`、`CLAUDE.md`、`DEVELOPMENT.md`、`HANDOFF.md`。實作檔、筆記、輸出檔不放根目錄。
 
 ## `src/` 第一層
 
