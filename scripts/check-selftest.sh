@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=33
+EXPECTED_ASSERTS=39
 
 ran=0
 failed=0
@@ -29,6 +29,7 @@ reset() { rm -rf "${work:?}"/*; }
 
 run_bans() { ./scripts/check.sh bans "$work" 2>&1; }
 run_deadfiles() { ./scripts/check.sh deadfiles "$work" 2>&1; }
+run_layout() { ./scripts/check.sh layout <(cd "$work" && find . -type f | sed 's#^\./##') 2>&1; }
 
 # Which gate the next expectation runs. Defaults to bans.
 gate_cmd=run_bans
@@ -347,6 +348,42 @@ fn f() -> Option<String> {
 }
 RS
 expect_red "marker below the read does not excuse it" "bypasses"
+
+gate_cmd=run_layout
+
+reset
+fixture scratch/a.rs <<'RS'
+RS
+expect_red "unlisted root directory" "top-level directory is not on the allowlist"
+
+reset
+fixture notes.md <<'RS'
+RS
+expect_red "implementation or notes file in the root" "file in the repository root"
+
+reset
+fixture src/features/a.rs <<'RS'
+RS
+expect_red "unlisted src top-level directory" "src top-level directory is not on the allowlist"
+
+reset
+fixture src/services/utils/a.rs <<'RS'
+RS
+expect_red "catch-all directory name" "catch-all directory name"
+
+reset
+fixture Cargo.toml <<'RS'
+RS
+fixture src/services/billing/a.rs <<'RS'
+RS
+fixture tests/a.rs <<'RS'
+RS
+expect_green "listed entries and a new subdirectory inside an existing module"
+
+reset
+fixture scripts/test_utils_check.py <<'RS'
+RS
+expect_green "catch-all word inside a file name is allowed"
 
 if [ "$ran" != "$EXPECTED_ASSERTS" ]; then
   echo "FAIL: $ran assertions ran, expected $EXPECTED_ASSERTS -- the suite did not fully execute"
