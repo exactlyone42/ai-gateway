@@ -62,7 +62,7 @@ text{font-family:"Noto Sans CJK TC","Noto Sans TC",sans-serif;fill:#3b2f12}
 <rect x="1225" y="445" width="145" height="42" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
 <rect x="1225" y="495" width="145" height="42" rx="8" fill="#fdf1d0" stroke="#7b5b1e" stroke-width="2"/>
 </g>
-<text x="24" y="38" class="h">Agent Pool Gateway 系統架構</text>
+<text x="24" y="38" class="h">AI Gateway 系統架構</text>
 <text x="30" y="87" class="g">管理者</text>
 <text x="117.5" y="133.0" class="t" text-anchor="middle">管理員</text>
 <text x="117.5" y="148.0" class="s" text-anchor="middle">瀏覽器後台、Admin API</text>

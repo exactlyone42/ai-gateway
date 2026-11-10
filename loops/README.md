@@ -20,7 +20,7 @@
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
 | [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 已完成 | P1 | 運行中取得 Codex 憑證 |
-| [gateway-completion](./gateway-completion.loop.md) | — | 進行中 | P0 | 上層總 LOOP：線上版本入庫、各項驗收與剩餘工作依序收尾 |
+| [gateway-completion](./gateway-completion.loop.md) | — | 舊入口已導向唯一母檔 | P0 | 到 ai-gateway 主工作樹接續 R1→R2→R3 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
@@ -56,7 +56,7 @@
 
 ## 現在該做哪一個
 
-W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因修復與真實長工作驗收。
+2026-11-09 recall：先開 [唯一母檔](/home/cash/work_space/private/ai-gateway/loops/gateway-completion.loop.md) 與 [交接](/home/cash/work_space/private/ai-gateway/HANDOFF.md)，按 R1→R2→R3 接續。此工作樹舊狀態保留為歷史，不能直接當成本輪順序；尚未驗證的 W21 不因此完成。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
 

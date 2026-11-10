@@ -1,57 +1,35 @@
 # LOOP: gateway-completion
 
-> 無卡｜分支 `feature/gateway-completion`｜段落 `—`（上層總 LOOP）
-> 各 step 細節見 `docs/gateway-completion-plan.md`
+> 此工作樹只保留導向，不是另一份活躍母檔。
 
 | 欄位 | 值 |
 | --- | --- |
-| 狀態 | RUNNING |
-| 優先度 | P0 |
+| 狀態 | SUPERSEDED（舊入口） |
 | 開始 | 2026-10-25 |
-| 結束 | — |
+| 結束 | 2026-11-09 |
 
 ## 目的
-線上版本放進 main，已交付功能都用真實 Client 驗過，剩餘工作各有人接。
+接續唯一母檔：
+
+[開啟母檔](/home/cash/work_space/private/ai-gateway/loops/gateway-completion.loop.md)；[交接](/home/cash/work_space/private/ai-gateway/HANDOFF.md)；[執行提示](/home/cash/work_space/private/ai-gateway/loops/gateway-completion/08-execution-prompt.md)。
 
 ## 完成判準
-- [ ] A1 `/health` revision 等於 main 上已合併 commit
-- [ ] A2 原 Claude Code 經 Gateway 回 200，W21 長文件工作無 60 秒取消、無 499
-- [ ] A3 `./scripts/check.sh all` 隔離資料庫全綠
-- [ ] A4 S09、S12 線上讀回通過；S13 shadow 達標或記錄未達標；S14、S15 有各自 loop
-- [ ] A5 identity-groups 5 項判準過或標延後
-- [ ] A6 改程式的 step 皆過簡化審查
+本入口已改為導向；功能仍未完成，驗收以唯一母檔為準。
 
 ## 已知
-- 公開入口目前仍由 `c8158e5d2089` 恢復版服務；新版驗收失敗已切回，舊容器保留。
-- main a562116 的舊遷移內容與正式庫不同，已實測啟動失敗；本輪恢復原內容並補部署前檢查。
-- 無上游金鑰；不接告警，只寫日誌（使用者 2026-10-25）。
+trout 為 docs/ai-gateway-name @e245c67，另有 PR #116；不要把三項核心開發混入該 PR。主目錄是 feature/identity-groups @daf796d，有既存未提交文件。
 
 ## 已做
-- 2026-10-26 原 Client 旁路與公開實送成功，暫以 c8158e5d2089 恢復服務；安全部署修改與驗收進行中。
-
-- 2026-10-26 PR #103、#104 已合併；同資料庫雙程序與原 Client 短請求通過。跨切換長請求在 60 秒取消後續傳，原驗收誤認成功，已撤銷並切回舊版。新增單請求正常結束檢查，以實際故障紀錄確認拒絕；W21 仍未完成。
+2026-11-09 備份舊入口並改為導向；沒有啟動第二個工作或排程。
 
 ## 已確定不可行
-- 無。
+將本工作樹舊 S01–S10 視為當前開工順序。
 
 ## 證據
-- `/health` 實測 revision；`git merge-base --is-ancestor` 實測。
+舊檔保存在 /home/cash/.local/state/recall/reports/gateway-2026-11-09T11-46-23-220Z/before/trout-gateway-completion.loop.md。
 
 ## 來源
-- `loops/README.md`、`docs/gateway-completion-plan.md`。
+使用者要求 recall、更新母檔及短提示；原計畫與未驗項在唯一母檔及 previous-scope 保留。
 
 ## 下一步
-| step | 成果 | 依賴 | 狀態 |
-| --- | --- | --- | --- |
-| S01 | 主 repo git 設定恢復 | — | PENDING |
-| S02 | 新版實送驗收通過才切換，舊版請求完成才下線（交付點） | S01 | RUNNING |
-| S03 | W21 正式驗收 | S02 | PENDING |
-| S04 | 失敗測試查明 | S01 | PENDING |
-| S05 | S12、S09 線上讀回 | S02 | PENDING |
-| S06 | S13 shadow（交付點） | S02、S04 | PENDING |
-| S07 | S14 dispatcher | S06 | PENDING |
-| S08 | S15 integrator | S07 | PENDING |
-| S09 | identity-groups | S04 | PENDING |
-| S10 | 收尾回寫索引 | 其餘 | PENDING |
-
-停止：缺具名授權或做不到才停；卡住先做不相依項。
+到主目錄先讀 HANDOFF，再按唯一母檔 R1-S1 接手；保留既有未提交工作，開工前重查 writer。
