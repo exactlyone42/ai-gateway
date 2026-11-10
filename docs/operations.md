@@ -24,6 +24,8 @@ gateway fails closed at startup when neither is present.
 
 ## Usage ledger migration
 
+用量帳本的九項唯讀驗收查詢放在 [查詢腳本](usage-ledger-queries.sql)。可在同一個 `psql` 連線載入後，依腳本標示的參數執行；測試也會載入這份腳本，確認九項查詢可執行。
+
 `20260910220000_usage_ledger.sql` is expand-only: it adds ledger tables, indexes,
 constraints, append-only triggers, and identity deletion guards. Identity rows
 must be revoked or deactivated instead of deleted so delayed ledger envelopes
@@ -252,8 +254,8 @@ closed. Optional analytics may fail open. Provider routing fails with a clear
 error when no approved deployment is healthy; it never falls back to an
 unapproved model or credential source.
 
-## 供應商金鑰可省略
+## 事故判定與搬家驗收
 
-Gateway 的登入驗證仍然保留。未設定 OpenAI API key 時不建立該供應商路徑；Anthropic 依既有 Client 登入轉送、伺服器 Auth Token、API key 的順序選擇，三者都沒有時不建立該路徑。缺少供應商設定不應讓整台 Gateway 無法啟動。
-
-正式環境若明確填入範例金鑰，仍會拒絕啟動；部署不得自動補入 replace-me。
+- Gateway 事故以使用者體感判定：連不上、常出錯、變慢、容易中斷，或任何明顯降低使用品質的情況都要記錄；健康頁亮綠燈也不能排除事故。
+- 事故紀錄先用白話交代「原本怎麼運作、哪一步接錯、使用者看到什麼、怎麼處理、如何防止」，讓初階工程師能照著理解與處理；技術名稱與數字只放在後面作查證資料。
+- Gateway 搬家或發版後，必須用原本的 Client 真的送出一次請求；只看服務有啟動、健康頁正常或程式編譯成功，不得宣稱完成。

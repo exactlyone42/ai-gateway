@@ -35,7 +35,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 | streaming | 必須增量轉送；模型發現回傳 600 秒靜默上限，且不由 Gateway 自動重送 |
 | tools | supported；工具 beta body 與 `anthropic-beta` 必須原樣成對轉送 |
 | reasoning | supported；Claude 4.6+ 可送 `thinking: {"type":"adaptive"}` |
-| seat_subscription_behavior | 有 gateway credential 時不使用 claude.ai 訂閱，按 token 計給上游憑證擁有者；只換 base URL 而沒換 credential 時仍使用登入訂閱 |
+| seat_subscription_behavior | 正式環境以 Gateway 金鑰認證 Client，由容器持有的訂閱權杖送出請求；多人各用自己的權杖尚未實作。舊的 Client 自帶權杖模式仍有程式支援，但正式環境未啟用。見 `architecture.md`。 |
 | configuration_example | 見下方 `settings.json` |
 | known_limitations | 官方不支援經 gateway 導向非 Claude 模型；fast mode／WebFetch 網域檢查可能直連 `api.anthropic.com`；非第一方端點預設停用 MCP tool search 與 Remote Control |
 | official_source | <https://code.claude.com/docs/en/llm-gateway-protocol>、<https://code.claude.com/docs/en/llm-gateway>、<https://code.claude.com/docs/en/env-vars> |
@@ -44,9 +44,7 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://aigw.internal.example.com",
-    "ANTHROPIC_AUTH_TOKEN": "aigw_sk_...",
-    "CLAUDE_CODE_MAX_RETRIES": "0",
-    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    "ANTHROPIC_AUTH_TOKEN": "aigw_...",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
   }
 }

@@ -216,10 +216,10 @@ OpenAI 的 Bedrock 官方文件明列 Codex CLI、Desktop app、VS Code extensio
 > Anthropic must forward the OAuth capability in `anthropic-beta`.」
 
 **結論**：
-1. 用閘道憑證 → 計費落在**憑證擁有者**（公司的 API 帳號）。訂閱席次不被動用，也不被偷用。
-   這正是規格 §7 要的邊界，且**符合官方規則**。
+1. 用閘道憑證（API 金鑰）→ 計費落在**憑證擁有者**，訂閱席次不被動用。這是可選的另一條路，不是必須。
 2. 只設 base URL 不給憑證 → 流量經過閘道但**仍用開發者的訂閱**計費。
    這種模式閘道必須轉送 `anthropic-beta` 裡的 OAuth capability，**否則 401**。
+   這是舊模式；正式環境現已改為 Client 帶 Gateway 金鑰、訂閱權杖由容器持有，見 `architecture.md`。多人各用自己的權杖尚未實作。
 3. 我們**不做**第 2 種模式的「把席次轉成 API credit」——那從來不成立，官方規則就是分開計費。
 
 OpenAI 側也已於 2026-09-11 覆核：官方寫明 ChatGPT 與 API 是兩套 billing system；
