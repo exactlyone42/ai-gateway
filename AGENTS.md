@@ -40,6 +40,7 @@
 | `docs/product-requirements.md` | 要確認角色與驗收條件 | — |
 | `docs/operations.md` | 要部署、上正式、處理事故 | — |
 | `docs/task-ledger.md` | 要看每段落花多少時間／token、當初的 trade-off | — |
+| `docs/handoff.md` | 要接手 gateway-completion：整體進度、遺留、第一步 | — |
 | `docs/loadtest-journal.md` | 要引用效能數字，或要加一輪壓測 | W18 |
 | `docs/provider-protocols.md` | 要接新的 Provider，或處理協定轉換落差 | W05／W06 |
 | `docs/identity.md` | 要動身分／憑證／Principal 解析 | — |
