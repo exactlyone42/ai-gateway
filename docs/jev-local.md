@@ -16,6 +16,29 @@ Gateway 位於 `http://127.0.0.1:18080`，使用獨立資料庫 `gateway_jev_loc
 啟用後，一般模型請求也會先以所有符合能力與政策的模型作為候選，不會因 Client 固定送 Sonnet 就跳過選模。
 不應送出禁止外傳的企業資料。TypeSafe 費用不包含於本機推論；本次沒有付費實測。
 
+## 判斷模型後端（可替換）
+
+分派前的過濾由 `JEV_BACKEND` 選後端，其餘流程（候選過濾、4 段對話、5 秒逾時、信心 0.6、失敗沿用原模型）兩種相同：
+
+| `JEV_BACKEND` | 用途 | 必填 |
+| --- | --- | --- |
+| `typesafe`（預設） | TypeSafe 線上 Jev | `TYPESAFE_API_KEY`、`JEV_MODEL` |
+| `openai_compatible` | 任何 `/chat/completions` 服務，本機（Ollama、llama-server、vLLM）或線上皆可 | `JEV_BASE_URL`（到 `/v1`）、`JEV_MODEL`，`JEV_API_KEY` 選填 |
+
+換模型只改這幾個環境變數並重啟，不改程式。判斷模型被要求只回 `{"choice","confidence"}`，並以 JSON schema 限制 `choice` 只能是候選編號；它自報的信心只當粗略門檻，不代表校準過的機率。
+
+### 用 Nemotron 3 Nano 4B 當判斷模型
+
+```
+ollama pull hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M
+JEV_ENABLED=true
+JEV_BACKEND=openai_compatible
+JEV_BASE_URL=http://127.0.0.1:11434/v1
+JEV_MODEL=hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M
+```
+
+來源：<https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF>（2026-11-10 核對）。
+
 ## 分派及失敗行為
 
 原有帳號、公司範圍、模型能力及政策先過濾候選，再交給 Jev。
