@@ -266,6 +266,17 @@ impl CredentialService {
         };
 
         if let Some(cached) = self.cache_get(&key)? {
+            let active = sqlx::query_file_scalar!(
+                "queries/identity/cached_credential_active.sql",
+                tenant_id,
+                cached.credential_id
+            )
+            .fetch_one(&self.pool)
+            .await?;
+            if !active {
+                self.cache_lock()?.invalidate(cached.credential_id);
+                return Err(IdentityError::InvalidCredential);
+            }
             return if self.verify_secret(plaintext, &cached.hash_key_id, &cached.secret_hash)? {
                 Ok(cached.principal)
             } else {
@@ -930,12 +941,14 @@ mod tests {
             openai_api_key: "upstream-key".to_owned(),
             codex_auth_file: None,
             codex_account_id: String::new(),
+            codex_owner_user_id: None,
             openai_provider: "openai-test".to_owned(),
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
             anthropic_subscription_token_file: None,
+            anthropic_personal_token_dir: None,
             anthropic_subscription_token_seed: None,
             anthropic_client_oauth: false,
             anthropic_oauth_credential_id: None,
@@ -945,6 +958,7 @@ mod tests {
             stream_event_max_bytes: 32 * 1024 * 1024,
             stream_heartbeat_interval: Duration::from_secs(30),
             provider_idle_timeout: Duration::from_secs(120),
+            local_provider_idle_timeout: Duration::from_secs(300),
             provider_connect_timeout: Duration::from_secs(10),
             request_header_max_bytes: 64 * 1024,
             drain_timeout: Duration::from_secs(30),
@@ -975,6 +989,14 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            content_capture_enabled: false,
+            content_capture_spool_dir: "/var/lib/agent-pool-gateway/capture-spool".into(),
+            content_capture_key_dir: "/var/lib/agent-pool-gateway/capture-keys".into(),
+            content_capture_anchor_dir: "/var/lib/agent-pool-gateway/capture-anchors".into(),
+            content_capture_erasure_dir: "/var/lib/agent-pool-gateway/capture-erasure".into(),
+            content_capture_witness_dir: "/var/lib/agent-pool-gateway/capture-witness".into(),
+            content_capture_remote_witness_url: None,
+            content_capture_test_allow_local_witness: false,
             routing: Default::default(),
             jev: None,
             scheduler: Default::default(),
@@ -1216,8 +1238,8 @@ mod tests {
         state.credentials.resolve(&rotated.plaintext).await.unwrap();
         pool.close().await;
         assert!(
-            state.credentials.resolve(&rotated.plaintext).await.is_ok(),
-            "a cached credential stopped working when the database closed"
+            state.credentials.resolve(&rotated.plaintext).await.is_err(),
+            "a cached credential was accepted when the database closed"
         );
     }
 
@@ -1237,12 +1259,14 @@ mod tests {
             openai_api_key: "upstream-key".to_owned(),
             codex_auth_file: None,
             codex_account_id: String::new(),
+            codex_owner_user_id: None,
             openai_provider: "openai-test".to_owned(),
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
             anthropic_subscription_token_file: None,
+            anthropic_personal_token_dir: None,
             anthropic_subscription_token_seed: None,
             anthropic_client_oauth: false,
             anthropic_oauth_credential_id: None,
@@ -1252,6 +1276,7 @@ mod tests {
             stream_event_max_bytes: 32 * 1024 * 1024,
             stream_heartbeat_interval: Duration::from_secs(30),
             provider_idle_timeout: Duration::from_secs(120),
+            local_provider_idle_timeout: Duration::from_secs(300),
             provider_connect_timeout: Duration::from_secs(10),
             request_header_max_bytes: 64 * 1024,
             drain_timeout: Duration::from_secs(30),
@@ -1282,6 +1307,14 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            content_capture_enabled: false,
+            content_capture_spool_dir: "/var/lib/agent-pool-gateway/capture-spool".into(),
+            content_capture_key_dir: "/var/lib/agent-pool-gateway/capture-keys".into(),
+            content_capture_anchor_dir: "/var/lib/agent-pool-gateway/capture-anchors".into(),
+            content_capture_erasure_dir: "/var/lib/agent-pool-gateway/capture-erasure".into(),
+            content_capture_witness_dir: "/var/lib/agent-pool-gateway/capture-witness".into(),
+            content_capture_remote_witness_url: None,
+            content_capture_test_allow_local_witness: false,
             routing: Default::default(),
             jev: None,
             scheduler: Default::default(),
@@ -1341,12 +1374,14 @@ mod tests {
             openai_api_key: "upstream-key".to_owned(),
             codex_auth_file: None,
             codex_account_id: String::new(),
+            codex_owner_user_id: None,
             openai_provider: "openai-test".to_owned(),
             openai_request_max_bytes: 32 * 1024 * 1024,
             anthropic_base_url: "http://127.0.0.1:1".to_owned(),
             anthropic_api_key: "provider-key".to_owned(),
             anthropic_auth_token: None,
             anthropic_subscription_token_file: None,
+            anthropic_personal_token_dir: None,
             anthropic_subscription_token_seed: None,
             anthropic_client_oauth: false,
             anthropic_oauth_credential_id: None,
@@ -1356,6 +1391,7 @@ mod tests {
             stream_event_max_bytes: 32 * 1024 * 1024,
             stream_heartbeat_interval: Duration::from_secs(30),
             provider_idle_timeout: Duration::from_secs(120),
+            local_provider_idle_timeout: Duration::from_secs(300),
             provider_connect_timeout: Duration::from_secs(10),
             request_header_max_bytes: 64 * 1024,
             drain_timeout: Duration::from_secs(30),
@@ -1386,6 +1422,14 @@ mod tests {
             )),
             ledger_spool_max_bytes: 1024 * 1024,
             ledger_spool_entry_max_bytes: 32 * 1024,
+            content_capture_enabled: true,
+            content_capture_spool_dir: "/var/lib/agent-pool-gateway/capture-spool".into(),
+            content_capture_key_dir: "/var/lib/agent-pool-gateway/capture-keys".into(),
+            content_capture_anchor_dir: "/var/lib/agent-pool-gateway/capture-anchors".into(),
+            content_capture_erasure_dir: "/var/lib/agent-pool-gateway/capture-erasure".into(),
+            content_capture_witness_dir: "/var/lib/agent-pool-gateway/capture-witness".into(),
+            content_capture_remote_witness_url: None,
+            content_capture_test_allow_local_witness: false,
             routing: Default::default(),
             jev: None,
             scheduler: Default::default(),

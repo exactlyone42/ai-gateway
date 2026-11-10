@@ -71,6 +71,14 @@ impl ProviderKind {
             Self::OpenAi | Self::Xai | Self::Vllm | Self::Ollama => ProviderDialect::OpenAi,
         }
     }
+
+    fn profile_dialect(self, operations: &[GatewayOperation]) -> ProviderDialect {
+        if self == Self::Ollama && operations == [GatewayOperation::AnthropicMessages] {
+            ProviderDialect::Anthropic
+        } else {
+            self.dialect()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,9 +234,9 @@ impl CapabilityRequirements {
                 }),
             reasoning: request.reasoning.as_ref().is_some_and(|reasoning| {
                 reasoning.enabled == Some(true)
-                    || reasoning.effort.is_some()
                     || reasoning.budget_tokens.is_some()
-                    || reasoning.summary.is_some()
+                    || (reasoning.effort.as_deref() != Some("none")
+                        && (reasoning.effort.is_some() || reasoning.summary.is_some()))
             }),
             images: has_content(|content| matches!(content, CanonicalContent::Image { .. })),
             structured_output: request.structured_output.is_some(),
@@ -386,10 +394,42 @@ enum ProviderAuthorization {
     CodexFile(std::path::PathBuf, String),
     ClientBearer,
     HeldBearer(crate::held_token::HeldToken),
+    PersonalBearer(
+        Arc<str>,
+        Option<Arc<crate::group_credentials::CredentialLease>>,
+    ),
+    PersonalApiKey(Arc<str>, Arc<crate::group_credentials::CredentialLease>),
+    PersonalApiBearer(Arc<str>, Arc<crate::group_credentials::CredentialLease>),
+    PersonalApiSlot,
+    PersonalBearerSlot,
     None,
 }
 
 impl ProviderProfile {
+    pub(crate) fn personal_api_slot(
+        kind: ProviderKind,
+        credential_ref: impl Into<String>,
+        provider_key: impl Into<String>,
+        base_url: impl Into<String>,
+        operations: Vec<GatewayOperation>,
+        allowed_tenants: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            credential_ref: credential_ref.into(),
+            provider_key: provider_key.into(),
+            base_url: canonical_base_url(base_url.into()),
+            operations,
+            target_dialect: kind.dialect(),
+            kind,
+            allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
+            authorization: match kind {
+                ProviderKind::Anthropic | ProviderKind::Gemini => {
+                    ProviderAuthorization::PersonalApiSlot
+                }
+                _ => ProviderAuthorization::PersonalBearerSlot,
+            },
+        }
+    }
     pub fn bearer(
         credential_ref: impl Into<String>,
         provider_key: impl Into<String>,
@@ -427,8 +467,8 @@ impl ProviderProfile {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
+            target_dialect: kind.profile_dialect(&operations),
             operations,
-            target_dialect: kind.dialect(),
             kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::Bearer(secret.into()),
@@ -492,8 +532,8 @@ impl ProviderProfile {
             credential_ref: credential_ref.into(),
             provider_key: provider_key.into(),
             base_url: canonical_base_url(base_url.into()),
+            target_dialect: kind.profile_dialect(&operations),
             operations,
-            target_dialect: kind.dialect(),
             kind,
             allowed_tenants: Arc::new(allowed_tenants.into_iter().collect()),
             authorization: ProviderAuthorization::None,
@@ -579,27 +619,85 @@ impl ProviderProfile {
     pub fn uses_subscription_headers(&self) -> bool {
         matches!(
             self.authorization,
-            ProviderAuthorization::ClientBearer | ProviderAuthorization::HeldBearer(_)
+            ProviderAuthorization::ClientBearer
+                | ProviderAuthorization::HeldBearer(_)
+                | ProviderAuthorization::PersonalBearer(_, _)
         )
     }
 
     pub fn held_token(&self) -> Option<Arc<str>> {
         match &self.authorization {
             ProviderAuthorization::HeldBearer(token) => token.get(),
+            ProviderAuthorization::PersonalBearer(token, lock) => {
+                let _guard = lock;
+                Some(token.clone())
+            }
             _ => None,
         }
     }
 
     pub fn is_held_bearer(&self) -> bool {
-        matches!(self.authorization, ProviderAuthorization::HeldBearer(_))
+        matches!(
+            self.authorization,
+            ProviderAuthorization::HeldBearer(_) | ProviderAuthorization::PersonalBearer(_, _)
+        )
+    }
+
+    pub(crate) fn is_unauthenticated(&self) -> bool {
+        matches!(self.authorization, ProviderAuthorization::None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_personal_token(&self, token: Arc<str>) -> Self {
+        let mut profile = self.clone();
+        profile.authorization = ProviderAuthorization::PersonalBearer(token, None);
+        profile
+    }
+
+    pub(crate) fn with_personal_token_lock(
+        &self,
+        token: Arc<str>,
+        lock: impl Into<crate::group_credentials::CredentialLease>,
+    ) -> Self {
+        let mut profile = self.clone();
+        profile.authorization =
+            ProviderAuthorization::PersonalBearer(token, Some(Arc::new(lock.into())));
+        profile
+    }
+
+    pub(crate) fn with_personal_api_key(
+        &self,
+        key: Arc<str>,
+        lock: impl Into<crate::group_credentials::CredentialLease>,
+    ) -> Option<Self> {
+        let authorization = match self.authorization {
+            ProviderAuthorization::ApiKey(_) | ProviderAuthorization::PersonalApiSlot => {
+                ProviderAuthorization::PersonalApiKey(key, Arc::new(lock.into()))
+            }
+            ProviderAuthorization::Bearer(_) | ProviderAuthorization::PersonalBearerSlot => {
+                ProviderAuthorization::PersonalApiBearer(key, Arc::new(lock.into()))
+            }
+            _ => return None,
+        };
+        let mut profile = self.clone();
+        profile.authorization = authorization;
+        Some(profile)
     }
 
     pub fn bearer_secret(&self) -> Option<&str> {
         match &self.authorization {
             ProviderAuthorization::Bearer(secret) => Some(secret),
+            ProviderAuthorization::PersonalApiBearer(secret, lock) => {
+                let _guard = lock;
+                Some(secret)
+            }
             ProviderAuthorization::ApiKey(_)
             | ProviderAuthorization::ClientBearer
             | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::PersonalBearer(_, _)
+            | ProviderAuthorization::PersonalApiKey(_, _)
+            | ProviderAuthorization::PersonalApiSlot
+            | ProviderAuthorization::PersonalBearerSlot
             | ProviderAuthorization::CodexFile(_, _)
             | ProviderAuthorization::None => None,
         }
@@ -610,9 +708,17 @@ impl ProviderProfile {
             ProviderAuthorization::Bearer(_)
             | ProviderAuthorization::ClientBearer
             | ProviderAuthorization::HeldBearer(_)
+            | ProviderAuthorization::PersonalBearer(_, _)
+            | ProviderAuthorization::PersonalApiBearer(_, _)
+            | ProviderAuthorization::PersonalApiSlot
+            | ProviderAuthorization::PersonalBearerSlot
             | ProviderAuthorization::CodexFile(_, _)
             | ProviderAuthorization::None => None,
             ProviderAuthorization::ApiKey(secret) => Some(secret),
+            ProviderAuthorization::PersonalApiKey(secret, lock) => {
+                let _guard = lock;
+                Some(secret)
+            }
         }
     }
 }
@@ -631,7 +737,7 @@ impl ProviderProfiles {
                 || profile.base_url.is_empty()
                 || profile.operations.is_empty()
                 || profile.allowed_tenants.is_empty()
-                || profile.target_dialect != profile.kind.dialect()
+                || profile.target_dialect != profile.kind.profile_dialect(&profile.operations)
                 || by_ref
                     .insert(profile.credential_ref.clone(), profile)
                     .is_some()
@@ -1878,5 +1984,26 @@ mod tests {
             CapabilityRequirements::from_canonical(&request),
             CapabilityRequirements::default()
         );
+    }
+
+    #[test]
+    fn disabled_reasoning_does_not_require_reasoning_capability() {
+        let cases = [
+            (
+                GatewayOperation::OpenAiResponses,
+                r#"{"model":"public","stream":true,"reasoning":{"effort":"none","summary":"auto"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":"hello"}"#,
+            ),
+            (
+                GatewayOperation::OpenAiChatCompletions,
+                r#"{"model":"public","stream":true,"reasoning_effort":"none","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+        ];
+        for (operation, body) in cases {
+            let request = canonical_from(operation, body);
+            let required = CapabilityRequirements::from_canonical(&request);
+            assert!(!required.reasoning);
+            assert!(required.tools);
+            assert!(required.streaming);
+        }
     }
 }

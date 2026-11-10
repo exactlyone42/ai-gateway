@@ -418,23 +418,34 @@ pub(crate) mod capture {
 /// The provider comes back with it because the tracer only records while the
 /// provider is alive.
 #[cfg(test)]
-pub(crate) fn test_subscriber(
-    buffer: capture::Buffer,
-) -> (impl tracing::Subscriber + Send + Sync, SdkTracerProvider) {
-    use opentelemetry::trace::TracerProvider as _;
+mod test_support {
+    use super::*;
+    pub(crate) fn test_subscriber(
+        buffer: capture::Buffer,
+    ) -> (impl tracing::Subscriber + Send + Sync, SdkTracerProvider) {
+        use opentelemetry::trace::TracerProvider as _;
 
-    install_propagator();
-    let provider = SdkTracerProvider::builder().build();
-    let subscriber = tracing_subscriber::registry()
-        .with(filter())
-        .with(
-            tracing_subscriber::fmt::layer()
-                .event_format(OtelJson)
-                .with_writer(buffer),
-        )
-        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
-    (subscriber, provider)
+        static INITIALIZE: std::sync::Once = std::sync::Once::new();
+        INITIALIZE.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry())
+                .expect("test global tracing subscriber must be installed once");
+        });
+        install_propagator();
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(filter())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(OtelJson)
+                    .with_writer(buffer),
+            )
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SERVICE_NAME)));
+        (subscriber, provider)
+    }
 }
+
+#[cfg(test)]
+pub(crate) use test_support::test_subscriber;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE capture_records SET state = 'deleting' WHERE tenant_id = $1 AND capture_id = $2\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8fbc2509aafcb3a33babc2e87b63c108a2560a1beb2306c5b69db060cad1a540"
+}

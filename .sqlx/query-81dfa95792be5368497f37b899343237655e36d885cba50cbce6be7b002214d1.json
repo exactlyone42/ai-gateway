@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n    SELECT 1 FROM capture_records\n    WHERE state = 'deleting' OR (expires_at <= now() AND state <> 'deleted')\n) AS \"pending!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "81dfa95792be5368497f37b899343237655e36d885cba50cbce6be7b002214d1"
+}

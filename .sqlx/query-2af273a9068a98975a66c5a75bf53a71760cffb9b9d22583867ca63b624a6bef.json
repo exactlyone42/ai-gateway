@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n    SELECT 1 FROM pg_catalog.pg_stat_activity\n    WHERE datname = pg_catalog.current_database()\n      AND pid <> pg_catalog.pg_backend_pid()\n      AND wait_event = 'PgSleep'\n      AND query LIKE '%capture_erasure_floor%'\n) AS \"waiting!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2af273a9068a98975a66c5a75bf53a71760cffb9b9d22583867ca63b624a6bef"
+}

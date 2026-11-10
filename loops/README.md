@@ -20,7 +20,7 @@
 | Loop | 段落 | 狀態 | 優先度 | 目標 |
 | --- | --- | --- | --- | --- |
 | [codex-held-auth](./codex-held-auth.loop.md) | 訂閱接法 | 已完成 | P1 | 運行中取得 Codex 憑證 |
-| [gateway-completion](./gateway-completion.loop.md) | — | 舊入口已導向唯一母檔 | P0 | 到 ai-gateway 主工作樹接續 R1→R2→R3 |
+| [gateway-completion](./gateway-completion.loop.md) | — | 進行中 | P0 | 母檔：從 Gateway 現況到目標，子檔分別處理並整合驗收 |
 | [gateway-blueprint](./gateway-blueprint.loop.md) | W00 | 已交付（#20 留作範圍決策） | P0 | 把 92 節規格拆成 19 個可獨立審查的實作段落，並先確認可行性。卡 #20 |
 | [client-compatibility](./client-compatibility.loop.md) | W01 | 已交付 | P0 | 查證哪些 Client 真能指向自架閘道，以及訂閱席次與 API 計費的邊界 |
 | [workspace-foundation](./workspace-foundation.loop.md) | W02 | 已交付 | P0 | 讓資料庫可用，解開 W03／W04。卡 #25 |
@@ -43,6 +43,7 @@
 | [test-harness-load](./test-harness-load.loop.md) | W18 | 已交付 | P1 | 拿數字證明不互串、不漏、不爆、不餓死 |
 | [process-lifecycle](./process-lifecycle.loop.md) | W19 | 已交付 | P0 | 部署不砍掉正在跑的串流，行程也退得掉 |
 | [production-readiness](./production-readiness.loop.md) | W20 | 等待使用者決定（六條驗收完成；S04／S06／S07 需金鑰、告警接收端與授權） | P0 | 把已交付程式變成可持續使用、可回復、可回退且經真實 Client 驗證的服務 |
+| [identity-groups](./identity-groups.loop.md) | W21 | S01–S03 已完成；S04 待個人權杖整合 | P1 | 使用者、群組與額度管理 |
 | [request-evidence](./request-evidence.loop.md) | S08 | 已完成 | P1 | 記錄安全請求參數與可比較的可靠度、延遲及成本證據。卡 #64 |
 | [jev-fail-open](./jev-fail-open.loop.md) | S09 | 程式完成，實送受本機憑證阻擋 | P0 | Jev 無額度或不可用時仍沿用正常路由完成請求 |
 | [model-routing-admin](./model-routing-admin.loop.md) | S10 | 已完成 | P0 | 依能力與實測資料選模型，不把單一品質等級當成模型能力 |
@@ -56,8 +57,12 @@
 
 ## 現在該做哪一個
 
-2026-11-09 recall：先開 [唯一母檔](/home/cash/work_space/private/ai-gateway/loops/gateway-completion.loop.md) 與 [交接](/home/cash/work_space/private/ai-gateway/HANDOFF.md)，按 R1→R2→R3 接續。此工作樹舊狀態保留為歷史，不能直接當成本輪順序；尚未驗證的 W21 不因此完成。
+W21 `claude-first-byte-stall` 是正式使用中的 P0 故障，先完成根因修復與真實長工作驗收。
 
 一次只推進一個段落到底，不要同時開四個分支——**收斂為目標，不是進度看起來多**。
 
 - [jev-local](jev-local.loop.md)：本機 Jev 接入。
+
+## 2026-11-05 整體優先順序
+
+以 [gateway-completion.loop.md](gateway-completion.loop.md) 為唯一母檔。依序處理 #108 CI 與既有成果整合、憑證隔離及保存還原、原 Client 全流程與發布。盤點見 [07](gateway-completion/07-priority-audit.md)，執行 prompt 見 [08](gateway-completion/08-execution-prompt.md)；舊版本與暫停敘述須以新盤點核對。

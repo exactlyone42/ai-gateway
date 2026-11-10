@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT state FROM capture_records WHERE tenant_id = $1 AND capture_id = $2 FOR SHARE\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "04d9746fa3909d3a88511bda17be8ed7bad289d4996b03489a06c6458ae5d18c"
+}

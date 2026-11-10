@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO quotas (\n                        id, tenant_id, quota_key, revision, user_id, device_id, client_id,\n                        agent_id, credential_id, model_id, provider_id, configuration, group_id\n                    ) VALUES (\n                        $1, $2, $3, $4, $5, $6, $7, $8,\n                        COALESCE((\n                            SELECT COALESCE(rotation_root_id, id)\n                            FROM credentials WHERE tenant_id = $2 AND id = $9\n                        ), $9),\n                        $10, $11, $12, $13\n                    )\n                    RETURNING to_jsonb(quotas) AS \"value!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "aa9701f576e8c3523480e6ad0b68a2be9a4676ce62722a8a99d16fe5899114c3"
+}

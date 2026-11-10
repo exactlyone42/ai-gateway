@@ -1,0 +1,1 @@
+DROP INDEX users_tenant_email_idx

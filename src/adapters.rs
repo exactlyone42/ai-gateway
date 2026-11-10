@@ -40,7 +40,7 @@ pub fn validate_for_provider(
 ) -> Result<ValidatedTranslationPlan, GatewayError> {
     let source_operation = request.source_operation();
     let target_dialect = selection.profile.target_dialect;
-    let adapter = provider::for_kind(selection.profile.kind)?;
+    let adapter = provider::for_profile(&selection.profile)?;
     let capabilities = adapter.capabilities();
     if (request.stream && !capabilities.streaming)
         || (!request.tools.is_empty() && !capabilities.tools)
@@ -331,7 +331,7 @@ pub fn prepare_for_provider(
     input: ProviderRequestInput<'_>,
 ) -> Result<provider::PreparedProviderRequest, GatewayError> {
     let native = request.native();
-    let adapter = provider::for_kind(profile.kind)?;
+    let adapter = provider::for_profile(profile)?;
     if translation.source_operation != native.operation
         || translation.target_dialect != profile.target_dialect
     {
@@ -352,7 +352,8 @@ pub fn prepare_for_provider(
     } else {
         adapter.encode_canonical(request, plan.operation, provider_model_id)?
     };
-    if profile.provider_key.starts_with("ollama")
+    if (profile.kind == crate::model_registry::ProviderKind::Ollama
+        || profile.provider_key.starts_with("ollama"))
         && plan.operation == GatewayOperation::AnthropicMessages
     {
         body = ensure_ollama_user_text(body)?;
@@ -801,6 +802,79 @@ mod tests {
             GatewayOperation::OpenAiResponses => "/v1/responses?native=true",
             GatewayOperation::OpenAiChatCompletions => "/v1/chat/completions?native=true",
             GatewayOperation::GeminiGenerateContent => "/target-only",
+        }
+    }
+
+    #[test]
+    fn ollama_native_messages_preserves_tools_and_filters_client_credentials() {
+        use crate::model_registry::{ProviderKind, ProviderProfiles};
+        for stream in [false, true] {
+            let profile = ProviderProfile::unauthenticated_for(
+                ProviderKind::Ollama,
+                "none://native-local",
+                "custom-local-name",
+                "http://127.0.0.1:11434",
+                vec![GatewayOperation::AnthropicMessages],
+                vec![Uuid::nil()],
+            );
+            assert_eq!(profile.target_dialect, ProviderDialect::Anthropic);
+            ProviderProfiles::new([profile.clone()]).unwrap();
+            let adapter = super::provider::for_profile(&profile).unwrap();
+            assert_eq!(adapter.dialect(), ProviderDialect::Anthropic);
+            assert_eq!(
+                adapter.default_path(GatewayOperation::AnthropicMessages),
+                Some("/v1/messages")
+            );
+            assert!(
+                adapter
+                    .default_path(GatewayOperation::AnthropicCountTokens)
+                    .is_none()
+            );
+            let body = serde_json::json!({
+                "model": "public", "max_tokens": 32, "stream": stream,
+                "tools": [{"name":"Read", "input_schema":{"type":"object"}}],
+                "messages": [
+                    {"role":"user","content":"original"},
+                    {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/test"}}]},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"result-marker"}]}
+                ]
+            });
+            let request = protocol::decode(
+                GatewayOperation::AnthropicMessages,
+                Bytes::from(serde_json::to_vec(&body).unwrap()),
+            )
+            .unwrap()
+            .enrich(enrichment());
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                HeaderValue::from_static("Bearer client-secret"),
+            );
+            headers.insert("x-api-key", HeaderValue::from_static("client-key"));
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            let prepared = prepare_for_provider(
+                &request,
+                &profile,
+                "local-model",
+                native_plan(GatewayOperation::AnthropicMessages),
+                input("/v1/messages", &headers),
+            )
+            .unwrap();
+            assert_eq!(prepared.path_and_query(), "/v1/messages");
+            assert!(prepared.headers().get("authorization").is_none());
+            assert!(prepared.headers().get("x-api-key").is_none());
+            assert_eq!(prepared.headers()["anthropic-version"], "2023-06-01");
+            let actual: Value = serde_json::from_slice(prepared.body()).unwrap();
+            assert_eq!(actual["model"], "local-model");
+            assert_eq!(actual["stream"], stream);
+            assert_eq!(actual["tools"], body["tools"]);
+            assert_eq!(actual["messages"][0], body["messages"][0]);
+            assert_eq!(actual["messages"][1], body["messages"][1]);
+            assert_eq!(
+                actual["messages"][2]["content"][0],
+                body["messages"][2]["content"][0]
+            );
+            assert_eq!(actual["messages"][2]["content"][1]["type"], "text");
         }
     }
 

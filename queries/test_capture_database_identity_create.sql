@@ -1,0 +1,1 @@
+CREATE DATABASE capture_identity_other;

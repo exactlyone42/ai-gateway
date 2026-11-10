@@ -23,6 +23,15 @@ pub struct ReportListQuery {
 }
 
 #[derive(Deserialize)]
+pub struct RequestListQuery {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
+    pub task_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct UsageQuery {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -311,11 +320,18 @@ impl AdminService {
     pub async fn request_page(
         &self,
         context: &AdminContext,
-        query: ReportListQuery,
+        query: RequestListQuery,
     ) -> Result<CursorPage, AdminError> {
         validate_window(query.from, query.to)?;
         let limit = validate_limit(query.limit)?;
         let (cursor_time, cursor_id) = decode_cursor(query.cursor.as_deref(), query.to)?;
+        if query.task_id.as_ref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 128
+                || !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+        }) {
+            return Err(AdminError::InvalidRequest);
+        }
         let rows = sqlx::query(
             r#"
             WITH ranked_usage AS (
@@ -339,6 +355,7 @@ impl AdminService {
                 'requested_model', gr.requested_model, 'selected_model', gr.selected_model,
                 'selected_provider', gr.selected_provider, 'workload_class', gr.workload_class,
                 'routing_reason', COALESCE(gr.policy_decision->'routing'->>'reason', 'registry'),
+                'task_id', attr.task_id,
                 'created_at', gr.created_at, 'completed_at', gr.completed_at,
                 'total_latency_ms', extract(epoch FROM gr.total_latency) * 1000,
                 'principal', jsonb_build_object(
@@ -354,6 +371,7 @@ impl AdminService {
                 )
             ) AS item
             FROM gateway_requests gr
+            LEFT JOIN request_attribution attr ON (attr.tenant_id, attr.gateway_request_id) = (gr.tenant_id, gr.id)
             LEFT JOIN usage_by_request ubr ON ubr.gateway_request_id = gr.id
             LEFT JOIN users u ON (u.tenant_id, u.id) = (gr.tenant_id, gr.user_id)
             LEFT JOIN devices d ON (d.tenant_id, d.id) = (gr.tenant_id, gr.device_id)
@@ -361,6 +379,7 @@ impl AdminService {
             LEFT JOIN agents a ON (a.tenant_id, a.id) = (gr.tenant_id, gr.agent_id)
             LEFT JOIN credentials c ON (c.tenant_id, c.id) = (gr.tenant_id, gr.credential_id)
             WHERE gr.tenant_id = $1 AND gr.created_at >= $2 AND gr.created_at < $3
+              AND ($7::text IS NULL OR attr.task_id = $7)
               AND (gr.created_at, gr.id) < ($4, $5)
             ORDER BY gr.created_at DESC, gr.id DESC LIMIT $6
             "#,
@@ -371,9 +390,47 @@ impl AdminService {
         .bind(cursor_time)
         .bind(cursor_id)
         .bind(i64::from(limit) + 1)
+        .bind(query.task_id)
         .fetch_all(&self.pool)
         .await?;
         page_from_rows(rows, limit, "created_at", "id", "item")
+    }
+
+    pub async fn capture_report(
+        &self,
+        context: &AdminContext,
+        id: Uuid,
+    ) -> Result<Value, AdminError> {
+        if context.role != super::AdminRole::Admin {
+            return Err(AdminError::Forbidden);
+        }
+        let mut tx = self.pool.begin().await?;
+        let authorized: Option<i32> = sqlx::query_scalar("SELECT 1 FROM admin_sessions s JOIN admin_accounts a ON (a.tenant_id, a.id) = (s.tenant_id, s.admin_account_id) AND a.version = s.account_version JOIN admin_login_credentials c ON (c.tenant_id, c.id, c.admin_account_id) = (s.tenant_id, s.login_credential_id, s.admin_account_id) AND c.version = s.login_credential_version WHERE s.tenant_id = $1 AND s.id = $2 AND a.id = $3 AND a.role = 'admin' AND a.status = 'active' AND s.revoked_at IS NULL AND s.expires_at > now() AND c.status = 'active' AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > now()) FOR SHARE OF s, a, c")
+            .bind(context.tenant_id).bind(context.session_id).bind(context.account_id)
+            .fetch_optional(&mut *tx).await?;
+        if authorized.is_none() {
+            return Err(AdminError::Unauthorized);
+        }
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM capture_records WHERE tenant_id = $1 AND capture_id = $2 FOR SHARE",
+        )
+        .bind(context.tenant_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_none() {
+            return Err(AdminError::NotFound);
+        }
+        let report = sqlx::query_scalar("SELECT jsonb_build_object('id', r.capture_id, 'user_id', r.user_id, 'state', r.state, 'created_at', r.created_at, 'expires_at', r.expires_at, 'blocks', jsonb_build_object('client_request', count(b.leg) FILTER (WHERE b.leg = 0), 'provider_request', count(b.leg) FILTER (WHERE b.leg = 1), 'provider_response', count(b.leg) FILTER (WHERE b.leg = 2), 'client_response', count(b.leg) FILTER (WHERE b.leg = 3))) FROM capture_records r LEFT JOIN capture_blocks b ON (b.tenant_id, b.capture_id) = (r.tenant_id, r.capture_id) WHERE r.tenant_id = $1 AND r.capture_id = $2 GROUP BY r.tenant_id, r.capture_id")
+            .bind(context.tenant_id)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AdminError::NotFound)?;
+        sqlx::query("INSERT INTO audit_logs (id, tenant_id, actor_admin_id, actor_role, action, target_type, target_id, occurred_at) VALUES ($1, $2, $3, 'admin', 'capture.metadata.read', 'capture', $4, now())")
+            .bind(Uuid::new_v4()).bind(context.tenant_id).bind(context.account_id).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(report)
     }
 
     pub async fn request_report(
@@ -393,6 +450,9 @@ impl AdminService {
             )
             SELECT jsonb_build_object(
                 'request', to_jsonb(gr) - 'tenant_id',
+                'attribution', (SELECT to_jsonb(attr) - 'tenant_id' - 'gateway_request_id'
+                    FROM request_attribution attr
+                    WHERE attr.tenant_id = $1 AND attr.gateway_request_id = $2),
                 'parameters', jsonb_build_object(
                     'requested', (SELECT rps.parameters FROM request_parameter_snapshots rps
                         WHERE rps.tenant_id = $1 AND rps.gateway_request_id = $2
@@ -961,7 +1021,7 @@ mod tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use super::{ReportListQuery, ReportWindowQuery, UsageQuery};
+    use super::{ReportListQuery, ReportWindowQuery, RequestListQuery, UsageQuery};
     use crate::{
         admin::{AdminContext, AdminError, AdminRole},
         identity::CredentialService,
@@ -1107,6 +1167,10 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query("INSERT INTO request_attribution (tenant_id, gateway_request_id, task_id, prompt_id) VALUES ($1, $2, 'shared-task', 'prompt-one'), ($1, $3, 'other-task', NULL), ($4, $5, 'shared-task', 'other-tenant-prompt')")
+            .bind(tenant_id).bind(request_one).bind(request_two).bind(other_tenant).bind(Uuid::from_u128(103))
+            .execute(&pool).await.unwrap();
+
         sqlx::query(
             r#"
             WITH provider AS (
@@ -1207,11 +1271,12 @@ mod tests {
         let first_page = service
             .request_page(
                 &context,
-                ReportListQuery {
+                RequestListQuery {
                     from,
                     to,
                     limit: Some(1),
                     cursor: None,
+                    task_id: None,
                 },
             )
             .await
@@ -1220,11 +1285,12 @@ mod tests {
         let second_page = service
             .request_page(
                 &context,
-                ReportListQuery {
+                RequestListQuery {
                     from,
                     to,
                     limit: Some(1),
                     cursor: first_page.next_cursor,
+                    task_id: None,
                 },
             )
             .await
@@ -1232,7 +1298,42 @@ mod tests {
         assert_eq!(second_page.items.len(), 1);
         assert_ne!(first_page.items[0]["id"], second_page.items[0]["id"]);
 
+        let filtered = service
+            .request_page(
+                &context,
+                RequestListQuery {
+                    from,
+                    to,
+                    limit: Some(10),
+                    cursor: None,
+                    task_id: Some("shared-task".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0]["id"], request_one.to_string());
+        assert_eq!(filtered.items[0]["task_id"], "shared-task");
+        assert!(filtered.items[0]["completed_at"].is_string());
+        assert!(matches!(
+            service
+                .request_page(
+                    &context,
+                    RequestListQuery {
+                        from,
+                        to,
+                        limit: None,
+                        cursor: None,
+                        task_id: Some("x".repeat(129)),
+                    }
+                )
+                .await,
+            Err(AdminError::InvalidRequest)
+        ));
+
         let detail = service.request_report(&context, request_one).await.unwrap();
+        assert_eq!(detail["attribution"]["task_id"], "shared-task");
+        assert_eq!(detail["attribution"]["prompt_id"], "prompt-one");
         assert_eq!(detail["attempts"].as_array().unwrap().len(), 1);
         assert_eq!(detail["usage"].as_array().unwrap().len(), 1);
         assert_eq!(detail["usage"][0]["input_tokens"], 10);

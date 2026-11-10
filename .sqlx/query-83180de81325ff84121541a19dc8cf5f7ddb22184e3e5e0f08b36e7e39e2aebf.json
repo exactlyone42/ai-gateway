@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO quota_reservations (id, tenant_id, gateway_request_id, state, estimated_tokens, estimated_cost_microusd, decision, allocations, expires_at)\nVALUES ($1, $2, $3, 'active', 0, 0, '{}'::jsonb, '[]'::jsonb, now() + interval '1 day')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "83180de81325ff84121541a19dc8cf5f7ddb22184e3e5e0f08b36e7e39e2aebf"
+}

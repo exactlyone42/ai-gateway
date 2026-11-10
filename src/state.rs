@@ -25,6 +25,7 @@ use thiserror::Error;
 pub struct AppState {
     pub(crate) config: Config,
     pub(crate) client: Client,
+    pub(crate) local_provider_client: Client,
     pub(crate) bootstrap_key_hash: Option<[u8; 32]>,
     /// Built here, which is after `metrics::init()` in `startup` -- an
     /// instrument binds to the provider installed at build time, so this
@@ -45,10 +46,71 @@ pub struct AppState {
     pub(crate) lifecycle: ProcessLifecycle,
     /// Bounds concurrent shadow decompositions; a busy gateway skips rather than queues.
     pub(crate) shadow_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) capture_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) capture_erasure: Option<Arc<crate::capture_erasure::ActiveErasure>>,
+    #[cfg(test)]
+    pub(crate) capture_test_enabled: bool,
     pub(crate) held_token: Option<crate::held_token::HeldToken>,
+    pub(crate) personal_tokens: Option<crate::held_token::PersonalTokens>,
 }
 
 impl AppState {
+    pub(crate) fn client_for_provider(&self, kind: ProviderKind) -> &Client {
+        match kind {
+            ProviderKind::Ollama | ProviderKind::Vllm => &self.local_provider_client,
+            _ => &self.client,
+        }
+    }
+
+    pub(crate) async fn profile_for_user(
+        &self,
+        principal: &crate::canonical::PrincipalRef,
+        profile: &ProviderProfile,
+    ) -> Result<ProviderProfile, crate::error::GatewayError> {
+        if profile.is_codex_subscription() {
+            return match (self.config.codex_owner_user_id, principal.user_id) {
+                (Some(owner), Some(user)) if owner == user => Ok(profile.clone()),
+                _ => Err(crate::error::GatewayError::ProviderUnavailable),
+            };
+        }
+        let Some(store) = self.personal_tokens.as_ref() else {
+            return Ok(profile.clone());
+        };
+        if profile.is_unauthenticated() {
+            return Ok(profile.clone());
+        }
+        let user = principal
+            .user_id
+            .ok_or(crate::error::GatewayError::ProviderUnavailable)?;
+        let is_subscription = profile.is_held_bearer();
+        let api_store = store.api_store(&profile.provider_key);
+        let selected = if is_subscription { store } else { &api_store };
+        let (token, lease) = crate::group_credentials::select(
+            &self.pool,
+            selected,
+            principal.tenant_id,
+            user,
+            &profile.provider_key,
+            if is_subscription {
+                "subscription"
+            } else {
+                "api"
+            },
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "provider credential selection failed");
+            crate::error::GatewayError::ProviderUnavailable
+        })?;
+        if is_subscription {
+            Ok(profile.with_personal_token_lock(token, lease))
+        } else {
+            profile
+                .with_personal_api_key(token, lease)
+                .ok_or(crate::error::GatewayError::ProviderUnavailable)
+        }
+    }
+
     pub(crate) fn shadow_context(&self) -> crate::services::task_decomposition::ShadowContext {
         crate::services::task_decomposition::ShadowContext {
             pool: self.pool.clone(),
@@ -67,6 +129,10 @@ impl AppState {
                     .map(|key| Sha256::digest(key.as_bytes()).into())
             })
             .flatten();
+        let personal_tokens = config
+            .anthropic_personal_token_dir
+            .clone()
+            .map(crate::held_token::PersonalTokens::new);
         let credentials = CredentialService::new(
             pool.clone(),
             config.credential_hash_key_id.clone(),
@@ -88,7 +154,19 @@ impl AppState {
                 config.provider_allowed_tenant_ids.clone(),
             ));
         }
-        if !config.openai_api_key.is_empty() {
+        if config.openai_api_key.is_empty() && personal_tokens.is_some() {
+            provider_profiles.push(ProviderProfile::personal_api_slot(
+                ProviderKind::OpenAi,
+                "env://OPENAI_API_KEY",
+                config.openai_provider.clone(),
+                config.openai_base_url.clone(),
+                vec![
+                    GatewayOperation::OpenAiResponses,
+                    GatewayOperation::OpenAiChatCompletions,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+            ));
+        } else if !config.openai_api_key.is_empty() {
             provider_profiles.push(ProviderProfile::bearer(
                 "env://OPENAI_API_KEY",
                 config.openai_provider.clone(),
@@ -112,7 +190,23 @@ impl AppState {
                 )
             })
             .transpose()?;
-        if held_token.is_some()
+        if held_token.is_none()
+            && personal_tokens.is_some()
+            && config.anthropic_api_key.is_empty()
+            && config.anthropic_auth_token.is_none()
+        {
+            provider_profiles.push(ProviderProfile::personal_api_slot(
+                ProviderKind::Anthropic,
+                "env://ANTHROPIC_API_KEY",
+                config.anthropic_provider.clone(),
+                config.anthropic_base_url.clone(),
+                vec![
+                    GatewayOperation::AnthropicMessages,
+                    GatewayOperation::AnthropicCountTokens,
+                ],
+                config.provider_allowed_tenant_ids.clone(),
+            ));
+        } else if held_token.is_some()
             || config.anthropic_client_oauth
             || config.anthropic_auth_token.is_some()
             || !config.anthropic_api_key.is_empty()
@@ -180,6 +274,15 @@ impl AppState {
                     config.provider_allowed_tenant_ids.clone(),
                 );
                 Ok(match (extra.kind, extra.secret.as_ref()) {
+                    (
+                        ProviderKind::Anthropic
+                        | ProviderKind::OpenAi
+                        | ProviderKind::Gemini
+                        | ProviderKind::Xai,
+                        None,
+                    ) if personal_tokens.is_some() => ProviderProfile::personal_api_slot(
+                        extra.kind, args.0, args.1, args.2, args.3, args.4,
+                    ),
                     (ProviderKind::Gemini, Some(secret)) => ProviderProfile::api_key_for(
                         extra.kind,
                         args.0,
@@ -240,11 +343,14 @@ impl AppState {
         .with_provider_profiles(profiles.clone())
         .with_policy_engine(policies.clone())
         .with_scheduler(scheduler.clone());
-        let ledger = Ledger::open(
+        let ledger = Ledger::open_coordinated(
             pool.clone(),
             config.ledger_spool_dir.clone(),
             config.ledger_spool_max_bytes,
             config.ledger_spool_entry_max_bytes,
+            config
+                .content_capture_enabled
+                .then(|| config.ledger_spool_dir.clone()),
         )?;
         let models = ModelRegistry::new(pool.clone(), profiles, config.allowed_models.clone());
         let client = Client::builder()
@@ -252,10 +358,16 @@ impl AppState {
             .connect_timeout(config.provider_connect_timeout)
             .read_timeout(config.provider_idle_timeout)
             .build()?;
+        let local_provider_client = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(config.provider_connect_timeout)
+            .read_timeout(config.local_provider_idle_timeout)
+            .build()?;
         Ok(Self {
             jev: config.jev.clone().map(crate::jev::JevRouter::new),
             config,
             client,
+            local_provider_client,
             bootstrap_key_hash,
             instruments: Instruments::new(),
             pool,
@@ -269,7 +381,12 @@ impl AppState {
             ledger,
             lifecycle: ProcessLifecycle::default(),
             shadow_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            capture_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+            capture_erasure: None,
+            #[cfg(test)]
+            capture_test_enabled: false,
             held_token,
+            personal_tokens,
         })
     }
 }

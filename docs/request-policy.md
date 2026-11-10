@@ -10,16 +10,19 @@ in-flight or historical decision.
 Active policies are tenant scoped and resolve from broadest to narrowest:
 
 1. Global (the tenant/company default)
-2. User
-3. Device
-4. Client
-5. Agent
-6. Credential
-7. Request hint
+2. Group
+3. User
+4. Device
+5. Client
+6. Agent
+7. Credential
+8. Request hint
 
 Later defaults replace earlier defaults. Hard ceilings are intersected across
 all layers and request hints cannot relax them. An explicit deny, an expired
 deadline, or an empty model intersection rejects the request before routing.
+群組與個人政策同時生效：個人預設值可取代群組預設值，但不能取消群組的禁止或硬限制。
+使用者屬於多個群組時，群組政策依群組 ID 排序；相同預設欄位由排序較後的群組決定。群組 ID 是自動產生的識別碼，不代表管理者指定的優先順序，因此應避免在多個群組設定互相衝突的預設值。
 Only one revision can be active for each tenant and scope target; activating a
 new revision disables the prior revision in the same transaction and writes
 both audit events.
@@ -108,9 +111,11 @@ provider attempt, after model lookup and durable ledger reservation.
 
 ## Failure behavior
 
-Policy lookups use a tenant-safe, bounded TTL cache. Admin policy mutations
-invalidate that tenant immediately. A warm unexpired entry can serve a request
-during a database outage; a miss or expired entry fails closed with
+Policy lookups without a user use a tenant-safe, bounded TTL cache. Lookups with a
+user always read the database so membership changes made by another process are
+visible. Admin policy mutations invalidate that tenant immediately. A warm
+unexpired entry without a user can serve a request during a database outage; a
+lookup with a user, a miss or expired entry fails closed with
 `policy_unavailable`. `POLICY_CACHE_CAPACITY` and `POLICY_CACHE_TTL_SECONDS`
 default to `1024` entries and `60` seconds; both must be positive.
 
@@ -127,8 +132,10 @@ default to `1024` entries and `60` seconds; both must be positive.
 ## Quota and rate limits
 
 Active quota revisions are tenant scoped and may target the global tenant,
-User, Device, Client, Agent, Credential rotation family, Model, or Provider.
-Every matching scope is applied. A quota document is typed and contains at
+Group, User, Device, Client, Agent, Credential rotation family, Model, or Provider.
+同名個人額度只有在模式、模型和供應商相同，且涵蓋群組的全部有效限制項目時，才取代該群組額度；空值不算有效限制。其他命中的額度仍會套用。
+被取代的群組額度不會檢查，也不會記入該群組共用額度；因此管理者建立個人額度時，可以為該使用者設定比群組更寬的例外。要維持所有成員共用的上限，請避免建立會取代它的同名個人額度。
+A quota document is typed and contains at
 least one of these limits:
 
 ```json
@@ -167,6 +174,10 @@ usage appends a reconciliation event and adjusts estimated token/cost totals
 exactly once under the same tenant lock as admission. Day and month boundaries
 are fixed to UTC. `recompute_quota_windows(tenant_uuid)` rebuilds counters from
 immutable reservations and reconciliation state under that lock.
+
+同批有多筆請求結帳時，先按租戶、額度、限制種類及起算時間加總調整量，再更新每個額度視窗一次。用量與成本都依各筆預留和最終實報的差額調整；重播不會再次調整，混入衝突內容時整批拒絕。
+
+`20261110000001_quota_batch_windows.sql` 修正後續入帳，不會自動改寫歷史額度。升級前已有的錯帳仍須另外核對；重建計數要沿用既有租戶鎖與 `recompute_quota_windows`，不能把原事件或驗收原件改成預期數字。這次選擇修正原入帳函數，保留外層重播檢查，避免新增另一套結帳路徑。
 
 Concurrency is a request-lifetime RAII lease. W12 deliberately supports one
 gateway process; startup holds a PostgreSQL session advisory lock and a second

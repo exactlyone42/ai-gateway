@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ingest_usage_envelopes($1)\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ingest_usage_envelopes",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e4fc7ed76204441ba992e461a61c3a1fb8a3b6cb6de73feace5bf53b3e2a80fe"
+}

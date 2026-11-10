@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION public.gateway_test_delay_floor() RETURNS event_trigger LANGUAGE plpgsql AS $$\nBEGIN\n    IF pg_catalog.current_query() LIKE '%capture_erasure_floor%' THEN\n        PERFORM pg_catalog.pg_sleep(15);\n    END IF;\nEND\n$$;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "984c82472a45b31e52293180148ba1322b7a3c149a8933e12d148a779b534f1e"
+}

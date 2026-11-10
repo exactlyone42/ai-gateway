@@ -1,5 +1,5 @@
 use sqlx::{
-    Pool, Postgres,
+    Connection, PgConnection, Pool, Postgres,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use std::{str::FromStr, time::Duration};
@@ -20,6 +20,21 @@ pub enum DatabaseError {
     Url(#[source] sqlx::Error),
     #[error("could not apply migrations")]
     Migrate(#[source] sqlx::migrate::MigrateError),
+    #[error("capture restore incomplete")]
+    RestoreIncomplete,
+    #[error("could not check capture restore state")]
+    RestoreCheck(#[source] sqlx::Error),
+}
+
+pub(crate) async fn ensure_restore_complete(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
+    let incomplete = sqlx::query_file_scalar!("queries/capture_restore_incomplete.sql")
+        .fetch_one(pool)
+        .await
+        .map_err(DatabaseError::RestoreCheck)?;
+    if incomplete {
+        return Err(DatabaseError::RestoreIncomplete);
+    }
+    Ok(())
 }
 
 /// Builds the pool without touching the network.
@@ -50,7 +65,39 @@ pub(crate) fn gateway_options(options: PgConnectOptions) -> PgConnectOptions {
 /// This runs in the startup path on purpose: a deployment must not need a
 /// second manual step, and a gateway serving requests against a half-migrated
 /// schema is worse than a gateway that did not start.
+#[cfg(test)]
 pub async fn migrate(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
+    migrate_notified(pool, None).await
+}
+
+pub(crate) struct MigrationBackend {
+    pid: i32,
+    started: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) async fn cancel_migration(
+    url: &str,
+    backend: &MigrationBackend,
+) -> Result<bool, DatabaseError> {
+    let options = gateway_options(PgConnectOptions::from_str(url).map_err(DatabaseError::Url)?);
+    let mut connection = PgConnection::connect_with(&options)
+        .await
+        .map_err(DatabaseError::Url)?;
+    sqlx::query_file_scalar!(
+        "queries/migration_cancel_backend.sql",
+        backend.pid,
+        backend.started
+    )
+    .fetch_optional(&mut connection)
+    .await
+    .map(|result| result.unwrap_or(false))
+    .map_err(DatabaseError::Url)
+}
+
+pub(crate) async fn migrate_notified(
+    pool: &Pool<Postgres>,
+    sender: Option<tokio::sync::oneshot::Sender<MigrationBackend>>,
+) -> Result<(), DatabaseError> {
     let mut migrations = sqlx::migrate!("./migrations");
     // A rolled-back binary sees migrations applied by the newer release. The
     // schema changes are expand-only, so unknown newer versions are safe to
@@ -60,6 +107,16 @@ pub async fn migrate(pool: &Pool<Postgres>) -> Result<(), DatabaseError> {
         .acquire()
         .await
         .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+    if let Some(sender) = sender {
+        let row = sqlx::query_file!("queries/migration_backend_identity.sql")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::Migrate(sqlx::migrate::MigrateError::Execute(error)))?;
+        let _ = sender.send(MigrationBackend {
+            pid: row.pid,
+            started: row.started,
+        });
+    }
     let original_timeouts = sqlx::query_as::<_, (String, String)>(
         "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
     )

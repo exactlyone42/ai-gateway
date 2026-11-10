@@ -38,6 +38,7 @@ services:
       args:
         BUILD_REVISION: ${BUILD_REVISION:-}
     restart: unless-stopped
+    stop_grace_period: ${GATEWAY_STOP_GRACE_PERIOD:-60s}
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,12 +52,17 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_PROVIDER: ${OPENAI_PROVIDER:-openai}
+      EXTRA_PROVIDER_PROFILES_JSON: ${EXTRA_PROVIDER_PROFILES_JSON:-[]}
       CODEX_AUTH_FILE: ${CODEX_AUTH_FILE:-}
       CODEX_ACCOUNT_ID: ${CODEX_ACCOUNT_ID:-}
+      CODEX_OWNER_USER_ID: ${CODEX_OWNER_USER_ID:-}
       OPENAI_REQUEST_MAX_BYTES: ${OPENAI_REQUEST_MAX_BYTES:-33554432}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_SUBSCRIPTION_TOKEN_FILE: ${ANTHROPIC_SUBSCRIPTION_TOKEN_FILE:-}
+      ANTHROPIC_SUBSCRIPTION_TOKEN: ${ANTHROPIC_SUBSCRIPTION_TOKEN:-}
+      ANTHROPIC_PERSONAL_TOKEN_DIR: ${ANTHROPIC_PERSONAL_TOKEN_DIR:-}
       ANTHROPIC_CLIENT_OAUTH: ${ANTHROPIC_CLIENT_OAUTH:-false}
       ANTHROPIC_OAUTH_CREDENTIAL_ID: ${ANTHROPIC_OAUTH_CREDENTIAL_ID:-}
       ANTHROPIC_PROVIDER: ${ANTHROPIC_PROVIDER:-anthropic}
@@ -69,6 +75,7 @@ services:
       # platform termination grace period from the two shutdown values, which
       # is impossible if the container fixes them.
       PROVIDER_IDLE_TIMEOUT_MS: ${PROVIDER_IDLE_TIMEOUT_MS:-}
+      LOCAL_PROVIDER_IDLE_TIMEOUT_MS: ${LOCAL_PROVIDER_IDLE_TIMEOUT_MS:-}
       PROVIDER_CONNECT_TIMEOUT_MS: ${PROVIDER_CONNECT_TIMEOUT_MS:-}
       REQUEST_HEADER_MAX_BYTES: ${REQUEST_HEADER_MAX_BYTES:-}
       DRAIN_TIMEOUT_MS: ${DRAIN_TIMEOUT_MS:-}
@@ -93,6 +100,13 @@ services:
       LEDGER_SPOOL_DIR: /var/lib/agent-pool-gateway/ledger-spool
       LEDGER_SPOOL_MAX_BYTES: ${LEDGER_SPOOL_MAX_BYTES:-67108864}
       LEDGER_SPOOL_ENTRY_MAX_BYTES: ${LEDGER_SPOOL_ENTRY_MAX_BYTES:-32768}
+      CONTENT_CAPTURE_ENABLED: ${CONTENT_CAPTURE_ENABLED:-true}
+      CONTENT_CAPTURE_SPOOL_DIR: /var/lib/agent-pool-gateway/capture-spool
+      CONTENT_CAPTURE_KEY_DIR: /var/lib/agent-pool-gateway/capture-keys
+      CONTENT_CAPTURE_ANCHOR_DIR: /var/lib/agent-pool-gateway/capture-anchors
+      CONTENT_CAPTURE_ERASURE_DIR: /var/lib/agent-pool-gateway/capture-erasure
+      CONTENT_CAPTURE_WITNESS_DIR: /var/lib/agent-pool-gateway/capture-witness
+      CONTENT_CAPTURE_REMOTE_WITNESS_URL: ${CONTENT_CAPTURE_REMOTE_WITNESS_URL:-}
       # Routing and admission are sized for the host, so a deployment must be
       # able to set them without forking this file.
       ROUTING_HEALTH_AWARE: ${ROUTING_HEALTH_AWARE:-}
@@ -129,6 +143,12 @@ services:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     volumes:
       - ledger-spool:/var/lib/agent-pool-gateway/ledger-spool
+      - provider-secrets:/var/lib/agent-pool-gateway/provider-secrets
+      - capture-spool:/var/lib/agent-pool-gateway/capture-spool
+      - capture-keys:/var/lib/agent-pool-gateway/capture-keys
+      - capture-anchors:/var/lib/agent-pool-gateway/capture-anchors
+      - capture-erasure:/var/lib/agent-pool-gateway/capture-erasure
+      - capture-witness:/var/lib/agent-pool-gateway/capture-witness
     healthcheck:
       # Readiness, not liveness: "the stack is up" should mean the gateway can
       # actually reach its database.
@@ -140,3 +160,9 @@ services:
 volumes:
   postgres-data:
   ledger-spool:
+  provider-secrets:
+  capture-spool:
+  capture-keys:
+  capture-anchors:
+  capture-erasure:
+  capture-witness:

@@ -7,6 +7,8 @@
 
 ## 資料模型
 
+管理服務的使用者 email 可不填；同一 tenant 的 email 不分大小寫且不得重複。修改時不提供 email 保留原值，提供 `null` 清空；列表可用 `email` 精確搜尋，忽略大小寫且只搜尋目前 tenant。建立及修改的稽核紀錄不保存 email。
+
 `users`、`devices`、`clients`、`agents` 是四個獨立維度，彼此沒有父子外鍵。
 `credentials` 用 nullable foreign key 組成一次請求的 `PrincipalContext`。每個外鍵都連同
 `tenant_id` 驗證，因此無法把不同 tenant 的維度拼成一個 Principal。
@@ -32,6 +34,8 @@
 | revoke | active／disabled → revoked，立即失效 cache |
 | expire | 解析時把命中的到期列改成 expired；控制面亦可一次 batch 處理 tenant |
 
+停用使用者、裝置、客戶端或代理身分時，原有行為會撤銷綁定的金鑰；重新啟用身分不會恢復已撤銷的金鑰。若只需暫時停用並恢復金鑰，應操作金鑰本身的停用與啟用。
+
 輪替 overlap 必須介於 1 秒和 15 分鐘，同一舊 key 只能建立一個 successor。解析／cache 填入
 與生命週期異動由同一把 async read/write gate 線性化，異動成功後不會再填回舊 cache。
 第一版只跑單一閘道實例；W19 維持這個契約。改成多實例前必須另行補跨實例失效與 durable
@@ -42,10 +46,10 @@ counter 機制，並量測新增的資料庫成本。
 認證中介層先處理既有的 development bootstrap key，再解析正式 `aigw_` key：
 
 1. 從 key 取得 environment 與 tenant，計算 fingerprint。
-2. cache key 同時包含 tenant 與 fingerprint；命中後仍以常數時間驗 HMAC。
+2. cache key 同時包含 tenant 與 fingerprint；命中後先查資料庫確認憑證及其身分仍有效，再以常數時間驗 HMAC。
 3. 未命中時用一條 tenant-scoped SQL 取得 credential、更新 `last_used_at` 並組成 Principal。
 4. 命中的過期列在同一個 SQL statement 轉為 `expired`；無效狀態回 401。
-5. cache miss 且 DB 不可用回 503；缺少資料列指定的 HMAC key 版本也回 503。
+5. 資料庫不可用時，即使快取命中也回 503；缺少資料列指定的 HMAC key 版本也回 503。
 
 Gateway 的 PostgreSQL connection 設 1 秒 `lock_timeout`、2 秒 `statement_timeout` 與 2 秒
 pool acquire timeout。credential row 被其他 transaction 鎖住時，認證會在期限內回 503 並釋放
@@ -88,3 +92,22 @@ SHA-256 比對且不寫 DB。其他組合若誤設，程序會拒絕啟動；未
 `./scripts/check.sh all` 會啟動一個有界的本機 PostgreSQL，讓 `sqlx::test` 在隔離資料庫套用真
 migration。測試涵蓋跨 tenant 外鍵、狀態轉移、單一 successor、HMAC key overlap、DB 故障、
 cache／撤銷競態、production bootstrap 拒絕，以及五表明文掃描的陰性與注入正對照。
+
+## 群組與權杖歸屬（2026-11-01 決定）
+
+同一個人的多個帳號（不同 email、角色）各是一個 user，放進同一個群組；供應商權杖綁在群組，查找順序是使用者自己的、再所屬群組的。放棄的做法：在 user 之上新增「人」，或讓一個 user 掛多個 email，因為都更複雜。群組不檢查成員是否同一個人，把不同人放進掛有權杖的群組就是共用訂閱席次，由管理者負責。
+
+
+2026-11-05 群組憑證實作（尚待完整發布驗收）：啟用個人憑證目錄後，讀取先找使用者；只有確定未設定才找群組，損壞、檔案鎖忙或資料庫錯誤均拒絕。符合的群組必須只有一個，訂閱與 API 金鑰分開綁定；同一使用者與群組即使識別碼相同，檔案路徑也不同。資料庫只存完整 SHA-256 摘要，不存秘密；實際使用前比對正規化後的權杖，避免檔案更新但資料庫未提交時誤用新憑證。
+
+管理者可對 `/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}` 使用 GET、PUT、DELETE；`kind` 為 `subscription` 或 `api`，PUT 內容為 `{"token":"本人憑證"}`。provider 必須是同租戶已啟用的供應商，訂閱限 Anthropic；Codex 仍沿用明確指定的一位持有人，不走群組後備。GET 只回設定、啟用與檔案是否符合綁定的狀態，不回憑證。Operator、Viewer 均不可操作這個介面。
+
+後台「Identities」選擇群組後，管理者可在「群組供應商憑證」選供應商與憑證種類，查狀態、更新或撤銷。供應商可翻頁；切換群組、供應商或種類會清空輸入。秘密只留在當次輸入與送出請求，不進查詢快取；送出後立即清空。操作結果未確認時只讀回狀態，不自動重送；狀態讀取失敗時禁止更新及撤銷，先重新核對。
+
+畫面狀態隔離採 React 19 的切換 key 重建表單，查詢依 TanStack Query 5 明確停用失敗重試，更新使用直接請求而不把秘密存進 mutation cache。來源：[React 狀態重設](https://react.dev/learn/preserving-and-resetting-state#option-2-resetting-state-with-a-key)、[查詢重試設定](https://tanstack.com/query/v5/docs/framework/react/guides/query-retries)，2026-11-05 核對；不新增依賴。
+
+每次變更先記操作嘗試，再鎖定群組、原子更新檔案，最後把綁定與成功稽核一起提交。檔案與資料庫無法一起回滾；失敗時回結果未確認，之後應先 GET 查狀態，再明確更新或撤銷。讀取若發現檔案與綁定不符會拒絕，不自行猜測要用哪一版。資料庫取鎖最多等2秒，單次查詢最多5秒。
+
+群組請求保留會員列、內容綁定及檔案共享鎖到上游回應標頭；移除會員另外取得同一使用者的本機排他鎖，避免資料庫連線失效後提前完成撤權。API 與訂閱共用這把會員鎖，憑證檔仍分開。未配置個人憑證目錄的入口，若群組已有啟用的憑證綁定，會拒絕移除會員；查驗前先鎖群組，再以新的查詢讀取綁定。這依賴 Gateway 程序使用相同的個人憑證目錄；跨主機鎖、直接修改資料庫、多人真實訂閱與正式上線尚未驗收。以群組掛憑證不會自動判定這些使用者是否同一個人，原有管理者責任不變。
+
+憑證與會員檔案鎖在持有者結束時明確解鎖，再關閉檔案；即使啟動子程序時留下同一描述符的副本，也不會讓已結束的操作繼續持鎖。不同請求各自取得共享鎖，結束其中一個請求不會解除另一個請求的保護。鎖忙仍拒絕，不退回其他人的憑證。

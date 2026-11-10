@@ -27,10 +27,14 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web
+      - uses: docker/setup-compose-action@v1
+        with:
+          version: v5.6.1
       # Single source of truth for the gates, shared with local development.
       # See docs/engineering-standards.md section 0.
       - name: Run full checks
         env:
+          SQLX_OFFLINE: "true"
           PGHOST: github-runner-agent-pool-gateway-db
           PGUSER: gateway
           PGPASSWORD: ${{ secrets.RUNNER_DB_PASSWORD }}

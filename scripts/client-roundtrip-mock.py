@@ -17,6 +17,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
     capture_dir: Path
     request_paths: dict[str, list[str]] = {"claude-code": [], "codex-cli": []}
     request_paths_lock = threading.Lock()
+    provider_keys_by_model: dict[str, str] = {}
+    provider_credentials: set[str] = {"fixture-provider-key"}
+    client_credentials: set[str] = {"fixture-client-key"}
+    captured_requests: list[dict[str, object]] = []
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -42,13 +46,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
         target_url = urlsplit(self.path)
         query = parse_qsl(target_url.query)
         headers = list(self.headers.items())
-        credential_values = {
-            self.headers.get("authorization", ""),
-            self.headers.get("x-api-key", ""),
-        }
+        credential_headers = [
+            (key.lower(), value) for key, value in self.headers.items()
+            if key.lower() in ("authorization", "x-api-key", "x-goog-api-key", "cookie")
+        ]
         serialized_request = json.dumps(
             {"headers": headers, "query": query, "body": body}, sort_keys=True
         )
+        expected_key = self.provider_keys_by_model.get(str(body.get("model")), "fixture-provider-key")
+        expected_headers = [("x-api-key", expected_key)] if target_url.path.startswith("/v1/messages") else [("authorization", f"Bearer {expected_key}")]
         tools = body.get("tools")
         tool_types = sorted(
             {
@@ -76,11 +82,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             and reasoning.get("effort") == "low",
             "includes_encrypted_reasoning": isinstance(include, list)
             and "reasoning.encrypted_content" in include,
-            "provider_credential_matches_fixture": bool(
-                credential_values
-                & {"fixture-provider-key", "Bearer fixture-provider-key"}
+            "provider_credential_matches_fixture": credential_headers == expected_headers and not any(
+                secret in serialized_request for secret in self.provider_credentials if secret != expected_key
             ),
-            "client_credential_absent": "fixture-client-key" not in serialized_request,
+            "client_credential_absent": all(value not in serialized_request for value in self.client_credentials),
             "header_names": sorted(
                 name
                 for name in (
@@ -102,6 +107,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 if self.headers.get(name) is not None
             ),
         }
+        with self.request_paths_lock:
+            self.captured_requests.append(capture)
         target = self.capture_dir / f"{name}.json"
         target.write_text(json.dumps(capture, indent=2, sort_keys=True) + "\n")
 
@@ -156,6 +163,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/v1/messages/count_tokens"):
+            self._capture("claude-code", body)
             self._send(200, "application/json", b'{"input_tokens":1}')
             return
         if self.path.startswith("/v1/messages"):

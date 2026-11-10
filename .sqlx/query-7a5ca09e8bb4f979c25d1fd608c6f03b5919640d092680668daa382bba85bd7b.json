@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO group_members (tenant_id, group_id, user_id)\nSELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM groups WHERE tenant_id = $1 AND id = $2)\nAND EXISTS (SELECT 1 FROM users WHERE tenant_id = $1 AND id = $3)\nRETURNING user_id\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7a5ca09e8bb4f979c25d1fd608c6f03b5919640d092680668daa382bba85bd7b"
+}

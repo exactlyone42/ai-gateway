@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -14,11 +14,286 @@ pub enum HeldTokenError {
     Invalid,
     #[error("subscription token could not be stored")]
     Storage(#[from] std::io::Error),
+    #[error("provider credential change could not be confirmed")]
+    Uncertain,
 }
 
 #[derive(Clone)]
 pub struct HeldToken {
     inner: Arc<Inner>,
+}
+
+pub struct TokenLock(std::fs::File);
+
+#[cfg(test)]
+impl TokenLock {
+    pub(crate) fn fixture(file: std::fs::File) -> Self {
+        Self(file)
+    }
+}
+
+impl Drop for TokenLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::error!(error = %error, error.type = "provider_credential_unlock_failed", "provider credential lock release failed");
+        }
+    }
+}
+
+pub struct PersonalTokens {
+    root: PathBuf,
+    membership_root: PathBuf,
+    api_key: bool,
+    #[cfg(test)]
+    fail_sync: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PersonalTokens {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            membership_root: root.join("memberships"),
+            root,
+            api_key: false,
+            #[cfg(test)]
+            fail_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn for_api(root: PathBuf, provider: &str) -> Self {
+        let hash = Sha256::digest(provider.as_bytes());
+        let encoded: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self {
+            membership_root: root.join("memberships"),
+            root: root.join("api").join(encoded),
+            api_key: true,
+            #[cfg(test)]
+            fail_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn api_store(&self, provider: &str) -> Self {
+        let mut store = Self::for_api(self.root.clone(), provider);
+        store.membership_root = self.membership_root.clone();
+        #[cfg(test)]
+        let store = Self {
+            fail_sync: self.fail_sync.clone(),
+            ..store
+        };
+        store
+    }
+
+    pub(crate) fn group_store(&self, provider: &str) -> Self {
+        let digest = Sha256::digest(provider.as_bytes());
+        let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self {
+            membership_root: self.membership_root.clone(),
+            root: self.root.join("groups").join(name),
+            api_key: self.api_key,
+            #[cfg(test)]
+            fail_sync: self.fail_sync.clone(),
+        }
+    }
+
+    pub(crate) async fn lock_membership(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+        shared: bool,
+    ) -> Result<TokenLock, HeldTokenError> {
+        let root = self.membership_root.clone();
+        tokio::task::spawn_blocking(move || Self::lock_user(&root, tenant, user, shared))
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .map_err(HeldTokenError::from)
+    }
+
+    pub(crate) fn digest(&self, raw: &str) -> Result<Vec<u8>, HeldTokenError> {
+        Ok(Sha256::digest(normalize_personal(raw, self.api_key)?.as_bytes()).to_vec())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_sync(&self) {
+        self.fail_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn path(&self, tenant: uuid::Uuid, user: uuid::Uuid) -> PathBuf {
+        self.root.join(tenant.to_string()).join(user.to_string())
+    }
+
+    fn sync_directories(directory: &std::path::Path) -> Result<(), HeldTokenError> {
+        for path in directory.ancestors() {
+            let path = if path.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                path
+            };
+            std::fs::File::open(path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| HeldTokenError::Uncertain)?;
+        }
+        Ok(())
+    }
+
+    fn clean_temporary(
+        root: &std::path::Path,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+    ) -> std::io::Result<()> {
+        let path = root.join(tenant.to_string()).join(format!(".{user}.tmp"));
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn lock_user(
+        root: &std::path::Path,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+        shared: bool,
+    ) -> std::io::Result<TokenLock> {
+        let directory = root.join(tenant.to_string());
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(directory.join(format!(".{user}.lock")))?;
+        if shared {
+            file.try_lock_shared().map_err(std::io::Error::other)?;
+        } else {
+            file.try_lock().map_err(std::io::Error::other)?;
+        }
+        Ok(TokenLock(file))
+    }
+
+    #[cfg(test)]
+    pub async fn get(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+    ) -> Result<Option<Arc<str>>, HeldTokenError> {
+        Ok(self
+            .get_with_lock(tenant, user)
+            .await?
+            .map(|(token, _)| token))
+    }
+
+    pub async fn get_with_lock(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+    ) -> Result<Option<(Arc<str>, TokenLock)>, HeldTokenError> {
+        let (token, lock) = self.read_locked(tenant, user).await?;
+        Ok(token.map(|token| (token, lock)))
+    }
+
+    pub(crate) async fn read_locked(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+    ) -> Result<(Option<Arc<str>>, TokenLock), HeldTokenError> {
+        let path = self.path(tenant, user);
+        let root = self.root.clone();
+        let api_key = self.api_key;
+        tokio::task::spawn_blocking(move || {
+            let lock = Self::lock_user(&root, tenant, user, true)?;
+            match std::fs::read_to_string(path) {
+                Ok(token) => {
+                    normalize_personal(&token, api_key).map(|token| (Some(Arc::from(token)), lock))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, lock)),
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    }
+
+    pub async fn replace(
+        &self,
+        tenant: uuid::Uuid,
+        user: uuid::Uuid,
+        raw: &str,
+    ) -> Result<String, HeldTokenError> {
+        let token = normalize_personal(raw, self.api_key)?;
+        let fingerprint = fingerprint(&token);
+        let path = self.path(tenant, user);
+        let root = self.root.clone();
+        #[cfg(test)]
+        let fail_sync = self.fail_sync.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = Self::lock_user(&root, tenant, user, false)?;
+            Self::clean_temporary(&root, tenant, user)?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("missing token directory"))?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            let temporary = parent.join(format!(".{user}.tmp"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            let result = (|| -> Result<(), HeldTokenError> {
+                file.write_all(token.as_bytes())?;
+                file.sync_all()?;
+                std::fs::rename(&temporary, &path)?;
+                #[cfg(test)]
+                if fail_sync.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(HeldTokenError::Uncertain);
+                }
+                Self::sync_directories(parent)
+            })();
+            if matches!(result, Err(HeldTokenError::Storage(_)))
+                && let Err(error) = std::fs::remove_file(&temporary)
+            {
+                tracing::error!(error = %error, "temporary provider token cleanup failed");
+            }
+            result
+        })
+        .await
+        .map_err(|_| HeldTokenError::Uncertain)??;
+        Ok(fingerprint)
+    }
+
+    pub async fn revoke(&self, tenant: uuid::Uuid, user: uuid::Uuid) -> Result<(), HeldTokenError> {
+        let path = self.path(tenant, user);
+        let root = self.root.clone();
+        #[cfg(test)]
+        let fail_sync = self.fail_sync.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = Self::lock_user(&root, tenant, user, false)?;
+            Self::clean_temporary(&root, tenant, user)?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("missing token directory"))?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    if fail_sync.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        return Err(HeldTokenError::Uncertain);
+                    }
+                    Self::sync_directories(parent)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await
+        .map_err(|_| HeldTokenError::Uncertain)??;
+        Ok(())
+    }
 }
 
 struct Inner {
@@ -38,12 +313,32 @@ fn normalize(raw: &str) -> Result<String, HeldTokenError> {
     }
 }
 
+fn normalize_personal(raw: &str, api_key: bool) -> Result<String, HeldTokenError> {
+    if !api_key {
+        return normalize(raw);
+    }
+    let value = raw.trim();
+    if !value.is_empty() && value.len() <= MAX_LEN && value.chars().all(|c| c.is_ascii_graphic()) {
+        Ok(value.to_owned())
+    } else {
+        Err(HeldTokenError::Invalid)
+    }
+}
+
 pub fn fingerprint(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest[..6]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub fn validated_fingerprint(token: &str) -> Result<String, HeldTokenError> {
+    Ok(fingerprint(&normalize(token)?))
+}
+
+pub fn validated_api_fingerprint(token: &str) -> Result<String, HeldTokenError> {
+    Ok(fingerprint(&normalize_personal(token, true)?))
 }
 
 impl HeldToken {
@@ -150,5 +445,350 @@ mod tests {
         let path = scratch("seed");
         let held = HeldToken::load(path, Some("sk-ant-oat01-seed")).unwrap();
         assert_eq!(&*held.get().unwrap(), "sk-ant-oat01-seed");
+    }
+
+    #[tokio::test]
+    async fn personal_tokens_do_not_cross_users_or_tenants() {
+        let root = scratch("personal");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = PersonalTokens::new(root);
+        let tenant = uuid::Uuid::new_v4();
+        let other_tenant = uuid::Uuid::new_v4();
+        let alice = uuid::Uuid::new_v4();
+        let bob = uuid::Uuid::new_v4();
+        store
+            .replace(tenant, alice, "sk-ant-oat01-alice")
+            .await
+            .unwrap();
+        store
+            .replace(tenant, bob, "sk-ant-oat01-bob")
+            .await
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(store.path(tenant, alice))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(store.path(tenant, alice).parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            &*store.get(tenant, alice).await.unwrap().unwrap(),
+            "sk-ant-oat01-alice"
+        );
+        assert_eq!(
+            &*store.get(tenant, bob).await.unwrap().unwrap(),
+            "sk-ant-oat01-bob"
+        );
+        assert!(store.replace(tenant, alice, "not-a-token").await.is_err());
+        assert_eq!(
+            &*store.get(tenant, alice).await.unwrap().unwrap(),
+            "sk-ant-oat01-alice"
+        );
+        assert!(store.get(other_tenant, alice).await.unwrap().is_none());
+        assert!(
+            store
+                .get(tenant, uuid::Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.revoke(tenant, alice).await.unwrap();
+        assert!(store.get(tenant, alice).await.unwrap().is_none());
+        assert_eq!(
+            &*store.get(tenant, bob).await.unwrap().unwrap(),
+            "sk-ant-oat01-bob"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run separately because process creation can temporarily inherit other tests' locks"]
+    async fn personal_tokens_survive_process_restart_and_revocation() {
+        if let Ok(root) = std::env::var("GATEWAY_TEST_RESTART_ROOT") {
+            let tenant = std::env::var("GATEWAY_TEST_RESTART_TENANT")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let user = std::env::var("GATEWAY_TEST_RESTART_USER")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let other = std::env::var("GATEWAY_TEST_RESTART_OTHER")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let store = PersonalTokens::new(root.into());
+            match std::env::var("GATEWAY_TEST_RESTART_ACTION").as_deref() {
+                Ok("write") => {
+                    store
+                        .replace(tenant, user, "sk-ant-oat01-restart-test")
+                        .await
+                        .unwrap();
+                    return;
+                }
+                Ok("verify_revoked") => {
+                    assert!(store.get(tenant, user).await.unwrap().is_none());
+                    return;
+                }
+                _ => {}
+            }
+            assert_eq!(
+                &*store.get(tenant, user).await.unwrap().unwrap(),
+                "sk-ant-oat01-restart-test"
+            );
+            assert!(store.get(tenant, other).await.unwrap().is_none());
+            store.revoke(tenant, user).await.unwrap();
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("gateway-restart-{}", uuid::Uuid::new_v4()));
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let store = PersonalTokens::new(root.clone());
+        store
+            .replace(tenant, user, "sk-ant-oat01-restart-test")
+            .await
+            .unwrap();
+        drop(store);
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "held_token::tests::personal_tokens_survive_process_restart_and_revocation",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GATEWAY_TEST_RESTART_ROOT", &root)
+            .env("GATEWAY_TEST_RESTART_TENANT", tenant.to_string())
+            .env("GATEWAY_TEST_RESTART_USER", user.to_string())
+            .env("GATEWAY_TEST_RESTART_OTHER", other.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        let restarted = PersonalTokens::new(root);
+        assert!(restarted.get(tenant, user).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn personal_tokens_reject_when_shared_lock_is_held() {
+        let root = scratch("shared-lock");
+        std::fs::create_dir_all(&root).unwrap();
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let lock = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        let store = Arc::new(PersonalTokens::new(root));
+        assert!(
+            store
+                .replace(tenant, user, "sk-ant-oat01-new")
+                .await
+                .is_err()
+        );
+        store
+            .replace(tenant, other, "sk-ant-oat01-other")
+            .await
+            .unwrap();
+        drop(lock);
+        store
+            .replace(tenant, user, "sk-ant-oat01-new")
+            .await
+            .unwrap();
+        assert_eq!(
+            &*store.get(tenant, user).await.unwrap().unwrap(),
+            "sk-ant-oat01-new"
+        );
+    }
+
+    #[test]
+    fn credential_lock_is_released_with_an_inherited_descriptor() {
+        let root = scratch("inherited-lock");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let lock = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(PersonalTokens::lock_user(&root, tenant, user, false).is_err());
+        drop(lock);
+        let next = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        drop(next);
+        drop(inherited);
+    }
+
+    #[test]
+    fn dropping_one_shared_credential_lock_keeps_the_other_locked() {
+        let root = scratch("independent-shared-locks");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let first = PersonalTokens::lock_user(&root, tenant, user, true).unwrap();
+        let second = PersonalTokens::lock_user(&root, tenant, user, true).unwrap();
+        drop(first);
+        assert!(PersonalTokens::lock_user(&root, tenant, user, false).is_err());
+        drop(second);
+        let writer = PersonalTokens::lock_user(&root, tenant, user, false).unwrap();
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn personal_token_parallel_reads_do_not_block_each_other() {
+        let root = scratch("shared-read");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let store = PersonalTokens::new(root.clone());
+        store
+            .replace(tenant, user, "sk-ant-oat01-user")
+            .await
+            .unwrap();
+        let read_lock = PersonalTokens::lock_user(&root, tenant, user, true).unwrap();
+        assert_eq!(
+            &*store.get(tenant, user).await.unwrap().unwrap(),
+            "sk-ant-oat01-user"
+        );
+        assert!(store.revoke(tenant, user).await.is_err());
+        drop(read_lock);
+        store.revoke(tenant, user).await.unwrap();
+        assert!(store.get(tenant, user).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_personal_token_replace_removes_temporary_secret() {
+        let root = scratch("failed-replace");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let store = PersonalTokens::new(root);
+        let destination = store.path(tenant, user);
+        std::fs::create_dir_all(&destination).unwrap();
+        assert!(
+            store
+                .replace(tenant, user, "sk-ant-oat01-test")
+                .await
+                .is_err()
+        );
+        let entries = std::fs::read_dir(destination.parent().unwrap()).unwrap();
+        let names: Vec<_> = entries.map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(destination.is_dir());
+    }
+
+    #[tokio::test]
+    async fn interrupted_temporary_token_is_removed_only_for_its_owner() {
+        let root = scratch("interrupted-token");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let parent = root.join(tenant.to_string());
+        std::fs::create_dir_all(&parent).unwrap();
+        let stale = parent.join(format!(".{user}.tmp"));
+        let other_stale = parent.join(format!(".{other}.tmp"));
+        std::fs::write(&stale, "sk-ant-oat01-interrupted").unwrap();
+        std::fs::write(&other_stale, "sk-ant-oat01-other").unwrap();
+        let store = PersonalTokens::new(root);
+        store.revoke(tenant, user).await.unwrap();
+        assert!(!stale.exists());
+        assert!(other_stale.exists());
+        store
+            .replace(tenant, user, "sk-ant-oat01-new")
+            .await
+            .unwrap();
+        assert_eq!(
+            &*store.get(tenant, user).await.unwrap().unwrap(),
+            "sk-ant-oat01-new"
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_api_keys_are_isolated_by_user_tenant_and_provider() {
+        let root = scratch("personal-api");
+        let tenant = uuid::Uuid::new_v4();
+        let alice = uuid::Uuid::new_v4();
+        let bob = uuid::Uuid::new_v4();
+        let openai = PersonalTokens::for_api(root.clone(), "openai-primary");
+        let other_openai = PersonalTokens::for_api(root.clone(), "openai-secondary");
+        let gemini = PersonalTokens::for_api(root, "gemini");
+        openai
+            .replace(tenant, alice, "alice-openai-key")
+            .await
+            .unwrap();
+        openai.replace(tenant, bob, "bob-openai-key").await.unwrap();
+        gemini
+            .replace(tenant, alice, "alice-gemini-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            &*openai.get(tenant, alice).await.unwrap().unwrap(),
+            "alice-openai-key"
+        );
+        assert_eq!(
+            &*openai.get(tenant, bob).await.unwrap().unwrap(),
+            "bob-openai-key"
+        );
+        assert_eq!(
+            &*gemini.get(tenant, alice).await.unwrap().unwrap(),
+            "alice-gemini-key"
+        );
+        assert!(gemini.get(tenant, bob).await.unwrap().is_none());
+        assert!(other_openai.get(tenant, alice).await.unwrap().is_none());
+        assert!(
+            openai
+                .get(uuid::Uuid::new_v4(), alice)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(openai.replace(tenant, alice, "has spaces").await.is_err());
+        openai.revoke(tenant, alice).await.unwrap();
+        assert!(openai.get(tenant, alice).await.unwrap().is_none());
+        assert_eq!(
+            &*gemini.get(tenant, alice).await.unwrap().unwrap(),
+            "alice-gemini-key"
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_tokens_respect_lock_held_by_another_process() {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        let root = scratch("process-lock");
+        let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let directory = root.join(tenant.to_string());
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut child = Command::new("flock")
+            .arg(directory.join(format!(".{user}.lock")))
+            .args(["sh", "-c", "printf 'ready\\n'; read release"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "ready\n");
+        let store = PersonalTokens::new(root);
+        assert!(
+            store
+                .replace(tenant, user, "sk-ant-oat01-new")
+                .await
+                .is_err()
+        );
+        child.stdin.take().unwrap().write_all(b"release\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        store
+            .replace(tenant, user, "sk-ant-oat01-new")
+            .await
+            .unwrap();
     }
 }

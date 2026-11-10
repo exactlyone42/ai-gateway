@@ -5,7 +5,8 @@ use crate::{
     error::GatewayError,
     identity::PrincipalContext,
     ledger::{
-        ModelSelectionSnapshot, RequestCompletion, RequestPolicySnapshot, RequestStart, Reservation,
+        ModelSelectionSnapshot, RequestAttribution, RequestCompletion, RequestPolicySnapshot,
+        RequestStart, Reservation,
     },
     logging,
     model_registry::ModelSelector,
@@ -23,6 +24,7 @@ pub struct RejectionContext {
     pub client_agent_id: Option<String>,
     pub parent_agent_id: Option<String>,
     pub estimated_tokens: Option<i64>,
+    pub(crate) attribution: RequestAttribution,
 }
 
 pub struct PreparedPolicy {
@@ -39,7 +41,7 @@ pub async fn prepare(
     rejection: RejectionContext,
 ) -> Result<PreparedPolicy, GatewayError> {
     let requested_model = selector.requested_value();
-    let policy = state
+    let mut policy = state
         .policies
         .evaluate(
             &rejection.principal,
@@ -48,6 +50,9 @@ pub async fn prepare(
             rejection.received_at,
         )
         .await?;
+    if !state.config.content_capture_enabled {
+        policy.disable_content_capture();
+    }
     if policy.denied {
         record(
             state,
@@ -74,6 +79,28 @@ pub async fn prepare(
         )
         .await?;
         return Err(GatewayError::ModelForbidden);
+    }
+    let capture_ready = {
+        #[cfg(test)]
+        {
+            state.capture_test_enabled
+        }
+        #[cfg(not(test))]
+        {
+            state.capture_erasure.is_some()
+        }
+    };
+    if policy.content_capture == crate::policy::ContentCaptureMode::Full && !capture_ready {
+        record(
+            state,
+            &rejection,
+            requested_model,
+            &policy,
+            policy.rejection_snapshot("capture_unavailable"),
+            None,
+        )
+        .await?;
+        return Err(GatewayError::CaptureUnavailable);
     }
     if selector.quality().is_some() {
         selector = ModelSelector::parse(&policy.quality_selector())?;
@@ -191,6 +218,7 @@ pub async fn record_unprocessable(
             context.operation,
             context.client_agent_id.clone(),
             context.parent_agent_id.clone(),
+            &context.attribution,
         )
         .await;
     if let Err(error) = recorded {
@@ -236,6 +264,7 @@ async fn record(
             context.operation,
             context.client_agent_id.clone(),
             context.parent_agent_id.clone(),
+            &context.attribution,
         )
         .await?;
     Ok(())

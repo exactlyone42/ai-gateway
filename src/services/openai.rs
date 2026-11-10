@@ -19,7 +19,7 @@ use crate::{
     canonical::{CanonicalRequest, CanonicalStreamEvent, PrincipalRef, RequestEnrichment},
     error::GatewayError,
     identity::PrincipalContext,
-    ledger::{ProviderAttempt, RequestCompletion, RequestStart, TokenUsage},
+    ledger::{ProviderAttempt, RequestCompletion, TokenUsage},
     logging,
     middleware::REQUEST_ID_HEADER,
     model_registry::{CapabilityRequirements, GatewayOperation, ModelSelector, ProviderKind},
@@ -98,11 +98,18 @@ struct BufferedContext {
     model: String,
     provider: String,
     provider_kind: ProviderKind,
+    provider_secret: Option<String>,
     operation: Operation,
     translation: ValidatedTranslationPlan,
     gateway_request_id: uuid::Uuid,
     response_max_bytes: usize,
     canonical: CanonicalRequest,
+    capture: Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+}
+
+enum DeferredProtocol {
+    Native(OpenAiObserver),
+    Translated(Box<(CrossStreamObserver, CrossStreamEncoder)>),
 }
 
 pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply, GatewayError> {
@@ -121,6 +128,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         client_agent_id: None,
         parent_agent_id: None,
         estimated_tokens: Some(i64::try_from(estimate_input_tokens(body_len)).unwrap_or(i64::MAX)),
+        attribution: crate::ledger::RequestAttribution::from_headers(&request.headers),
     };
     let decoded = match protocol::decode(operation, request.body) {
         Ok(decoded) => decoded,
@@ -190,13 +198,14 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         required,
     )
     .await?;
-    task_decomposition::spawn_shadow(
-        state.shadow_context(),
-        task_decomposition::DecompositionInput::from_request(&canonical),
-        gateway_request_id,
-    );
-    let routing_reason = prepared_quota.routing_reason;
-    let task_routing = prepared_quota.task_routing;
+    if state.personal_tokens.is_none() {
+        task_decomposition::spawn_shadow(
+            state.shadow_context(),
+            task_decomposition::DecompositionInput::from_request(&canonical),
+            gateway_request_id,
+        );
+    }
+    let mut reservation = prepared_quota.reservation;
     let translation = prepared_quota.translation;
     let response_max_bytes = if translation.translated {
         state.config.stream_event_max_bytes.saturating_mul(8)
@@ -206,57 +215,67 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     let QuotaAdmission {
         selection,
         estimated_usage: estimated,
-        snapshot: quota_snapshot,
+        snapshot: _,
         concurrency,
     } = prepared_quota.admission;
     let model = selection.public_model_id.clone();
     let provider_model = selection.provider_model_id.clone();
     let provider = selection.provider_key.clone();
-    let profile = selection.profile.clone();
     let selection_snapshot = selection.ledger_snapshot();
-    let upstream_request = prepare_for_provider(
-        &canonical,
-        &profile,
-        &provider_model,
-        translation,
-        ProviderRequestInput {
-            source_path_and_query: &request.path_and_query,
-            client_headers: &request.headers,
-            idempotency_key,
-        },
-    )?;
-    let provider_parameters = upstream_request.parameter_snapshot()?;
-    let is_stream = canonical.stream;
-    let mut reservation = state
-        .ledger
-        .reserve_with_quota(
-            RequestStart {
-                request_id: ledger_request_id(&request.headers),
-                session_id: canonical.session_id.clone(),
-                trace_id: canonical.trace_id.clone(),
-                requested_model: Some(canonical.requested_model.clone()),
-                workload_class: Some(canonical.workload_class.clone()),
-                urgency: Some(canonical.urgency.clone()),
-                quality: Some(value_text(&policy.quality)),
-                budget_class: Some(canonical.budget_class.clone()),
-                estimated_tokens: Some(request_quota::estimated_tokens(&estimated)),
-                selection: selection_snapshot.clone(),
-                policy: Some(
-                    policy
-                        .ledger_snapshot()
-                        .with_routing(routing_reason)
-                        .with_task_routing(task_routing),
-                ),
-                principal: request.principal.clone(),
-                created_at: request.received_at,
+    let setup = async {
+        let profile = state
+            .profile_for_user(&canonical.principal, &selection.profile)
+            .await?;
+        let upstream_request = prepare_for_provider(
+            &canonical,
+            &profile,
+            &provider_model,
+            translation,
+            ProviderRequestInput {
+                source_path_and_query: &request.path_and_query,
+                client_headers: &request.headers,
+                idempotency_key,
             },
-            Some(gateway_request_id),
-            quota_snapshot,
+        )?;
+        let provider_parameters = upstream_request.parameter_snapshot()?;
+        reservation.annotate_parameters(requested_parameters, provider_parameters);
+        let provider_secret = profile
+            .bearer_secret()
+            .or_else(|| profile.api_key_secret())
+            .map(str::to_owned)
+            .or_else(|| profile.held_token().map(|token| token.to_string()));
+        let capture = crate::services::capture_request::start(
+            state,
+            policy,
+            &canonical,
+            &request.headers,
+            upstream_request.body(),
+            provider_secret.as_deref(),
         )
         .await?;
-    reservation.annotate_parameters(requested_parameters, provider_parameters);
-    reservation.cancel_on_force(state.lifecycle.force_token());
-    reservation.annotate_protocol(request.operation.name(), None, None);
+        Ok::<_, GatewayError>((profile, upstream_request, provider_secret, capture))
+    }
+    .await;
+    let (profile, upstream_request, provider_secret, mut capture) = match setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            reservation.annotate_policy(policy.rejection_snapshot(error.kind()));
+            reservation
+                .finish(RequestCompletion {
+                    status: "failed".to_owned(),
+                    selected_model: Some(model.clone()),
+                    selected_provider: Some(provider.clone()),
+                    attempts: Vec::new(),
+                    completed_at: Utc::now(),
+                })
+                .await?;
+            return Err(error);
+        }
+    };
+    let is_stream = canonical.stream;
+    if let Some(session) = capture.as_ref() {
+        reservation.attach_capture(session.clone());
+    }
     if policy.is_expired(Utc::now()) {
         reservation.annotate_policy(policy.rejection_snapshot("deadline_expired"));
         reservation
@@ -296,17 +315,138 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
     reservation
         .checkpoint_provider_attempt(model.clone(), provider.clone(), attempt.clone())
         .await?;
-    let upstream = match provider::send(
-        &state.client,
-        &profile.base_url,
-        upstream_request,
-        &profile.provider_key,
-        &provider_model,
-    )
-    .await
-    {
+    let provider_kind = profile.kind;
+    let client = state.client_for_provider(profile.kind).clone();
+    let send_base_url = profile.base_url.clone();
+    let send_provider = profile.provider_key.clone();
+    let send_model = provider_model.clone();
+    let mut send = Box::pin(async move {
+        let result = provider::send(
+            &client,
+            &send_base_url,
+            upstream_request,
+            &send_provider,
+            &send_model,
+        )
+        .await;
+        drop(profile);
+        result
+    });
+    let upstream = tokio::select! {
+        result = &mut send => Some(result),
+        () = tokio::time::sleep(state.config.stream_heartbeat_interval), if is_stream => None,
+    };
+    if upstream.is_none() {
+        let protocol = if translation.translated {
+            DeferredProtocol::Translated(Box::new((
+                CrossStreamObserver::new(translation.target_operation)
+                    .map_err(|_| GatewayError::InvalidConfiguration)?,
+                CrossStreamEncoder::new(
+                    translation.source_operation,
+                    format!("resp_apg_{}", gateway_request_id.simple()),
+                    model.clone(),
+                    &canonical,
+                )
+                .map_err(|_| GatewayError::InvalidConfiguration)?,
+            )))
+        } else {
+            DeferredProtocol::Native(request.operation.observer(canonical.source_document())?)
+        };
+        let heartbeat_interval = state.config.stream_heartbeat_interval;
+        let event_max_bytes = state.config.stream_event_max_bytes;
+        let deferred_secret = provider_secret.clone();
+        let operation = request.operation;
+        reservation.set_client_first_byte_at(Utc::now());
+        let deferred_capture = reservation.capture();
+        let deferred = async_stream::stream! {
+            let event = Bytes::from_static(b": keepalive\n\n");
+            if let Err(error) = crate::services::streaming::capture_chunk(&deferred_capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                yield Err(error);
+                return;
+            }
+            yield Ok::<Bytes, std::io::Error>(event);
+            let mut heartbeat = tokio::time::interval(heartbeat_interval);
+            heartbeat.tick().await;
+            let upstream = loop {
+                tokio::select! {
+                    result = &mut send => break result,
+                    _ = heartbeat.tick() => {
+                        let event = Bytes::from_static(b": keepalive\n\n");
+                        if let Err(error) = crate::services::streaming::capture_chunk(&deferred_capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                            yield Err(error);
+                            return;
+                        }
+                        yield Ok(event);
+                    },
+                }
+            };
+            match upstream {
+                Ok(response) if response.status().is_success()
+                    && response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("text/event-stream")) =>
+                {
+                    let provider_request_id = response.headers().get("x-request-id").or_else(|| response.headers().get("request-id"))
+                        .and_then(|value| value.to_str().ok()).map(ToOwned::to_owned)
+                        .filter(|value| !provider::error_contains_secret(value.as_bytes(), &HeaderMap::new(), deferred_secret.as_deref()));
+                    attempt.observe_request_id(provider_request_id);
+                    let limits = crate::services::streaming::RelayLimits { event_max_bytes, heartbeat_interval, provider_secret: deferred_secret };
+                    let relayed = match protocol {
+                        DeferredProtocol::Native(observer) => relay(response, reservation, attempt, model, provider, observer, limits).await,
+                        DeferredProtocol::Translated(pair) => relay_transcoded(response, reservation, attempt, model, provider, *pair, limits).await,
+                    };
+                    match relayed {
+                        Ok(body) => {
+                            let mut body = body.into_data_stream();
+                            while let Some(item) = body.next().await {
+                                yield item.map_err(std::io::Error::other);
+                            }
+                        }
+                        Err(error) => yield Err(std::io::Error::other(error)),
+                    }
+                }
+                result => {
+                    let completed_at = Utc::now();
+                    let error_type = match &result {
+                        Ok(response) if response.status().is_success() => "upstream_protocol_error".to_owned(),
+                        Ok(response) => format!("upstream_status_{}", response.status().as_u16()),
+                        Err(error) => error.kind().to_owned(),
+                    };
+                    let event = match operation {
+                        Operation::Responses => Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"code\":\"upstream_unavailable\",\"message\":\"upstream failed after streaming began\",\"param\":null,\"sequence_number\":0}\n\n"),
+                        Operation::ChatCompletions => Bytes::from_static(b"data: {\"error\":{\"type\":\"api_error\",\"message\":\"upstream failed after streaming began\"}}\n\n"),
+                    };
+                    if let Err(error) = crate::services::streaming::capture_deferred_error(&deferred_capture, result.ok(), &event).await {
+                        yield Err(error);
+                        return;
+                    }
+                    attempt.conclude("failed", Some(error_type), completed_at);
+                    if let Err(error) = reservation.finish(RequestCompletion {
+                        status: "failed".to_owned(), selected_model: Some(model), selected_provider: Some(provider),
+                        attempts: vec![attempt], completed_at,
+                    }).await {
+                        tracing::error!(error.type = "ledger_failure_not_finalized", exception.message = %error);
+                        if deferred_capture.is_some() {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
+                    }
+                    yield Ok(event);
+                    if let Err(error) = crate::services::streaming::finish_capture(&deferred_capture).await {
+                        yield Err(error);
+                    }
+                }
+            }
+        };
+        return Ok(Reply {
+            status: StatusCode::OK,
+            headers: translated_stream_headers(),
+            body: Body::from_stream(deferred),
+            streaming: true,
+        });
+    }
+    let upstream = match upstream.ok_or(GatewayError::InvalidConfiguration)? {
         Ok(response) => response,
         Err(error) => {
+            crate::services::capture_request::save_error(&capture, &[], &error).await?;
             let completed_at = Utc::now();
             attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
             reservation
@@ -318,18 +458,26 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                     completed_at,
                 })
                 .await?;
+            crate::services::capture_request::finish_session(capture.take()).await?;
             return Err(error);
         }
     };
-
     let status = upstream.status();
-    let response_headers = response_headers(upstream.headers());
+    let mut response_headers = response_headers(upstream.headers());
+    provider::remove_secret_headers(&mut response_headers, provider_secret.as_deref());
     let provider_request_id = upstream
         .headers()
         .get("x-request-id")
         .or_else(|| upstream.headers().get("request-id"))
         .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        .filter(|value| {
+            !provider::error_contains_secret(
+                value.as_bytes(),
+                &HeaderMap::new(),
+                provider_secret.as_deref(),
+            )
+        });
     attempt.observe_request_id(provider_request_id);
     let content_is_sse = upstream
         .headers()
@@ -338,6 +486,15 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         .is_some_and(|value| value.starts_with("text/event-stream"));
 
     if status.is_success() && is_stream && translation.translated && !content_is_sse {
+        let error_body = serde_json::to_vec(&serde_json::json!({"error":{"code":GatewayError::UpstreamProtocol.kind(),"message":GatewayError::UpstreamProtocol.to_string()}}))
+            .map_err(|_| GatewayError::CaptureUnavailable)?;
+        crate::services::streaming::capture_deferred_error(
+            &capture,
+            Some(upstream),
+            &Bytes::from(error_body),
+        )
+        .await
+        .map_err(|_| GatewayError::CaptureUnavailable)?;
         let completed_at = Utc::now();
         let mut attempt = attempt;
         attempt.conclude(
@@ -354,6 +511,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 completed_at,
             })
             .await?;
+        crate::services::capture_request::finish_session(capture.take()).await?;
         return Err(GatewayError::UpstreamProtocol);
     }
 
@@ -379,6 +537,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 crate::services::streaming::RelayLimits {
                     event_max_bytes: state.config.stream_event_max_bytes,
                     heartbeat_interval: state.config.stream_heartbeat_interval,
+                    provider_secret: provider_secret.clone(),
                 },
             )
             .await?
@@ -393,6 +552,7 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
                 crate::services::streaming::RelayLimits {
                     event_max_bytes: state.config.stream_event_max_bytes,
                     heartbeat_interval: state.config.stream_heartbeat_interval,
+                    provider_secret: provider_secret.clone(),
                 },
             )
             .await?
@@ -417,12 +577,14 @@ pub async fn execute(state: &AppState, request: RequestContext) -> Result<Reply,
         attempt,
         model,
         provider,
-        provider_kind: profile.kind,
+        provider_kind,
+        provider_secret,
         operation: request.operation,
         translation,
         gateway_request_id,
         response_max_bytes,
         canonical,
+        capture,
     })
     .await
 }
@@ -437,11 +599,13 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         model,
         provider,
         provider_kind,
+        provider_secret,
         operation,
         translation,
         gateway_request_id,
         response_max_bytes,
         canonical,
+        mut capture,
     } = context;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
@@ -450,6 +614,13 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
+                let error = GatewayError::Upstream(error);
+                crate::services::capture_request::finish_incomplete_error(
+                    capture.take(),
+                    &bytes,
+                    &error,
+                )
+                .await?;
                 let completed_at = Utc::now();
                 attempt.conclude(
                     "failed",
@@ -465,7 +636,7 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
                         completed_at,
                     })
                     .await?;
-                return Err(GatewayError::Upstream(error));
+                return Err(error);
             }
         };
         if first {
@@ -474,6 +645,12 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
         }
         bytes.extend_from_slice(&chunk);
         if bytes.len() > response_max_bytes {
+            crate::services::capture_request::finish_incomplete_error(
+                capture.take(),
+                &bytes,
+                &GatewayError::UpstreamProtocol,
+            )
+            .await?;
             let completed_at = Utc::now();
             attempt.conclude(
                 "failed",
@@ -495,16 +672,28 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     let body = Bytes::from(bytes);
     let completed_at = Utc::now();
     let response_value = serde_json::from_slice::<Value>(&body).ok();
-    attempt.observe_response_id(response_value.as_ref().and_then(|value| {
-        value
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-    }));
+    attempt.observe_response_id(
+        response_value
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .filter(|value| {
+                !provider::error_contains_secret(
+                    value.as_bytes(),
+                    &HeaderMap::new(),
+                    provider_secret.as_deref(),
+                )
+            }),
+    );
     if status.is_success() {
         let usage = match provider::usage_for(provider_kind, &body) {
             Ok(usage) => usage.map(TokenUsage::from).unwrap_or_default(),
             Err(error) => {
+                crate::services::capture_request::save_error(&capture, &body, &error).await?;
                 attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
                 reservation.set_client_first_byte_at(completed_at);
                 reservation
@@ -516,6 +705,7 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
                         completed_at,
                     })
                     .await?;
+                crate::services::capture_request::finish_session(capture.take()).await?;
                 return Err(error);
             }
         };
@@ -535,6 +725,7 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
             ) {
                 Ok(value) => Some(value),
                 Err(error) => {
+                    crate::services::capture_request::save_error(&capture, &body, &error).await?;
                     attempt.conclude("failed", Some(error.kind().to_owned()), completed_at);
                     reservation.set_client_first_byte_at(completed_at);
                     reservation
@@ -546,20 +737,41 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
                             completed_at,
                         })
                         .await?;
+                    crate::services::capture_request::finish_session(capture.take()).await?;
                     return Err(error);
                 }
             }
         }
     } else {
         Some(response::TranscodedBufferedResponse {
-            body,
+            body: body.clone(),
             incomplete: false,
         })
     };
     let incomplete = client_response
         .as_ref()
         .is_some_and(|response| response.incomplete);
-    let (request_status, attempt_status, error_type) = if incomplete {
+    let contains_secret = client_response.as_ref().is_some_and(|response| {
+        provider::error_contains_secret(&response.body, &headers, provider_secret.as_deref())
+    });
+    if (contains_secret || client_response.is_none()) && capture.is_some() {
+        crate::services::capture_request::save_error(
+            &capture,
+            &body,
+            &GatewayError::UpstreamProtocol,
+        )
+        .await?;
+    }
+    if !contains_secret && let Some(response) = client_response.as_ref() {
+        crate::services::capture_request::save_buffered(&capture, &body, &response.body).await?;
+    }
+    let (request_status, attempt_status, error_type) = if contains_secret {
+        (
+            "failed",
+            "failed",
+            Some("provider_secret_in_response".to_owned()),
+        )
+    } else if incomplete {
         (
             "failed",
             "failed",
@@ -581,10 +793,14 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
             completed_at,
         })
         .await?;
+    crate::services::capture_request::finish_session(capture.take()).await?;
     if translation.translated && client_response.is_none() {
         return Err(GatewayError::UpstreamProtocol);
     }
     let client_body = client_response.ok_or(GatewayError::UpstreamProtocol)?.body;
+    if contains_secret {
+        return Err(GatewayError::UpstreamProtocol);
+    }
     Ok(Reply {
         status,
         headers: if translation.translated {
@@ -694,6 +910,7 @@ fn response_header_allowed(name: &HeaderName) -> bool {
     name == header::CONTENT_TYPE
         || name == header::CONTENT_ENCODING
         || name == header::RETRY_AFTER
+        || name.as_str() == "x-should-retry"
         || name.as_str() == "request-id"
         || name.as_str() == "x-request-id"
         || name.as_str().starts_with("openai-")
@@ -968,6 +1185,14 @@ mod tests {
                 .any(|event| matches!(event, CanonicalStreamEvent::ResponseCompleted))
         );
         assert!(ResponsesObserver::default().finish().is_err());
+    }
+
+    #[test]
+    fn responses_rejects_ndjson_even_when_its_object_claims_completion() {
+        let mut observer = ResponsesObserver::default();
+        let result = observer
+            .observe(b"{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n");
+        assert!(result.is_err() || observer.finish().is_err());
     }
 
     #[test]

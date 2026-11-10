@@ -1,8 +1,66 @@
 {
   "schema_version": 1,
   "task": "gateway-completion",
-  "project": "/home/cash/work_space/private/agent-pool-gateway-completion",
+  "project": "/home/cash/work_space/private/ai-gateway-completion",
   "steps": {
+    "R3-S5": {
+      "kind": "stage",
+      "environment": "production",
+      "artifact": {
+        "path": "delivery/gateway-completion/r3-s5-release.tar",
+        "sha256": "pending"
+      },
+      "validation": {
+        "path": "delivery/gateway-completion/r3-s5-validation.json",
+        "sha256": "pending"
+      },
+      "authorization": {
+        "path": "delivery/gateway-completion/r3-s5-authorization.json",
+        "sha256": "pending"
+      },
+      "deploy": {
+        "path": "delivery/gateway-completion/r3-s5-deploy.sh",
+        "sha256": "pending"
+      },
+      "readback": {
+        "path": "delivery/gateway-completion/r3-s5-readback.sh",
+        "sha256": "pending"
+      },
+      "timeout_seconds": 900
+    },
+    "R3-S4": {"kind": "internal", "reason": "沿既有還原器補隔離11表/帳本/額度/密文/密鑰與刪除不復活驗收及必要反例，只改驗收器與操作文件、未改產品Rust或正式配置；S3產品stage及S02/S06不變，S5與同版安全發布仍未完成"},
+    "R3-S3": {
+      "kind": "stage",
+      "environment": "production",
+      "artifact": {
+        "path": "delivery/gateway-completion/r3-s3-release.tar",
+        "sha256": "pending"
+      },
+      "validation": {
+        "path": "delivery/gateway-completion/r3-s3-validation.json",
+        "sha256": "pending"
+      },
+      "authorization": {
+        "path": "delivery/gateway-completion/r3-s3-authorization.json",
+        "sha256": "pending"
+      },
+      "deploy": {
+        "path": "delivery/gateway-completion/r3-s3-deploy.sh",
+        "sha256": "pending"
+      },
+      "readback": {
+        "path": "delivery/gateway-completion/r3-s3-readback.sh",
+        "sha256": "pending"
+      },
+      "timeout_seconds": 900
+    },
+    "R3-S2": {"kind": "internal", "reason": "沿既有保存/授權程式補HTTP及原Client驗收器，未改正式Rust/配置；完整重播/期限刪除還原/故障與同版發布仍待S3-S5，原交付點全部保留"},
+    "R3-S1": {"kind": "internal", "reason": "唯讀核對當前正式/隔離角色與保存來源，沿既有樣本建事件清單及對照文件；不改正式程式或配置，完整保存/重播/刪除還原/故障與同版發布仍待S2-S5，原交付點全部保留"},
+    "R2-S4": {"kind": "internal", "reason": "沿既有撤權與來源鎖/輪替/配額，以隔離HTTP驗競爭及實際結帳，只新增驗收器與證據；無新正式程式行為，R3及同版發布仍未完成，原交付點保留"},
+    "R2-S3": {"kind": "internal", "reason": "用既有管理/身分/政策/憑證驗兩隔離租戶與角色，只新增HTTP驗收器、無正式程式行為變更；競態、保存與同版發布未完成，原交付點不變"},
+    "R2-S2": {"kind": "internal", "reason": "用既有管理API及本人訂閱驗原Codex首次使用、歸屬及拒絕，僅驗收器零重試設定、沒有新正式程式行為；R2隔離競態、R3及同版發布仍未完成，既有交付點不變"},
+    "R2-S1": {"kind": "internal", "reason": "核對既有本人與群組憑證選擇規則，補隔離HTTP驗收器及必要反例；沒有正式程式變更或可上線新功能，原Client/真本人憑證、安全與發布仍須R2-S2至S5及R3，既有交付點不變"},
+    "R1-S1": {"kind": "internal", "reason": "建立同版原Client成功與失敗基準，修正驗證器誤報；日常工作功能及發布仍須R1-S2至S5驗收，沒有可上線新功能"},
     "S01": {"kind": "internal", "reason": "修本機 git 設定，不是可用功能"},
     "S02": {
       "kind": "milestone",

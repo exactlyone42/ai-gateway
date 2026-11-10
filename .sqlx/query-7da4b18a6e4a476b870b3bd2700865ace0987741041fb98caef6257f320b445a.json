@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE quota_reservations SET state = 'expired' WHERE tenant_id = $1 AND id = $2 AND state = 'active'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7da4b18a6e4a476b870b3bd2700865ace0987741041fb98caef6257f320b445a"
+}

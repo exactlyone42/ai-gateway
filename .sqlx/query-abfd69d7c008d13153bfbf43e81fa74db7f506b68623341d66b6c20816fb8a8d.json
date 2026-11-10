@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS \"present!\" FROM capture_records WHERE tenant_id = $1 AND capture_id = $2 AND (state = 'deleting' OR (expires_at <= now() AND state <> 'deleted')) FOR UPDATE\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "present!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "abfd69d7c008d13153bfbf43e81fa74db7f506b68623341d66b6c20816fb8a8d"
+}

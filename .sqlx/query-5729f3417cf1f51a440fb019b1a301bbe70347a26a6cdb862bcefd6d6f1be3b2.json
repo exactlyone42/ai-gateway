@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE EVENT TRIGGER gateway_test_delay_floor ON ddl_command_start\nWHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION public.gateway_test_delay_floor();\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5729f3417cf1f51a440fb019b1a301bbe70347a26a6cdb862bcefd6d6f1be3b2"
+}

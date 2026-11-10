@@ -1,0 +1,1 @@
+DROP INDEX policies_active_scope_idx

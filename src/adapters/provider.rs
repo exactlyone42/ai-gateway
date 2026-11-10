@@ -85,6 +85,7 @@ pub struct PreparedProviderRequest {
     plan: ProviderRequestPlan,
     headers: HeaderMap,
     body: Bytes,
+    ollama_responses_stream: bool,
 }
 
 impl PreparedProviderRequest {
@@ -101,8 +102,7 @@ impl PreparedProviderRequest {
         ))
     }
 
-    #[cfg(test)]
-    pub fn body(&self) -> &Bytes {
+    pub(crate) fn body(&self) -> &Bytes {
         &self.body
     }
 
@@ -327,6 +327,7 @@ fn prepare_request(
         plan,
         headers,
         body,
+        ollama_responses_stream: false,
     })
 }
 
@@ -409,6 +410,7 @@ pub enum LocalRuntime {
 
 pub struct LocalProvider {
     runtime: LocalRuntime,
+    dialect: ProviderDialect,
 }
 
 impl ProviderAdapter for AnthropicProviderAdapter {
@@ -840,7 +842,7 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn dialect(&self) -> ProviderDialect {
-        ProviderDialect::OpenAi
+        self.dialect
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -886,7 +888,10 @@ impl ProviderAdapter for LocalProvider {
         profile: &ProviderProfile,
         input: ProviderRequestInput<'_>,
     ) -> Result<PreparedProviderRequest, GatewayError> {
-        prepare_request(self, plan, body, profile, input)
+        let mut request = prepare_request(self, plan, body, profile, input)?;
+        request.ollama_responses_stream = matches!(self.runtime, LocalRuntime::Ollama)
+            && request.plan.operation == GatewayOperation::OpenAiResponses;
+        Ok(request)
     }
 
     fn estimate_cost(
@@ -902,10 +907,16 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn target_operation(&self, operation: CanonicalOperation) -> Option<GatewayOperation> {
-        (operation == CanonicalOperation::Generate).then_some(GatewayOperation::OpenAiResponses)
+        (operation == CanonicalOperation::Generate).then_some(match self.dialect {
+            ProviderDialect::Anthropic => GatewayOperation::AnthropicMessages,
+            _ => GatewayOperation::OpenAiResponses,
+        })
     }
 
     fn default_path(&self, operation: GatewayOperation) -> Option<&'static str> {
+        if self.dialect == ProviderDialect::Anthropic {
+            return (operation == GatewayOperation::AnthropicMessages).then_some("/v1/messages");
+        }
         match operation {
             GatewayOperation::OpenAiResponses => Some("/v1/responses"),
             GatewayOperation::OpenAiChatCompletions => Some("/v1/chat/completions"),
@@ -918,7 +929,11 @@ impl ProviderAdapter for LocalProvider {
     }
 
     fn allows_client_header(&self, name: &HeaderName) -> bool {
-        name == header::CONTENT_TYPE || name == header::ACCEPT
+        if self.dialect == ProviderDialect::Anthropic {
+            ANTHROPIC.allows_client_header(name)
+        } else {
+            name == header::CONTENT_TYPE || name == header::ACCEPT
+        }
     }
 
     fn encode_canonical(
@@ -927,6 +942,9 @@ impl ProviderAdapter for LocalProvider {
         target_operation: GatewayOperation,
         provider_model_id: &str,
     ) -> Result<Bytes, GatewayError> {
+        if self.dialect == ProviderDialect::Anthropic {
+            return ANTHROPIC.encode_canonical(request, target_operation, provider_model_id);
+        }
         if target_operation != GatewayOperation::OpenAiResponses {
             return Err(GatewayError::UnsupportedRequest);
         }
@@ -1214,10 +1232,27 @@ static GEMINI: GeminiProvider = GeminiProvider;
 static XAI: XaiProvider = XaiProvider;
 static VLLM: LocalProvider = LocalProvider {
     runtime: LocalRuntime::Vllm,
+    dialect: ProviderDialect::OpenAi,
 };
 static OLLAMA: LocalProvider = LocalProvider {
     runtime: LocalRuntime::Ollama,
+    dialect: ProviderDialect::OpenAi,
 };
+static OLLAMA_ANTHROPIC: LocalProvider = LocalProvider {
+    runtime: LocalRuntime::Ollama,
+    dialect: ProviderDialect::Anthropic,
+};
+
+pub fn for_profile(
+    profile: &ProviderProfile,
+) -> Result<&'static dyn ProviderAdapter, GatewayError> {
+    if profile.kind == ProviderKind::Ollama && profile.target_dialect == ProviderDialect::Anthropic
+    {
+        Ok(&OLLAMA_ANTHROPIC)
+    } else {
+        for_kind(profile.kind)
+    }
+}
 
 #[cfg(test)]
 pub fn for_dialect(dialect: ProviderDialect) -> &'static dyn ProviderAdapter {
@@ -1254,6 +1289,53 @@ pub fn usage_for(
     Ok(usage)
 }
 
+pub fn error_contains_secret(body: &[u8], headers: &HeaderMap, secret: Option<&str>) -> bool {
+    let Some(secret) = secret.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let encoded = serde_json::to_string(secret).unwrap_or_default();
+    let escaped = encoded
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_default();
+    let contains = |bytes: &[u8]| {
+        bytes
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+            || (!escaped.is_empty()
+                && bytes
+                    .windows(escaped.len())
+                    .any(|window| window == escaped.as_bytes()))
+    };
+    fn json_contains(value: &serde_json::Value, secret: &str) -> bool {
+        match value {
+            serde_json::Value::String(value) => value.contains(secret),
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| json_contains(value, secret))
+            }
+            serde_json::Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| key.contains(secret) || json_contains(value, secret)),
+            _ => false,
+        }
+    }
+    contains(body)
+        || serde_json::from_slice::<serde_json::Value>(body)
+            .is_ok_and(|value| json_contains(&value, secret))
+        || headers.values().any(|value| contains(value.as_bytes()))
+}
+
+pub fn remove_secret_headers(headers: &mut HeaderMap, secret: Option<&str>) {
+    let names: Vec<_> = headers
+        .iter()
+        .filter(|(_, value)| error_contains_secret(value.as_bytes(), &HeaderMap::new(), secret))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in names {
+        headers.remove(name);
+    }
+}
+
 #[tracing::instrument(
     name = "provider.attempt",
     skip_all,
@@ -1268,16 +1350,22 @@ pub async fn send(
 ) -> Result<reqwest::Response, GatewayError> {
     let codex_stream =
         base_url == crate::codex_auth::BASE_URL && request.path_and_query() == "/responses";
+    let ollama_responses_stream = request.ollama_responses_stream;
     let mut response = client
         .post(format!("{}{}", base_url, request.path_and_query()))
         .headers(request.headers)
         .body(request.body)
         .send()
         .await?;
-    if codex_stream
-        && response.status().is_success()
-        && !response.headers().contains_key(header::CONTENT_TYPE)
-    {
+    let missing_codex_type = codex_stream && !response.headers().contains_key(header::CONTENT_TYPE);
+    let mislabeled_ollama_type = ollama_responses_stream
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim() == "application/x-ndjson");
+    if response.status().is_success() && (missing_codex_type || mislabeled_ollama_type) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream"),
@@ -1303,6 +1391,71 @@ mod tests {
     };
 
     #[test]
+    fn escaped_json_credentials_are_detected() {
+        let body = br#"{"answer":"upstream-\u006bey"}"#;
+        assert!(super::error_contains_secret(
+            body,
+            &HeaderMap::new(),
+            Some("upstream-key")
+        ));
+        assert!(!super::error_contains_secret(
+            body,
+            &HeaderMap::new(),
+            Some("different-key")
+        ));
+    }
+
+    #[test]
+    fn personal_api_slots_use_provider_specific_headers() {
+        for (kind, mode, header_name, expected) in [
+            (
+                ProviderKind::Anthropic,
+                AuthenticationMode::ApiKey,
+                "x-api-key",
+                "personal-key",
+            ),
+            (
+                ProviderKind::Gemini,
+                AuthenticationMode::GoogleApiKey,
+                "x-goog-api-key",
+                "personal-key",
+            ),
+            (
+                ProviderKind::OpenAi,
+                AuthenticationMode::Bearer,
+                "authorization",
+                "Bearer personal-key",
+            ),
+            (
+                ProviderKind::Xai,
+                AuthenticationMode::Bearer,
+                "authorization",
+                "Bearer personal-key",
+            ),
+        ] {
+            let slot = ProviderProfile::personal_api_slot(
+                kind,
+                "personal",
+                "source",
+                "https://example.invalid",
+                vec![GatewayOperation::OpenAiResponses],
+                vec![Uuid::nil()],
+            );
+            let mut headers = HeaderMap::new();
+            assert!(apply_authentication(&mut headers, mode, &slot).is_err());
+            let lock = std::fs::File::open("/dev/null").unwrap();
+            let personal = slot
+                .with_personal_api_key(
+                    std::sync::Arc::from("personal-key"),
+                    crate::held_token::TokenLock::fixture(lock),
+                )
+                .unwrap();
+            apply_authentication(&mut headers, mode, &personal).unwrap();
+            assert_eq!(headers.get(header_name).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn unchanged_model_preserves_every_request_byte() {
         let body =
             br#"{ "model": "public", "vendor": {"number": 123456789012345678901234567890} }"#;
@@ -1325,6 +1478,34 @@ mod tests {
     }
 
     #[test]
+    fn attribution_headers_are_not_forwarded_by_any_provider_adapter() {
+        for kind in [
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAi,
+            ProviderKind::Gemini,
+            ProviderKind::Xai,
+            ProviderKind::Vllm,
+            ProviderKind::Ollama,
+        ] {
+            let adapter = for_kind(kind).unwrap();
+            for name in [
+                "x-apg-prompt-id",
+                "x-apg-prompt-version",
+                "x-apg-skill-set-id",
+                "x-apg-agent-name",
+                "x-apg-agent-version",
+                "x-apg-client-version",
+                "x-apg-task-id",
+            ] {
+                assert!(
+                    !adapter.allows_client_header(&axum::http::HeaderName::from_static(name)),
+                    "{kind:?} {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn anthropic_client_bearer_is_forwarded_with_oauth_headers() {
         let adapter = for_kind(ProviderKind::Anthropic).unwrap();
         let profile = ProviderProfile::client_bearer(
@@ -1337,6 +1518,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer client-oauth".parse().unwrap());
         headers.insert("anthropic-beta", "claude-code-20250219".parse().unwrap());
+        headers.insert("x-apg-task-id", "task-123".parse().unwrap());
         let input = ProviderRequestInput {
             source_path_and_query: "/v1/messages",
             client_headers: &headers,
@@ -1355,6 +1537,8 @@ mod tests {
         let prepared = adapter
             .send(plan, Bytes::from_static(b"{}"), &profile, input)
             .unwrap();
+
+        assert!(!prepared.headers().contains_key("x-apg-task-id"));
 
         assert_eq!(
             prepared.headers().get("authorization").unwrap(),
@@ -1425,6 +1609,16 @@ mod tests {
         assert_eq!(
             second.headers().get("authorization").unwrap(),
             "Bearer sk-ant-oat01-two"
+        );
+        let personal = profile.with_personal_token(std::sync::Arc::from("sk-ant-oat01-personal"));
+        let request = send(&personal).unwrap();
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer sk-ant-oat01-personal"
+        );
+        assert_eq!(
+            request.headers().get("anthropic-beta").unwrap(),
+            "oauth-2025-04-20"
         );
     }
 
@@ -1782,6 +1976,97 @@ mod tests {
                 .unwrap(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn ollama_responses_stream_normalizes_ndjson_header_without_changing_bytes() {
+        let wire = include_bytes!("../../tests/fixtures/client-roundtrip/openai-response.sse");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(move || async move {
+                    ([("content-type", "application/x-ndjson")], wire.as_slice())
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let headers = HeaderMap::new();
+        for (kind, operation, streaming, expected) in [
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "text/event-stream",
+            ),
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiResponses,
+                false,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::Ollama,
+                GatewayOperation::OpenAiChatCompletions,
+                true,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::Vllm,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "application/x-ndjson",
+            ),
+            (
+                ProviderKind::OpenAi,
+                GatewayOperation::OpenAiResponses,
+                true,
+                "application/x-ndjson",
+            ),
+        ] {
+            let adapter = for_kind(kind).unwrap();
+            let profile = profile(kind, kind == ProviderKind::OpenAi);
+            let plan = adapter
+                .plan_for_target(
+                    operation,
+                    operation,
+                    "provider-model",
+                    streaming,
+                    &input(&headers),
+                )
+                .unwrap();
+            let prepared = if streaming {
+                adapter.stream(
+                    plan,
+                    Bytes::from_static(b"{\"stream\":true}"),
+                    &profile,
+                    input(&headers),
+                )
+            } else {
+                adapter.send(
+                    plan,
+                    Bytes::from_static(b"{\"stream\":false}"),
+                    &profile,
+                    input(&headers),
+                )
+            }
+            .unwrap();
+            let response = super::send(
+                &client,
+                &format!("http://{address}"),
+                prepared,
+                kind.as_str(),
+                "provider-model",
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.headers()["content-type"], expected);
+            assert_eq!(response.bytes().await.unwrap().as_ref(), wire.as_slice());
+        }
         task.abort();
     }
 

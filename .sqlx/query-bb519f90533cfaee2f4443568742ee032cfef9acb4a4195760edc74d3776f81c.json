@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE quotas current SET lifecycle_state = 'disabled',\n                    version = current.version + 1, updated_at = now()\n                FROM quotas target\n                WHERE target.tenant_id = $1 AND target.id = $2\n                  AND current.tenant_id = target.tenant_id\n                  AND current.id <> target.id AND current.lifecycle_state = 'active'\n                  AND current.quota_key = target.quota_key\n                  AND current.group_id IS NOT DISTINCT FROM target.group_id\n                  AND current.user_id IS NOT DISTINCT FROM target.user_id\n                  AND current.device_id IS NOT DISTINCT FROM target.device_id\n                  AND current.client_id IS NOT DISTINCT FROM target.client_id\n                  AND current.agent_id IS NOT DISTINCT FROM target.agent_id\n                  AND current.credential_id IS NOT DISTINCT FROM target.credential_id\n                  AND current.model_id IS NOT DISTINCT FROM target.model_id\n                  AND current.provider_id IS NOT DISTINCT FROM target.provider_id\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bb519f90533cfaee2f4443568742ee032cfef9acb4a4195760edc74d3776f81c"
+}

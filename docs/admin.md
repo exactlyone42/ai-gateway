@@ -13,6 +13,8 @@ Models 畫面另顯示用途、能力旗標與最近 30 天的實際成功率及
 
 ## 認證與 bootstrap
 
+個人訂閱權杖與 API 金鑰的設定、撤銷及狀態查詢見[用詞與個人憑證](terminology.md#多人各用自己的訂閱開發中)；這些功能尚在開發，未部署。
+
 | 動作 | 端點 | 認證 |
 | --- | --- | --- |
 | 建立第一位 admin | `POST /admin/v1/bootstrap` | `Authorization: Bearer <ADMIN_BOOTSTRAP_TOKEN>` |
@@ -38,6 +40,8 @@ default-deny。最後一位 active admin 不得停用或降級；tenant 級 tran
 admin 並行降級時仍至少留下一位 active admin。
 
 ## 資源端點
+
+請求紀錄可用 `GET /admin/v1/requests?from=<時間>&to=<時間>&task_id=<任務編號>` 篩選同一任務，結果包含任務編號、完成時間與分頁游標。`task_id` 可省略；帶入時限 1–128 個可列印 ASCII 字元。`GET /admin/v1/requests/{id}` 另回傳已保存的 Prompt、Skill、Agent 及 Client 版本歸因。兩者只查登入者所屬租戶；此功能尚未部署。
 
 `{resource}` 只接受 `users`、`devices`、`clients`、`agents`、`credentials`、`providers`、
 `models`、`model-aliases`、`policies`、`quotas`。

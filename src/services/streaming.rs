@@ -13,10 +13,11 @@ use crate::{
 
 const DEFAULT_EVENT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RelayLimits {
     pub event_max_bytes: usize,
     pub heartbeat_interval: Duration,
+    pub provider_secret: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -128,6 +129,55 @@ pub fn event_data(event: &[u8]) -> EventData {
     }
 }
 
+fn stream_fragments<'a>(value: &'a serde_json::Value, fragments: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(
+                    key.as_str(),
+                    "delta" | "text" | "content" | "thinking" | "partial_json" | "arguments"
+                ) && let Some(text) = value.as_str()
+                {
+                    fragments.push(text);
+                } else {
+                    stream_fragments(value, fragments);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                stream_fragments(value, fragments);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_stream_fragments(event: &[u8], secret: &str, tail: &mut Vec<u8>) -> bool {
+    let data = event_data(event);
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data.bytes) else {
+        return false;
+    };
+    let mut fragments = Vec::new();
+    stream_fragments(&value, &mut fragments);
+    let secret = secret.as_bytes();
+    if secret.is_empty() {
+        return false;
+    }
+    for fragment in fragments {
+        tail.extend_from_slice(fragment.as_bytes());
+        if tail.windows(secret.len()).any(|window| window == secret) {
+            return true;
+        }
+        let keep = (1..secret.len().min(tail.len() + 1))
+            .rev()
+            .find(|&length| tail.ends_with(&secret[..length]))
+            .unwrap_or(0);
+        tail.drain(..tail.len() - keep);
+    }
+    false
+}
+
 pub async fn relay<O: StreamObserver>(
     response: reqwest::Response,
     reservation: Reservation,
@@ -185,6 +235,7 @@ async fn relay_inner<O: StreamObserver>(
     mut protocol: RelayProtocol<O>,
     limits: RelayLimits,
 ) -> Result<Body, crate::ledger::LedgerError> {
+    let capture = reservation.capture();
     // The stream owns provider capacity until its final frame is yielded or the
     // client drops the body. Ledger completion can happen before that yield.
     let scheduler_lease = reservation.take_scheduler_lease();
@@ -209,6 +260,9 @@ async fn relay_inner<O: StreamObserver>(
         let mut held = Vec::<Bytes>::new();
         let mut held_bytes = 0usize;
         let mut holding_terminal = false;
+        let mut secret_tail = Vec::new();
+        let mut secret_held = Vec::<Bytes>::new();
+        let mut secret_held_bytes = 0usize;
         let translated = protocol.encoder.is_some();
         let response_max_bytes = if translated {
             limits.event_max_bytes.saturating_mul(8)
@@ -229,8 +283,14 @@ async fn relay_inner<O: StreamObserver>(
             let item = tokio::select! {
                 item = upstream.next() => item,
                 _ = heartbeat.tick() => {
+                    let event = Bytes::from_static(b": keepalive\n\n");
+                    if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                        yield Err(error);
+                        return;
+                    }
                     mark_client_first_byte(&mut reservation, &mut first_client_byte);
-                    yield Ok::<Bytes, io::Error>(Bytes::from_static(b": keepalive\n\n"));
+                    yield Ok::<Bytes, io::Error>(event);
                     continue;
                 }
             };
@@ -243,6 +303,11 @@ async fn relay_inner<O: StreamObserver>(
                     return;
                 }
             };
+            if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ProviderResponse, &bytes).await {
+                finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                yield Err(error);
+                return;
+            }
             provider_bytes = provider_bytes.saturating_add(bytes.len());
             if provider_bytes > response_max_bytes {
                 finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
@@ -266,6 +331,20 @@ async fn relay_inner<O: StreamObserver>(
             let mut ready = Vec::new();
             let mut batch_terminal = None;
             for raw in events {
+                if crate::adapters::provider::error_contains_secret(&raw, &axum::http::HeaderMap::new(), limits.provider_secret.as_deref())
+                    || crate::adapters::provider::error_contains_secret(&event_data(&raw).bytes, &axum::http::HeaderMap::new(), limits.provider_secret.as_deref())
+                {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "provider_secret_in_stream").await;
+                    yield Err(io::Error::other("provider stream contained protected data"));
+                    return;
+                }
+                if let Some(secret) = limits.provider_secret.as_deref()
+                    && scan_stream_fragments(&raw, secret, &mut secret_tail)
+                {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "provider_secret_in_stream").await;
+                    yield Err(io::Error::other("provider stream contained protected data"));
+                    return;
+                }
                 let observed = match protocol.observer.observe(&raw) {
                     Ok(observed) => observed,
                     Err(error) => {
@@ -289,12 +368,39 @@ async fn relay_inner<O: StreamObserver>(
                 let state = apply_events(&mut attempt, observed, Utc::now());
                 batch_changed |= state.changed;
                 holding_terminal |= state.hint || state.terminal.is_some();
+                let terminal = state.terminal.is_some();
                 for output in rendered {
+                    if crate::adapters::provider::error_contains_secret(&output, &axum::http::HeaderMap::new(), limits.provider_secret.as_deref())
+                        || crate::adapters::provider::error_contains_secret(&event_data(&output).bytes, &axum::http::HeaderMap::new(), limits.provider_secret.as_deref())
+                    {
+                        finish_failed(&mut reservation, &mut attempt, &model, &provider, "provider_secret_in_stream").await;
+                        yield Err(io::Error::other("provider stream contained protected data"));
+                        return;
+                    }
                     client_bytes = client_bytes.saturating_add(output.len());
                     if client_bytes > response_max_bytes {
                         finish_failed(&mut reservation, &mut attempt, &model, &provider, "response_too_large").await;
                         yield Err(io::Error::other(ProtocolError::ResponseTooLarge));
                         return;
+                    }
+                    if !secret_tail.is_empty() && !terminal {
+                        secret_held_bytes = secret_held_bytes.saturating_add(output.len());
+                        if secret_held_bytes > terminal_max_bytes {
+                            finish_failed(&mut reservation, &mut attempt, &model, &provider, "secret_buffer_overflow").await;
+                            yield Err(io::Error::other(ProtocolError::TerminalTooLarge));
+                            return;
+                        }
+                        secret_held.push(output);
+                        continue;
+                    }
+                    if !secret_held.is_empty() {
+                        if holding_terminal {
+                            held_bytes = held_bytes.saturating_add(secret_held_bytes);
+                            held.append(&mut secret_held);
+                        } else {
+                            ready.append(&mut secret_held);
+                        }
+                        secret_held_bytes = 0;
                     }
                     if holding_terminal {
                         held_bytes = held_bytes.saturating_add(output.len());
@@ -313,6 +419,11 @@ async fn relay_inner<O: StreamObserver>(
                 }
             }
             if let Some(outcome) = batch_terminal {
+                if let Err(error) = capture_terminal(&capture, ready.iter().chain(held.iter())).await {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                    yield Err(error);
+                    return;
+                }
                 if !ready.is_empty() || !held.is_empty() {
                     mark_client_first_byte(&mut reservation, &mut first_client_byte);
                 }
@@ -325,6 +436,9 @@ async fn relay_inner<O: StreamObserver>(
                 }
                 for terminal in held.drain(..) {
                     yield Ok::<Bytes, io::Error>(terminal);
+                }
+                if let Err(error) = finish_capture(&capture).await {
+                    yield Err(error);
                 }
                 return;
             }
@@ -344,6 +458,11 @@ async fn relay_inner<O: StreamObserver>(
                 return;
             }
             for event in ready {
+                if let Err(error) = capture_chunk(&capture, crate::capture_crypto::CaptureLeg::ClientResponse, &event).await {
+                    finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+                    yield Err(error);
+                    return;
+                }
                 yield Ok::<Bytes, io::Error>(event);
             }
         }
@@ -368,17 +487,113 @@ async fn relay_inner<O: StreamObserver>(
             yield Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider stream ended without a terminal event"));
             return;
         };
+        if let Err(error) = capture_terminal(&capture, secret_held.iter().chain(held.iter())).await {
+            finish_failed(&mut reservation, &mut attempt, &model, &provider, "capture_unavailable").await;
+            yield Err(error);
+            return;
+        }
         mark_client_first_byte(&mut reservation, &mut first_client_byte);
         if let Err(error) = finish_terminal(&mut reservation, &mut attempt, &model, &provider, outcome).await {
             yield Err(io::Error::other(error));
             return;
         }
+        for event in secret_held {
+            yield Ok::<Bytes, io::Error>(event);
+        }
         for terminal in held {
             yield Ok::<Bytes, io::Error>(terminal);
+        }
+        if let Err(error) = finish_capture(&capture).await {
+            yield Err(error);
         }
     };
 
     Ok(Body::from_stream(stream))
+}
+
+pub(crate) async fn capture_chunk(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    leg: crate::capture_crypto::CaptureLeg,
+    bytes: &[u8],
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        capture
+            .save_response(leg, bytes.to_vec())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn capture_deferred_error(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    response: Option<reqwest::Response>,
+    event: &Bytes,
+) -> Result<(), io::Error> {
+    if capture.is_none() {
+        return Ok(());
+    }
+    if let Some(mut response) = response {
+        let mut any = false;
+        while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+            capture_chunk(
+                capture,
+                crate::capture_crypto::CaptureLeg::ProviderResponse,
+                &chunk,
+            )
+            .await?;
+            any = true;
+        }
+        if !any {
+            capture_chunk(
+                capture,
+                crate::capture_crypto::CaptureLeg::ProviderResponse,
+                &[],
+            )
+            .await?;
+        }
+    } else {
+        capture_chunk(
+            capture,
+            crate::capture_crypto::CaptureLeg::ProviderResponse,
+            &[],
+        )
+        .await?;
+    }
+    capture_chunk(
+        capture,
+        crate::capture_crypto::CaptureLeg::ClientResponse,
+        event,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn capture_terminal<'a>(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+    events: impl Iterator<Item = &'a Bytes>,
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        for event in events {
+            capture
+                .save_response(
+                    crate::capture_crypto::CaptureLeg::ClientResponse,
+                    event.to_vec(),
+                )
+                .await
+                .map_err(io::Error::other)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_capture(
+    capture: &Option<std::sync::Arc<crate::capture_session::AsyncCaptureSession>>,
+) -> Result<(), io::Error> {
+    if let Some(capture) = capture {
+        capture.finish().await.map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 fn mark_client_first_byte(reservation: &mut Option<Reservation>, first_client_byte: &mut bool) {
@@ -581,11 +796,46 @@ fn logical_lines(bytes: &[u8]) -> Vec<&[u8]> {
 mod tests {
     use chrono::Utc;
 
-    use super::{EventDecoder, ProtocolError, TerminalOutcome, apply_events, event_data};
+    use super::{
+        EventDecoder, ProtocolError, TerminalOutcome, apply_events, event_data,
+        scan_stream_fragments,
+    };
     use crate::{
         canonical::{CanonicalContent, CanonicalError, CanonicalStreamEvent, ProviderOptions},
         ledger::{ProviderAttempt, TokenUsage},
     };
+
+    #[test]
+    fn secret_fragments_are_decoded_and_unmatched_prefix_is_released() {
+        let mut tail = Vec::new();
+        assert!(!scan_stream_fragments(
+            br#"data: {"delta":{"text":"upstream-"}}
+
+"#,
+            "upstream-key",
+            &mut tail
+        ));
+        assert_eq!(tail, b"upstream-");
+        assert!(scan_stream_fragments(
+            br#"data: {"choices":[{"delta":{"content":"\u006bey"}}]}
+
+"#,
+            "upstream-key",
+            &mut tail
+        ));
+        tail.clear();
+        assert!(!scan_stream_fragments(
+            b"data: {\"delta\":\"upstream-\"}\n\n",
+            "upstream-key",
+            &mut tail
+        ));
+        assert!(!scan_stream_fragments(
+            b"data: {\"delta\":\"safe\"}\n\n",
+            "upstream-key",
+            &mut tail
+        ));
+        assert!(tail.is_empty());
+    }
 
     #[test]
     fn frames_split_crlf_and_cr_only_without_rewriting_bytes() {

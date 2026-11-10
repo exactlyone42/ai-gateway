@@ -147,6 +147,14 @@ class StreamCompletionTests(unittest.TestCase):
 
 
 class RetirementTests(unittest.TestCase):
+    def test_shutdown_wait_covers_custom_deadlines(self):
+        self.assertEqual(deploy_gateway.shutdown_wait({}), 60)
+        self.assertEqual(deploy_gateway.shutdown_wait({'DRAIN_TIMEOUT_MS': ' ', 'SHUTDOWN_FINALIZE_TIMEOUT_MS': ''}), 60)
+        self.assertEqual(deploy_gateway.shutdown_wait({'DRAIN_TIMEOUT_MS': '600000', 'SHUTDOWN_FINALIZE_TIMEOUT_MS': '60000'}), 795)
+        for env in ({'DRAIN_TIMEOUT_MS': '600001'}, {'SHUTDOWN_FINALIZE_TIMEOUT_MS': '0'}, {'DRAIN_TIMEOUT_MS': 'invalid'}):
+            with self.subTest(env=env), self.assertRaises(RuntimeError):
+                deploy_gateway.shutdown_wait(env)
+
     def test_active_or_unknown_count_keeps_old_service(self):
         for health in [{'active_requests': 1}, {}]:
             with self.subTest(health=health):
@@ -168,13 +176,21 @@ class RetirementTests(unittest.TestCase):
             events.append('health')
             return {'active_requests': 0}
 
-        def run(command):
+        def run(command, **kwargs):
+            if 'stop' in command:
+                self.assertEqual(command, ['docker', 'stop', '--time', '60', 'old'])
             events.append('stop' if 'stop' in command else 'tcp')
             return b''
 
-        with patch.object(deploy_gateway, 'fetch', side_effect=fetch), patch.object(deploy_gateway, 'run', side_effect=run), patch.object(deploy_gateway.time, 'sleep'):
+        with patch.object(deploy_gateway, 'fetch', side_effect=fetch), patch.object(deploy_gateway, 'run', side_effect=run), patch.object(deploy_gateway, 'inspect', return_value={'State': {'Status': 'exited', 'ExitCode': 0}}), patch.object(deploy_gateway.time, 'sleep'):
             self.assertTrue(deploy_gateway.retire_idle_source('old', '18080'))
         self.assertEqual(events, ['health', 'tcp'] * 3 + ['stop'])
+
+    def test_forced_or_unknown_exit_is_not_reported_as_clean(self):
+        for state in ({'Status': 'exited', 'ExitCode': 137}, {'Status': 'running', 'ExitCode': 0}, {'Status': 'exited'}):
+            with self.subTest(state=state), patch.object(deploy_gateway, 'fetch', return_value={'active_requests': 0}), patch.object(deploy_gateway, 'run', return_value=b''), patch.object(deploy_gateway, 'inspect', return_value={'State': state}), patch.object(deploy_gateway.time, 'sleep'):
+                with self.assertRaises(RuntimeError):
+                    deploy_gateway.retire_idle_source('old', '18080')
 
 
 class DeploymentTests(unittest.TestCase):
@@ -213,7 +229,8 @@ class DeploymentTests(unittest.TestCase):
             return {'NetworkSettings': {'Ports': {'8080/tcp': [{'HostPort': '18080'}]},
                     'Networks': {'gateway': {}}},
                     'Config': {'Env': ['DATABASE_URL=postgres://gateway@db-alias/gateway',
-                                      'SCHEDULER_PASSTHROUGH=' + ('false' if self.failure == 'queued-mode' else 'true')]}}
+                                      'SCHEDULER_PASSTHROUGH=' + ('false' if self.failure == 'queued-mode' else 'true'),
+                                      *getattr(self, 'extra_source_env', [])]}}
         if name == 'database':
             networks = {'gateway': {'IPAddress': '172.18.0.2', 'Aliases': ['db-alias']}}
             if self.failure == 'database-host':
@@ -235,7 +252,7 @@ class DeploymentTests(unittest.TestCase):
         if self.failure == label:
             raise RuntimeError('client failed')
 
-    def mock_retire_idle_source(self, container, port):
+    def mock_retire_idle_source(self, container, port, wait_seconds):
         self.assertTrue((Path(self.args.evidence) / 'accepted.json').exists())
         self.events.append(('retire', container))
         return False
@@ -267,6 +284,30 @@ class DeploymentTests(unittest.TestCase):
                 self.assertNotIn('stop', value)
                 self.assertNotIn('kill', value)
                 self.assertNotIn('rm', value)
+
+    def test_codex_owner_is_required_before_starting_candidate_and_preserved(self):
+        owner = '00000000-0000-0000-0000-000000000001'
+        for index, (requested, stored, valid) in enumerate([
+            (None, None, False), ('invalid', None, False),
+            (owner, None, True), (None, owner, True),
+        ]):
+            with self.subTest(requested=requested, stored=stored):
+                self.args.evidence = str(Path(self.temp.name) / f'owner-{index}')
+                self.args.codex_owner_user_id = requested
+                self.extra_source_env = ['CODEX_AUTH_FILE=/run/gateway-codex/auth.json']
+                if stored:
+                    self.extra_source_env.append('CODEX_OWNER_USER_ID=' + stored)
+                self.events.clear()
+                self.config.write_text(self.previous)
+                if not valid:
+                    with self.assertRaisesRegex(RuntimeError, '訂閱持有人'):
+                        deploy_gateway.deploy(self.args)
+                    self.assertEqual(self.events, [])
+                    self.assertEqual(self.config.read_text(), self.previous)
+                else:
+                    deploy_gateway.deploy(self.args)
+                    env = (Path(self.args.evidence) / 'candidate.env').read_text()
+                    self.assertIn('CODEX_OWNER_USER_ID=' + owner, env.splitlines())
 
     def test_created_resources_have_expiry_labels(self):
         deploy_gateway.deploy(self.args)

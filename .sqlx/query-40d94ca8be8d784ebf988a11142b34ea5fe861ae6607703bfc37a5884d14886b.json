@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO groups (id, tenant_id, display_name) VALUES ($1, $2, $3) RETURNING to_jsonb(groups) AS \"value!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "40d94ca8be8d784ebf988a11142b34ea5fe861ae6607703bfc37a5884d14886b"
+}

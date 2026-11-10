@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "    WITH requested_credential AS (\n        SELECT COALESCE(rotation_root_id, id) AS root_id\n        FROM credentials\n        WHERE tenant_id = $1 AND id = $6\n    )\n    SELECT q.id, q.quota_key, q.revision, q.model_id, q.provider_id, q.configuration\n    FROM quotas q\n    LEFT JOIN credentials target_credential\n      ON (target_credential.tenant_id, target_credential.id) = (q.tenant_id, q.credential_id)\n    WHERE q.tenant_id = $1 AND q.lifecycle_state = 'active' AND (\n        (q.group_id IS NULL AND q.user_id IS NULL AND q.device_id IS NULL AND q.client_id IS NULL\n         AND q.agent_id IS NULL AND q.credential_id IS NULL\n         AND q.model_id IS NULL AND q.provider_id IS NULL)\n        OR q.user_id = $2 OR q.device_id = $3 OR q.client_id = $4 OR q.agent_id = $5\n        OR (q.group_id IS NOT NULL AND EXISTS (\n            SELECT 1 FROM group_members gm\n            WHERE gm.tenant_id = q.tenant_id AND gm.group_id = q.group_id AND gm.user_id = $2\n        ) AND NOT EXISTS (\n            SELECT 1 FROM quotas user_quota\n            WHERE user_quota.tenant_id = q.tenant_id AND user_quota.user_id = $2\n              AND user_quota.quota_key = q.quota_key AND user_quota.lifecycle_state = 'active'\n              AND user_quota.model_id IS NOT DISTINCT FROM q.model_id\n              AND user_quota.provider_id IS NOT DISTINCT FROM q.provider_id\n              AND user_quota.configuration->>'mode' = q.configuration->>'mode'\n              AND NOT EXISTS (\n                  SELECT 1 FROM jsonb_each(q.configuration->'limits') AS required(key, value)\n                  WHERE required.value <> 'null'::jsonb\n                    AND COALESCE(user_quota.configuration->'limits'->required.key, 'null'::jsonb) = 'null'::jsonb\n              )\n        ))\n        OR COALESCE(target_credential.rotation_root_id, target_credential.id)\n             = (SELECT root_id FROM requested_credential)\n        OR (q.group_id IS NULL AND q.user_id IS NULL AND q.device_id IS NULL\n            AND q.client_id IS NULL AND q.agent_id IS NULL AND q.credential_id IS NULL\n            AND (q.model_id = ANY($7) OR q.provider_id = ANY($8)))\n    )\n    ORDER BY q.id\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "quota_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "revision",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "provider_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "configuration",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2349230f8ba168bfffc88650850ab16bb3664fbe41da5f535b0d37cb79243f63"
+}

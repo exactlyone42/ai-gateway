@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE SCHEMA capture_restore_incomplete\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c4127995e7fbca0c7ea260c7751adb5ad30d641da38ed944b8736a5f37a2a7e1"
+}

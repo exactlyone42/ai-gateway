@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\", resource - $5::text[] AS \"resource!\"\n    FROM (\n        SELECT 'users' AS kind, id, tenant_id, to_jsonb(users) AS resource FROM users\n        UNION ALL SELECT 'devices', id, tenant_id, to_jsonb(devices) FROM devices\n        UNION ALL SELECT 'clients', id, tenant_id, to_jsonb(clients) FROM clients\n        UNION ALL SELECT 'agents', id, tenant_id, to_jsonb(agents) FROM agents\n        UNION ALL SELECT 'credentials', id, tenant_id, to_jsonb(credentials) FROM credentials\n        UNION ALL SELECT 'providers', id, tenant_id, to_jsonb(providers) FROM providers\n        UNION ALL SELECT 'models', id, tenant_id, to_jsonb(models) FROM models\n        UNION ALL SELECT 'model-aliases', id, tenant_id, to_jsonb(model_aliases) FROM model_aliases\n        UNION ALL SELECT 'policies', id, tenant_id, to_jsonb(policies) FROM policies\n        UNION ALL SELECT 'quotas', id, tenant_id, to_jsonb(quotas) FROM quotas\n    ) resources\n    WHERE kind = $1 AND tenant_id = $2 AND id > $3\n      AND ($6::text IS NULL OR (kind = 'users' AND lower(resource->>'email') = lower($6)))\n    ORDER BY id LIMIT $4\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "resource!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "TextArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "fef36530c88d9f2f939b7f3f028cae3e56a28323969cd312a253deea626b304c"
+}

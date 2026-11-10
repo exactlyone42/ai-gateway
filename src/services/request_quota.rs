@@ -6,7 +6,7 @@ use crate::{
     adapters::{ValidatedTranslationPlan, validate_for_provider},
     canonical::CanonicalRequest,
     error::GatewayError,
-    ledger::{RequestStart, TokenUsage},
+    ledger::{RequestCompletion, RequestStart, Reservation, TokenUsage},
     model_registry::{CapabilityRequirements, GatewayOperation},
     policy::value_text,
     quota::{QuotaAdmission, QuotaEstimate, QuotaOutcome, QuotaRejection},
@@ -18,8 +18,7 @@ use crate::{
 pub struct PreparedQuota {
     pub admission: QuotaAdmission,
     pub translation: ValidatedTranslationPlan,
-    pub routing_reason: &'static str,
-    pub task_routing: Value,
+    pub reservation: Reservation,
 }
 
 #[derive(Clone, Copy)]
@@ -230,6 +229,36 @@ pub async fn admit(
     } else {
         0
     };
+    let context = &prepared.rejection;
+    let mut reservation = state
+        .ledger
+        .reserve_with_quota(
+            RequestStart {
+                request_id: context.request_id.clone(),
+                session_id: context.session_id.clone(),
+                trace_id: request.trace_id.clone(),
+                requested_model: Some(prepared.requested_model.clone()),
+                workload_class: Some(value_text(&prepared.policy.workload_class)),
+                urgency: Some(value_text(&prepared.policy.urgency)),
+                quality: Some(value_text(&prepared.policy.quality)),
+                budget_class: Some(value_text(&prepared.policy.budget_class)),
+                estimated_tokens: context.estimated_tokens,
+                selection: None,
+                policy: Some(prepared.policy.ledger_snapshot()),
+                principal: context.principal.clone(),
+                created_at: context.received_at,
+            },
+            Some(gateway_request_id),
+            None,
+            Some(&context.attribution),
+            Some((
+                context.operation,
+                context.client_agent_id.clone(),
+                context.parent_agent_id.clone(),
+            )),
+        )
+        .await?;
+    reservation.cancel_on_force(state.lifecycle.force_token());
     if prepared.rejection.principal.is_development_bootstrap() {
         let selection = candidates
             .into_iter()
@@ -247,20 +276,34 @@ pub async fn admit(
             &selection.public_model_id,
             measurement,
         );
-        return Ok(PreparedQuota {
-            routing_reason,
-            task_routing,
-            admission: QuotaAdmission {
-                selection,
-                estimated_usage: TokenUsage {
-                    input_tokens: input_upper_bound,
-                    output_tokens: output_limit.unwrap_or(0).saturating_mul(output_multiplier),
-                    ..TokenUsage::default()
-                },
-                snapshot: None,
-                concurrency: Vec::new(),
+        let admission = QuotaAdmission {
+            selection,
+            estimated_usage: TokenUsage {
+                input_tokens: input_upper_bound,
+                output_tokens: output_limit.unwrap_or(0).saturating_mul(output_multiplier),
+                ..TokenUsage::default()
             },
+            snapshot: None,
+            concurrency: Vec::new(),
+        };
+        reservation.annotate_admission(
+            billable.then(|| estimated_tokens(&admission.estimated_usage)),
+            None,
+        );
+        if let Some(selection) = admission.selection.ledger_snapshot() {
+            reservation.annotate_selection(&selection);
+        }
+        reservation.annotate_policy(
+            prepared
+                .policy
+                .ledger_snapshot()
+                .with_routing(routing_reason)
+                .with_task_routing(task_routing),
+        );
+        return Ok(PreparedQuota {
+            admission,
             translation,
+            reservation,
         });
     }
     match state
@@ -297,15 +340,28 @@ pub async fn admit(
                 &admission.selection.public_model_id,
                 measurement,
             );
+            reservation.annotate_admission(
+                billable.then(|| estimated_tokens(&admission.estimated_usage)),
+                admission.snapshot.clone(),
+            );
+            if let Some(selection) = admission.selection.ledger_snapshot() {
+                reservation.annotate_selection(&selection);
+            }
+            reservation.annotate_policy(
+                prepared
+                    .policy
+                    .ledger_snapshot()
+                    .with_routing(routing_reason)
+                    .with_task_routing(task_routing),
+            );
             Ok(PreparedQuota {
-                routing_reason,
-                task_routing,
                 admission: *admission,
                 translation,
+                reservation,
             })
         }
         QuotaOutcome::Rejected(snapshot, rejection) => {
-            record_rejection(state, prepared, snapshot).await?;
+            record_rejection(reservation, prepared.rejection.estimated_tokens, snapshot).await?;
             Err(match rejection {
                 QuotaRejection::HardLimit => GatewayError::QuotaExceeded,
                 QuotaRejection::SoftDeferred => GatewayError::QuotaDeferred,
@@ -386,37 +442,19 @@ fn request_uses_cache(value: &Value) -> bool {
 }
 
 async fn record_rejection(
-    state: &AppState,
-    prepared: &PreparedPolicy,
+    mut reservation: Reservation,
+    estimated_tokens: Option<i64>,
     quota: crate::ledger::RequestQuotaSnapshot,
 ) -> Result<(), GatewayError> {
-    let trace_id = match crate::logging::current_trace_ids().0 {
-        value if value.is_empty() => None,
-        value => Some(value),
-    };
-    state
-        .ledger
-        .reject_with_quota(
-            RequestStart {
-                request_id: prepared.rejection.request_id.clone(),
-                session_id: prepared.rejection.session_id.clone(),
-                trace_id,
-                requested_model: Some(prepared.requested_model.clone()),
-                workload_class: Some(value_text(&prepared.policy.workload_class)),
-                urgency: Some(value_text(&prepared.policy.urgency)),
-                quality: Some(value_text(&prepared.policy.quality)),
-                budget_class: Some(value_text(&prepared.policy.budget_class)),
-                estimated_tokens: prepared.rejection.estimated_tokens,
-                selection: None,
-                policy: Some(prepared.policy.ledger_snapshot()),
-                principal: prepared.rejection.principal.clone(),
-                created_at: prepared.rejection.received_at,
-            },
-            prepared.rejection.operation,
-            prepared.rejection.client_agent_id.clone(),
-            prepared.rejection.parent_agent_id.clone(),
-            Some(quota),
-        )
+    reservation.annotate_admission(estimated_tokens, Some(quota));
+    reservation
+        .finish(RequestCompletion {
+            status: "rejected".to_owned(),
+            selected_model: None,
+            selected_provider: None,
+            attempts: Vec::new(),
+            completed_at: Utc::now(),
+        })
         .await?;
     Ok(())
 }

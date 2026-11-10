@@ -1,0 +1,1 @@
+ALTER TABLE quotas DROP CONSTRAINT quotas_group_scope_check

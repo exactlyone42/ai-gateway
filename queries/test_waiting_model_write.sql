@@ -1,0 +1,1 @@
+SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND backend_xid IS NOT NULL AND query LIKE '%INSERT INTO models%') AS "waiting!"

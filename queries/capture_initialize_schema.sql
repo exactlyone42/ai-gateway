@@ -1,0 +1,1 @@
+SELECT to_regclass('public.capture_records') IS NOT NULL AS "records!", to_regclass('public.capture_master_key_usage') IS NOT NULL AS "usage!", to_regclass('public.capture_erasure_marks') IS NOT NULL AS "marks!"

@@ -13,10 +13,11 @@ use tower_http::cors::CorsLayer;
 use crate::{
     admin::{
         AdminAccountCreate, AdminAccountPatch, AdminAccountSecretOutput, AdminContext, AdminError,
-        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, IncidentCreate,
-        IncidentEventCreate, IncidentListQuery, IncidentPatch, LifecycleInput, ListQuery,
-        ReportListQuery, ReportWindowQuery, ResourceKind, ResourceMutationOutput, ResourcePage,
-        ResourceTarget, RotateCredentialInput, SessionOutput, UsageQuery, authorize,
+        BootstrapInput, BootstrapOutput, CursorPage, DeleteQuery, GroupCreate, GroupCredentialKind,
+        GroupCredentialTarget, IncidentCreate, IncidentEventCreate, IncidentListQuery,
+        IncidentPatch, LifecycleInput, ListQuery, ReportListQuery, ReportWindowQuery,
+        RequestListQuery, ResourceKind, ResourceMutationOutput, ResourcePage, ResourceTarget,
+        RotateCredentialInput, SessionOutput, UsageQuery, authorize,
     },
     middleware::REQUEST_ID_HEADER,
     state::AppState,
@@ -37,6 +38,11 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/v1/identity-map", get(identity_map))
         .route("/admin/v1/requests", get(request_page))
         .route("/admin/v1/requests/{id}", get(request_report))
+        .route("/admin/v1/request-captures/{id}", get(capture_report))
+        .route(
+            "/admin/v1/request-captures/{id}/content",
+            get(capture_content),
+        )
         .route("/admin/v1/usage", get(usage_report))
         .route("/admin/v1/audit", get(audit_page))
         .route("/admin/v1/catalog", get(catalog_report))
@@ -54,10 +60,34 @@ pub fn router(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/v1/incidents/{id}/events",
             post(append_incident_event),
         )
+        .route("/admin/v1/groups", get(list_groups).post(create_group))
+        .route("/admin/v1/groups/{group}/members", get(list_group_members))
+        .route(
+            "/admin/v1/groups/{group}/members/{user}",
+            post(add_group_member).delete(remove_group_member),
+        )
+        .route(
+            "/admin/v1/groups/{group}/provider-credentials/{provider}/{kind}",
+            get(group_credential_status)
+                .put(replace_group_credential)
+                .delete(revoke_group_credential),
+        )
         .route("/admin/v1/credentials/{id}/rotate", post(rotate_credential))
         .route(
             "/admin/v1/provider-tokens/anthropic",
             axum::routing::put(replace_anthropic_token),
+        )
+        .route(
+            "/admin/v1/provider-tokens/anthropic/{user_id}",
+            get(personal_anthropic_status)
+                .put(replace_personal_anthropic_token)
+                .delete(revoke_personal_anthropic_token),
+        )
+        .route(
+            "/admin/v1/provider-api-keys/{provider}/{user_id}",
+            get(personal_api_key_status)
+                .put(replace_personal_api_key)
+                .delete(revoke_personal_api_key),
         )
         .route(
             "/admin/v1/{resource}/{id}/lifecycle",
@@ -215,9 +245,51 @@ async fn identity_map(
 async fn request_page(
     State(state): State<Arc<AppState>>,
     Extension(context): Extension<AdminContext>,
-    Query(query): Query<ReportListQuery>,
+    Query(query): Query<RequestListQuery>,
 ) -> Result<Json<CursorPage>, AdminError> {
     Ok(Json(state.admin.request_page(&context, query).await?))
+}
+
+async fn capture_report(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    Ok(Json(state.admin.capture_report(&context, id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct CaptureContentQuery {
+    leg: String,
+}
+
+async fn capture_content(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<CaptureContentQuery>,
+) -> Result<Response, AdminError> {
+    use crate::capture_crypto::CaptureLeg;
+    let leg = match query.leg.as_str() {
+        "client_request" => CaptureLeg::ClientRequest,
+        "provider_request" => CaptureLeg::ProviderRequest,
+        "provider_response" => CaptureLeg::ProviderResponse,
+        "client_response" => CaptureLeg::ClientResponse,
+        _ => return Err(AdminError::InvalidRequest),
+    };
+    let body = crate::capture_archive::admin_content(state, context, id, leg)
+        .await
+        .map_err(|error| match error {
+            crate::capture_archive::AdminCaptureError::NotFound => AdminError::NotFound,
+            crate::capture_archive::AdminCaptureError::Unavailable => AdminError::Unavailable,
+        })?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .body(body)
+        .map_err(|_| AdminError::Unavailable)
 }
 
 async fn request_report(
@@ -387,6 +459,91 @@ async fn get_resource(
     Ok(Json(state.admin.get_resource(&context, kind, id).await?))
 }
 
+async fn list_groups(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ResourcePage>, AdminError> {
+    Ok(Json(state.admin.list_groups(&context, query).await?))
+}
+
+async fn list_group_members(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(group): Path<uuid::Uuid>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ResourcePage>, AdminError> {
+    Ok(Json(
+        state
+            .admin
+            .list_group_members(&context, group, query)
+            .await?,
+    ))
+}
+
+async fn create_group(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<GroupCreate>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .admin
+                .create_group(&context, input, source, peer.ip(), request_id(&headers)?)
+                .await?,
+        ),
+    ))
+}
+
+async fn add_group_member(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, user)): Path<(uuid::Uuid, uuid::Uuid)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    state
+        .admin
+        .change_group_member(
+            &context,
+            (group, user),
+            true,
+            state.personal_tokens.as_ref(),
+            (source, peer.ip()),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_group_member(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, user)): Path<(uuid::Uuid, uuid::Uuid)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
+    state
+        .admin
+        .change_group_member(
+            &context,
+            (group, user),
+            false,
+            state.personal_tokens.as_ref(),
+            (source, peer.ip()),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_resource(
     State(state): State<Arc<AppState>>,
     Extension(context): Extension<AdminContext>,
@@ -514,6 +671,288 @@ struct ReplaceTokenInput {
     token: String,
 }
 
+fn uncertain_operation(error: impl std::fmt::Display) -> AdminError {
+    tracing::error!(error = %error, "personal credential outcome could not be recorded");
+    AdminError::OperationUncertain
+}
+
+async fn personal_api_key_status(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((provider, user_id)): Path<(String, uuid::Uuid)>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state
+        .personal_tokens
+        .as_ref()
+        .ok_or(AdminError::NotFound)?
+        .api_store(&provider);
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, Some(&provider))
+        .await?;
+    let fingerprint = store
+        .get_with_lock(context.tenant_id, user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "personal API key status failed");
+            AdminError::Unavailable
+        })?
+        .map(|(token, _)| crate::held_token::fingerprint(&token));
+    guard.commit().await?;
+    Ok(Json(
+        serde_json::json!({"provider": provider, "configured": fingerprint.is_some(), "fingerprint": fingerprint}),
+    ))
+}
+
+async fn personal_anthropic_status(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path(user_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, None)
+        .await?;
+    let fingerprint = store
+        .get_with_lock(context.tenant_id, user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "personal provider token status failed");
+            AdminError::Unavailable
+        })?
+        .map(|(token, _)| crate::held_token::fingerprint(&token));
+    guard.commit().await?;
+    Ok(Json(
+        serde_json::json!({"provider": "anthropic", "configured": fingerprint.is_some(), "fingerprint": fingerprint}),
+    ))
+}
+
+async fn replace_personal_api_key(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((provider, user_id)): Path<(String, uuid::Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<ReplaceTokenInput>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state
+        .personal_tokens
+        .as_ref()
+        .ok_or(AdminError::NotFound)?
+        .api_store(&provider);
+    let fingerprint = crate::held_token::validated_api_fingerprint(&input.token)
+        .map_err(|_| AdminError::InvalidRequest)?;
+    let addresses = (
+        source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+        peer.ip(),
+    );
+    let id = request_id(&headers)?;
+    state
+        .admin
+        .audit_personal_api_key(
+            &context,
+            (user_id, &provider),
+            Some(&fingerprint),
+            None,
+            addresses,
+            id,
+        )
+        .await?;
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, Some(&provider))
+        .await?;
+    let result = store
+        .replace(context.tenant_id, user_id, &input.token)
+        .await;
+    guard.commit().await.map_err(uncertain_operation)?;
+    if matches!(result, Err(crate::held_token::HeldTokenError::Uncertain)) {
+        return Err(uncertain_operation("credential directory sync failed"));
+    }
+    state
+        .admin
+        .audit_personal_api_key(
+            &context,
+            (user_id, &provider),
+            Some(&fingerprint),
+            Some(result.is_ok()),
+            addresses,
+            id,
+        )
+        .await
+        .map_err(uncertain_operation)?;
+    result.map_err(|error| {
+        tracing::error!(error = %error, "personal API key replacement failed");
+        AdminError::Unavailable
+    })?;
+    Ok(Json(
+        serde_json::json!({"provider": provider, "fingerprint": fingerprint}),
+    ))
+}
+
+async fn revoke_personal_api_key(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((provider, user_id)): Path<(String, uuid::Uuid)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let store = state
+        .personal_tokens
+        .as_ref()
+        .ok_or(AdminError::NotFound)?
+        .api_store(&provider);
+    let addresses = (
+        source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+        peer.ip(),
+    );
+    let id = request_id(&headers)?;
+    state
+        .admin
+        .audit_personal_api_key(&context, (user_id, &provider), None, None, addresses, id)
+        .await?;
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, Some(&provider))
+        .await?;
+    let result = store.revoke(context.tenant_id, user_id).await;
+    guard.commit().await.map_err(uncertain_operation)?;
+    if matches!(result, Err(crate::held_token::HeldTokenError::Uncertain)) {
+        return Err(uncertain_operation("credential directory sync failed"));
+    }
+    state
+        .admin
+        .audit_personal_api_key(
+            &context,
+            (user_id, &provider),
+            None,
+            Some(result.is_ok()),
+            addresses,
+            id,
+        )
+        .await
+        .map_err(uncertain_operation)?;
+    result.map_err(|error| {
+        tracing::error!(error = %error, "personal API key revocation failed");
+        AdminError::Unavailable
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn replace_personal_anthropic_token(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(user_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReplaceTokenInput>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    let fingerprint = crate::held_token::validated_fingerprint(&input.token)
+        .map_err(|_| AdminError::InvalidRequest)?;
+    state
+        .admin
+        .audit_personal_token_attempt(
+            &context,
+            user_id,
+            Some(&fingerprint),
+            None,
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, None)
+        .await?;
+    let result = store
+        .replace(context.tenant_id, user_id, &input.token)
+        .await;
+    guard.commit().await.map_err(uncertain_operation)?;
+    if matches!(result, Err(crate::held_token::HeldTokenError::Uncertain)) {
+        return Err(uncertain_operation("credential directory sync failed"));
+    }
+    state
+        .admin
+        .audit_personal_token_attempt(
+            &context,
+            user_id,
+            Some(&fingerprint),
+            Some(result.is_ok()),
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await
+        .map_err(uncertain_operation)?;
+    result.map_err(|error| {
+        tracing::error!(error = %error, "personal provider token replacement failed");
+        AdminError::Unavailable
+    })?;
+    Ok(Json(
+        serde_json::json!({"provider": "anthropic", "fingerprint": fingerprint}),
+    ))
+}
+
+async fn revoke_personal_anthropic_token(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(user_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    state
+        .admin
+        .audit_personal_token_attempt(
+            &context,
+            user_id,
+            None,
+            None,
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    let guard = state
+        .admin
+        .lock_personal_subject(&context, user_id, None)
+        .await?;
+    let result = store.revoke(context.tenant_id, user_id).await;
+    guard.commit().await.map_err(uncertain_operation)?;
+    if matches!(result, Err(crate::held_token::HeldTokenError::Uncertain)) {
+        return Err(uncertain_operation("credential directory sync failed"));
+    }
+    state
+        .admin
+        .audit_personal_token_attempt(
+            &context,
+            user_id,
+            None,
+            Some(result.is_ok()),
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await
+        .map_err(uncertain_operation)?;
+    result.map_err(|error| {
+        tracing::error!(error = %error, "personal provider token revocation failed");
+        AdminError::Unavailable
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn replace_anthropic_token(
     State(state): State<Arc<AppState>>,
     Extension(context): Extension<AdminContext>,
@@ -528,6 +967,7 @@ async fn replace_anthropic_token(
         .map_err(|error| match error {
             crate::held_token::HeldTokenError::Invalid => AdminError::InvalidRequest,
             crate::held_token::HeldTokenError::Storage(_) => AdminError::Unavailable,
+            crate::held_token::HeldTokenError::Uncertain => AdminError::OperationUncertain,
         })?;
     let source = source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers);
     state
@@ -629,7 +1069,13 @@ fn source_ip(
 
 fn cors(origin: Option<&str>) -> CorsLayer {
     let layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -640,6 +1086,87 @@ fn cors(origin: Option<&str>) -> CorsLayer {
         Some(origin) => layer.allow_origin(origin),
         None => layer,
     }
+}
+
+async fn group_credential_status(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+) -> Result<Json<serde_json::Value>, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    Ok(Json(
+        state
+            .admin
+            .group_credential_status(
+                &context,
+                GroupCredentialTarget {
+                    group,
+                    provider,
+                    kind,
+                },
+                store,
+            )
+            .await?,
+    ))
+}
+
+async fn replace_group_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+    headers: HeaderMap,
+    Json(input): Json<ReplaceTokenInput>,
+) -> Result<StatusCode, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    state
+        .admin
+        .change_group_credential(
+            &context,
+            GroupCredentialTarget {
+                group,
+                provider,
+                kind,
+            },
+            store,
+            Some(&input.token),
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_group_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<AdminContext>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((group, provider, kind)): Path<(uuid::Uuid, String, GroupCredentialKind)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let store = state.personal_tokens.as_ref().ok_or(AdminError::NotFound)?;
+    state
+        .admin
+        .change_group_credential(
+            &context,
+            GroupCredentialTarget {
+                group,
+                provider,
+                kind,
+            },
+            store,
+            None,
+            (
+                source_ip(&state.config.admin_trusted_proxy_ips, peer, &headers),
+                peer.ip(),
+            ),
+            request_id(&headers)?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -669,6 +1196,490 @@ mod tests {
         routes,
         state::AppState,
     };
+
+    #[sqlx::test]
+    async fn personal_token_http_is_scoped_and_audited(pool: PgPool) {
+        let tenant_id = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let foreign_user = Uuid::new_v4();
+        let bootstrap = "personal-http-bootstrap-token-at-least-32-bytes";
+        let root = std::env::temp_dir().join(format!("personal-http-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = crate::routes::tests::test_config();
+        config.admin_bootstrap_token = Some(bootstrap.to_owned());
+        config.admin_bootstrap_tenant_id = Some(tenant_id);
+        config.anthropic_personal_token_dir = Some(root.join("users"));
+        config.anthropic_subscription_token_file = Some(root.join("legacy"));
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let peer: SocketAddr = "127.0.0.1:4567".parse().unwrap();
+        let owner = state
+            .admin
+            .bootstrap(
+                bootstrap,
+                BootstrapInput {
+                    display_name: "owner".to_owned(),
+                    credential_name: "owner".to_owned(),
+                },
+                peer.ip(),
+                peer.ip(),
+                "bootstrap",
+            )
+            .await
+            .unwrap();
+        let session = state
+            .admin
+            .login(&owner.login_token, peer.ip(), peer.ip(), "login")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'owner'), ($3, $4, 'other')")
+            .bind(user_id).bind(tenant_id).bind(foreign_user).bind(other_tenant).execute(&pool).await.unwrap();
+        let request = |method: &str, id: Uuid| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("/admin/v1/provider-tokens/anthropic/{id}"))
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .header("content-type", "application/json")
+                .header("x-request-id", Uuid::new_v4().to_string())
+                .body(if method == "PUT" {
+                    Body::from(r#"{"token":"sk-ant-oat01-owner"}"#)
+                } else {
+                    Body::empty()
+                })
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            request
+        };
+        let app = routes::router(state.clone());
+        assert_eq!(
+            app.clone()
+                .oneshot(request("PUT", foreign_user))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let response = app.clone().oneshot(request("PUT", user_id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&response_body).contains("sk-ant-oat01-owner"));
+        assert_eq!(
+            &*state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            "sk-ant-oat01-owner"
+        );
+        assert_eq!(
+            app.oneshot(request("DELETE", user_id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit_logs WHERE target_id = $1 ORDER BY action",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actions.len(), 4);
+        let audit_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT coalesce(after_state::text, '') FROM audit_logs WHERE target_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            audit_contents
+                .iter()
+                .all(|entry| !entry.contains("sk-ant-oat01-owner"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|value| value.ends_with("replace_success"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|value| value.ends_with("revoke_success"))
+        );
+        sqlx::query("INSERT INTO providers (id, tenant_id, provider_key, display_name, provider_type, base_url, credential_ref, supported_operations, lifecycle_state) VALUES ($1, $2, 'openai-primary', 'OpenAI', 'openai', 'https://example.invalid', 'env://OPENAI_API_KEY', ARRAY['openai_responses'], 'active')")
+            .bind(Uuid::new_v4()).bind(tenant_id).execute(&pool).await.unwrap();
+        let api_request = |method: &str, provider: &str| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(format!("/admin/v1/provider-api-keys/{provider}/{user_id}"))
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .header("content-type", "application/json")
+                .header("x-request-id", Uuid::new_v4().to_string())
+                .body(if method == "PUT" {
+                    Body::from(r#"{"token":"owner-api-secret"}"#)
+                } else {
+                    Body::empty()
+                })
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            req
+        };
+        let app = routes::router(state.clone());
+        assert_eq!(
+            app.clone()
+                .oneshot(api_request("PUT", "unknown"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let response = app
+            .clone()
+            .oneshot(api_request("PUT", "openai-primary"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("owner-api-secret"));
+        assert_eq!(
+            &*state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .api_store("openai-primary")
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            "owner-api-secret"
+        );
+        assert_eq!(
+            app.oneshot(api_request("DELETE", "openai-primary"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .api_store("openai-primary")
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let api_audits: Vec<String> = sqlx::query_scalar("SELECT after_state::text FROM audit_logs WHERE target_id = $1 AND action LIKE 'admin.personal_api_key.%'")
+            .bind(user_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(api_audits.len(), 4);
+        assert!(
+            api_audits
+                .iter()
+                .all(|entry| !entry.contains("owner-api-secret"))
+        );
+        sqlx::query("CREATE FUNCTION reject_personal_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_id = 'attempt-failure' AND NEW.action = 'admin.personal_api_key.replace_attempt' THEN RAISE EXCEPTION 'injected attempt failure'; END IF; RETURN NEW; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_personal_attempt BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_personal_attempt()")
+            .execute(&pool).await.unwrap();
+        let mut denied_request = Request::builder()
+            .method("PUT")
+            .uri(format!(
+                "/admin/v1/provider-api-keys/openai-primary/{user_id}"
+            ))
+            .header("authorization", format!("Bearer {}", session.access_token))
+            .header("content-type", "application/json")
+            .header("x-request-id", "attempt-failure")
+            .body(Body::from(r#"{"token":"attempt-failure-key"}"#))
+            .unwrap();
+        denied_request.extensions_mut().insert(ConnectInfo(peer));
+        let denied = routes::router(state.clone())
+            .oneshot(denied_request)
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .api_store("openai-primary")
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("CREATE FUNCTION reject_personal_result() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_id = 'audit-failure' AND NEW.action = 'admin.personal_api_key.replace_success' THEN RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_personal_result BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_personal_result()")
+            .execute(&pool).await.unwrap();
+        let mut failure_request = Request::builder()
+            .method("PUT")
+            .uri(format!(
+                "/admin/v1/provider-api-keys/openai-primary/{user_id}"
+            ))
+            .header("authorization", format!("Bearer {}", session.access_token))
+            .header("content-type", "application/json")
+            .header("x-request-id", "audit-failure")
+            .body(Body::from(r#"{"token":"audit-failure-key"}"#))
+            .unwrap();
+        failure_request.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(failure_request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let failure_body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let failure: serde_json::Value = serde_json::from_slice(&failure_body).unwrap();
+        assert_eq!(failure["error"]["code"], "admin_operation_uncertain");
+        let api_store = state
+            .personal_tokens
+            .as_ref()
+            .unwrap()
+            .api_store("openai-primary");
+        assert_eq!(
+            &*api_store.get(tenant_id, user_id).await.unwrap().unwrap(),
+            "audit-failure-key"
+        );
+        let status = routes::router(state.clone())
+            .oneshot(api_request("GET", "openai-primary"))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body = axum::body::to_bytes(status.into_body(), 4096)
+            .await
+            .unwrap();
+        let status_body: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_body["configured"], true);
+        assert_eq!(
+            status_body["fingerprint"],
+            crate::held_token::fingerprint("audit-failure-key")
+        );
+        assert!(!status_body.to_string().contains("audit-failure-key"));
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE request_id = 'audit-failure' AND action = 'admin.personal_api_key.replace_attempt'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(attempts, 1);
+        api_store.revoke(tenant_id, user_id).await.unwrap();
+        for (method, request_id) in [("PUT", "sync-put"), ("DELETE", "sync-delete")] {
+            state.personal_tokens.as_ref().unwrap().fail_next_sync();
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!(
+                    "/admin/v1/provider-api-keys/openai-primary/{user_id}"
+                ))
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .header("content-type", "application/json")
+                .header("x-request-id", request_id)
+                .body(if method == "PUT" {
+                    Body::from(r#"{"token":"sync-test-key"}"#)
+                } else {
+                    Body::empty()
+                })
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "admin_operation_uncertain");
+            assert_eq!(
+                api_store.get(tenant_id, user_id).await.unwrap().is_some(),
+                method == "PUT"
+            );
+            let actions: Vec<String> =
+                sqlx::query_scalar("SELECT action FROM audit_logs WHERE request_id = $1")
+                    .bind(request_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(actions.len(), 1);
+            assert!(actions[0].ends_with("_attempt"));
+        }
+        for (method, request_id) in [("PUT", "token-sync-put"), ("DELETE", "token-sync-delete")] {
+            state.personal_tokens.as_ref().unwrap().fail_next_sync();
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("/admin/v1/provider-tokens/anthropic/{user_id}"))
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .header("content-type", "application/json")
+                .header("x-request-id", request_id)
+                .body(if method == "PUT" {
+                    Body::from(r#"{"token":"sk-ant-oat01-sync-test"}"#)
+                } else {
+                    Body::empty()
+                })
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "admin_operation_uncertain");
+            assert_eq!(
+                state
+                    .personal_tokens
+                    .as_ref()
+                    .unwrap()
+                    .get(tenant_id, user_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                method == "PUT"
+            );
+            let actions: Vec<String> =
+                sqlx::query_scalar("SELECT action FROM audit_logs WHERE request_id = $1")
+                    .bind(request_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(actions.len(), 1);
+            assert!(actions[0].ends_with("_attempt"));
+        }
+        sqlx::query("CREATE FUNCTION notify_personal_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_id = 'concurrent-personal' THEN PERFORM pg_notify('personal_attempt', 'ready'); END IF; RETURN NEW; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER notify_personal_attempt AFTER INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION notify_personal_attempt()")
+            .execute(&pool).await.unwrap();
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .unwrap();
+        listener.listen("personal_attempt").await.unwrap();
+        let mut disabled = pool.begin().await.unwrap();
+        sqlx::query("UPDATE users SET status = 'disabled' WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *disabled)
+            .await
+            .unwrap();
+        let mut concurrent_request = Request::builder()
+            .method("PUT")
+            .uri(format!(
+                "/admin/v1/provider-api-keys/openai-primary/{user_id}"
+            ))
+            .header("authorization", format!("Bearer {}", session.access_token))
+            .header("content-type", "application/json")
+            .header("x-request-id", "concurrent-personal")
+            .body(Body::from(r#"{"token":"must-not-save"}"#))
+            .unwrap();
+        concurrent_request
+            .extensions_mut()
+            .insert(ConnectInfo(peer));
+        let concurrent_app = routes::router(state.clone());
+        let pending =
+            tokio::spawn(async move { concurrent_app.oneshot(concurrent_request).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(2), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        disabled.commit().await.unwrap();
+        let blocked = pending.await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::NOT_FOUND);
+        assert!(
+            state
+                .personal_tokens
+                .as_ref()
+                .unwrap()
+                .api_store("openai-primary")
+                .get(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("UPDATE users SET status = 'active' WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let context = state
+            .admin
+            .resolve_session(&session.access_token)
+            .await
+            .unwrap();
+        let subject_lock = state
+            .admin
+            .lock_personal_subject(&context, user_id, Some("openai-primary"))
+            .await
+            .unwrap();
+        let mut changing = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(&mut *changing)
+            .await
+            .unwrap();
+        let blocked =
+            sqlx::query("UPDATE users SET status = 'disabled' WHERE tenant_id = $1 AND id = $2")
+                .bind(tenant_id)
+                .bind(user_id)
+                .execute(&mut *changing)
+                .await;
+        assert!(blocked.is_err());
+        changing.rollback().await.unwrap();
+        subject_lock.rollback().await.unwrap();
+        state
+            .admin
+            .audit_personal_api_key(
+                &context,
+                (user_id, "openai-primary"),
+                Some("fingerprint"),
+                None,
+                (peer.ip(), peer.ip()),
+                "race-attempt",
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET status = 'disabled' WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        state
+            .admin
+            .audit_personal_api_key(
+                &context,
+                (user_id, "openai-primary"),
+                Some("fingerprint"),
+                Some(true),
+                (peer.ip(), peer.ip()),
+                "race-result",
+            )
+            .await
+            .unwrap();
+        let result_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE request_id = 'race-result' AND action = 'admin.personal_api_key.replace_success'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(result_count, 1);
+    }
 
     #[test]
     fn admin_headers_reject_data_plane_credentials_and_invalid_request_ids() {
@@ -878,7 +1889,9 @@ mod tests {
             )
             .header("content-type", "application/json")
             .header("x-request-id", "operator-allowed")
-            .body(Body::from(json!({"display_name": "allowed"}).to_string()))
+            .body(Body::from(
+                json!({"display_name": "allowed", "email":"person@example.com"}).to_string(),
+            ))
             .unwrap();
         operator_request.extensions_mut().insert(ConnectInfo(peer));
         let allowed = routes::router(state.clone())
@@ -886,6 +1899,268 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allowed.status(), StatusCode::CREATED);
+        let user_body = axum::body::to_bytes(allowed.into_body(), 4096)
+            .await
+            .unwrap();
+        let user: serde_json::Value = serde_json::from_slice(&user_body).unwrap();
+        let user_id = user["resource"]["id"].as_str().unwrap();
+        let search = Request::builder()
+            .uri("/admin/v1/users?email=PERSON%40example.com")
+            .header(
+                "authorization",
+                format!("Bearer {}", viewer_session.access_token),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let found = routes::router(state.clone()).oneshot(search).await.unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(found.into_body(), 4096).await.unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], user_id);
+        let mut duplicate = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/users")
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "duplicate-email")
+            .body(Body::from(
+                json!({"display_name":"duplicate", "email":"PERSON@example.com"}).to_string(),
+            ))
+            .unwrap();
+        duplicate.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(duplicate)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let mut patch = Request::builder()
+            .method("PATCH")
+            .uri(format!("/admin/v1/users/{user_id}"))
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "clear-email")
+            .body(Body::from(json!({"version":1,"email":null}).to_string()))
+            .unwrap();
+        patch.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone()).oneshot(patch).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(updated["resource"]["email"].is_null());
+
+        let mut create_key = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/credentials")
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "create-key")
+            .body(Body::from(
+                json!({"display_name":"key", "user_id":user_id}).to_string(),
+            ))
+            .unwrap();
+        create_key.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(create_key)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let credential: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let credential_id = credential["resource"]["id"].as_str().unwrap();
+        let secret = credential["secret"].as_str().unwrap();
+        let check_key = || {
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let before = routes::router(state.clone())
+            .oneshot(check_key())
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK);
+        for (version, status, expected) in [
+            (1, "disabled", StatusCode::UNAUTHORIZED),
+            (2, "active", before.status()),
+        ] {
+            let mut request = Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/v1/credentials/{credential_id}"))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("content-type", "application/json")
+                .header("x-request-id", "key-status")
+                .body(Body::from(
+                    json!({"version":version, "status":status}).to_string(),
+                ))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let updated = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(updated.status(), StatusCode::OK);
+            let result = routes::router(state.clone())
+                .oneshot(check_key())
+                .await
+                .unwrap();
+            assert_eq!(result.status(), expected);
+        }
+
+        let mut group_request = Request::builder()
+            .method("POST")
+            .uri("/admin/v1/groups")
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("content-type", "application/json")
+            .header("x-request-id", "create-group")
+            .body(Body::from(json!({"display_name":"group"}).to_string()))
+            .unwrap();
+        group_request.extensions_mut().insert(ConnectInfo(peer));
+        let group_response = routes::router(state.clone())
+            .oneshot(group_request)
+            .await
+            .unwrap();
+        assert_eq!(group_response.status(), StatusCode::CREATED);
+        let group_body = axum::body::to_bytes(group_response.into_body(), 4096)
+            .await
+            .unwrap();
+        let group: serde_json::Value = serde_json::from_slice(&group_body).unwrap();
+        let group_id = group["id"].as_str().unwrap();
+        let mut membership = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/v1/groups/{group_id}/members/{}",
+                Uuid::new_v4()
+            ))
+            .header(
+                "authorization",
+                format!("Bearer {}", operator_session.access_token),
+            )
+            .header("x-request-id", "operator-member-denied")
+            .body(Body::empty())
+            .unwrap();
+        membership.extensions_mut().insert(ConnectInfo(peer));
+        let denied = routes::router(state.clone())
+            .oneshot(membership)
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let member_path = format!("/admin/v1/groups/{group_id}/members/{user_id}");
+        for (method, expected) in [
+            ("POST", StatusCode::NO_CONTENT),
+            ("POST", StatusCode::CONFLICT),
+            ("DELETE", StatusCode::NO_CONTENT),
+            ("DELETE", StatusCode::NOT_FOUND),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(&member_path)
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("x-request-id", "member-action")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if method == "POST" && expected == StatusCode::NO_CONTENT {
+                let list = Request::builder()
+                    .uri(format!("/admin/v1/groups/{group_id}/members"))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", viewer_session.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap();
+                let response = routes::router(state.clone()).oneshot(list).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(page["items"][0]["user_id"], user_id);
+            }
+        }
+        let foreign_user = Uuid::new_v4();
+        sqlx::query(include_str!("../../tests/foreign_member_fixture.sql"))
+            .bind(foreign_user)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut foreign_request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/v1/groups/{group_id}/members/{foreign_user}"
+            ))
+            .header(
+                "authorization",
+                format!("Bearer {}", owner_session.access_token),
+            )
+            .header("x-request-id", "foreign-member")
+            .body(Body::empty())
+            .unwrap();
+        foreign_request.extensions_mut().insert(ConnectInfo(peer));
+        let response = routes::router(state.clone())
+            .oneshot(foreign_request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        for (path, body) in [
+            (
+                "/admin/v1/policies",
+                json!({"policy_key":"missing-group", "revision":1, "group_id":Uuid::new_v4(), "configuration":{}}),
+            ),
+            (
+                "/admin/v1/quotas",
+                json!({"quota_key":"missing-group", "revision":1, "group_id":Uuid::new_v4(), "configuration":{"mode":"hard","limits":{"requests_per_minute":1}}}),
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(
+                    "authorization",
+                    format!("Bearer {}", owner_session.access_token),
+                )
+                .header("content-type", "application/json")
+                .header("x-request-id", "missing-group-target")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            let response = routes::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
 
         let mut oversized_request = Request::builder()
             .method("POST")

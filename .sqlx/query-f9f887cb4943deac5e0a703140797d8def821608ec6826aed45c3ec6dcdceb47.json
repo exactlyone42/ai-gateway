@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP EVENT TRIGGER gateway_test_delay_floor;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f9f887cb4943deac5e0a703140797d8def821608ec6826aed45c3ec6dcdceb47"
+}

@@ -20,10 +20,24 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(agent_pool_gateway::startup::run());
+    let result = match args.as_slice() {
+        [] => runtime.block_on(agent_pool_gateway::startup::run()),
+        [arg] if arg == "--initialize-content-capture" => {
+            runtime.block_on(agent_pool_gateway::startup::initialize_content_capture())
+        }
+        [arg] if arg == "--inspect-capture-erasure" => {
+            agent_pool_gateway::startup::inspect_capture_erasure(None)
+        }
+        [arg, position] if arg == "--inspect-capture-erasure" => {
+            let position = position.to_str().ok_or("invalid erasure position")?;
+            agent_pool_gateway::startup::inspect_capture_erasure(Some(position))
+        }
+        _ => Err("unknown command".into()),
+    };
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
 }

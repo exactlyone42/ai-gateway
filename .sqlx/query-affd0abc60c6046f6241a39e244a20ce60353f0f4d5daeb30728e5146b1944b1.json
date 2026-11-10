@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "affd0abc60c6046f6241a39e244a20ce60353f0f4d5daeb30728e5146b1944b1"
+}

@@ -58,6 +58,8 @@ artifacts=(
   "$fixture_dir/openai-response.sse"
   "$fixture_dir/captures/claude-code-2.1.267.json"
   "$fixture_dir/captures/codex-cli-0.153.0.json"
+  "$fixture_dir/captures/claude-code-2.1.318.json"
+  "$fixture_dir/captures/codex-cli-0.166.0.json"
   "docs/client-roundtrip-evidence.md"
 )
 for artifact in "${artifacts[@]}"; do
@@ -68,6 +70,7 @@ for artifact in "${artifacts[@]}"; do
 done
 
 if ! python3 scripts/check-client-captures.py; then failed=1; fi
+if ! python3 -m unittest scripts/test_client_roundtrip_mock.py; then failed=1; fi
 
 if [ ! -x scripts/verify-client-roundtrip.sh ] || \
    [ ! -x scripts/client-roundtrip-mock.py ] || \

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TABLE capture_erasure_floor;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d69f865a12ea7d7afdd1e4183b5011e5e6bc9d644add69ed1349541981096e78"
+}

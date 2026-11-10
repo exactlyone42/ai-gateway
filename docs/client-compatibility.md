@@ -15,8 +15,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 
 | Client | 狀態 | 自訂端點 | 協定 | 實測往返 |
 | --- | --- | --- | --- | --- |
-| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.306 驗證中 |
-| Codex CLI | supported | `model_providers` | OpenAI Responses | 0.153.0 已通過 |
+| Claude Code CLI | supported | `ANTHROPIC_BASE_URL` | Anthropic Messages | 2.1.318 本機假供應商通過 |
+| Codex CLI | supported | `model_providers` | OpenAI Responses | 0.166.0 本機假供應商通過 |
 | Claude Desktop | pending | Claude apps gateway `/user/bootstrap` | apps gateway 私有協定 | 未做 |
 | VS Code Copilot Chat | supported | Custom Endpoint | Chat/Responses/Messages | 未安裝，未做 |
 | Cursor | partial | BYOK／OpenAI-compatible base URL override | exact wire unknown | 未安裝，未做 |
@@ -27,8 +27,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
 | 欄位 | 值 |
 | --- | --- |
 | client | Claude Code CLI |
-| version | 2.1.267（本機） |
-| verification_date | 2026-09-11 |
+| version | 2.1.318（本機） |
+| verification_date | 2026-11-05 |
 | custom_endpoint | `ANTHROPIC_BASE_URL`，可由 shell、`settings.json` 的 `env` 或 managed settings 設定 |
 | protocol | Anthropic Messages：`POST /v1/messages`；`POST /v1/messages/count_tokens` 可選 |
 | authentication | 一般模式用 Gateway credential；單一擁有者模式可保留 Claude OAuth，Gateway 每次向 Anthropic 驗證並對應既有 Principal，不保存 OAuth |
@@ -45,6 +45,8 @@ Client、修改執行檔或攔截訂閱憑證。查不到官方證據就寫 `unk
   "env": {
     "ANTHROPIC_BASE_URL": "https://aigw.internal.example.com",
     "ANTHROPIC_AUTH_TOKEN": "aigw_sk_...",
+    "CLAUDE_CODE_MAX_RETRIES": "0",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
   }
 }
@@ -63,23 +65,26 @@ Messages 呼叫與 SSE 解析能走自架端點；不證明真 Anthropic 帳號�
 bytes 都不得改寫；請求只允許 router 改寫頂層 `model`。模型發現為
 `GET /v1/models?limit=1000`，3 秒 timeout 且不接受 redirect；
 只顯示 id 含 `claude` 或 `anthropic` 的模型。每個模型另回傳
-`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，避免串流途中被誤判斷線，
-也避免 Client 自動重送可能已執行的工作。Claude Code 2.1.306 的首筆回應另受
+`stream_idle_timeout_ms=600000` 與 `stream_max_retries=0`，但這些欄位不能當成 Claude 已停用重送的證據。本輪原設定在部分輸出後斷線共送六次；只關一般重試仍會改發非串流。上方兩個 Client 設定須一起使用：`CLAUDE_CODE_MAX_RETRIES=0` 關一般重試，`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` 關串流失敗後的非串流備援。用途見 [官方重試說明](https://code.claude.com/docs/en/errors#tune-retry-behavior) 及 [環境設定](https://code.claude.com/docs/en/env-vars)。Claude Code 2.1.306 的首筆回應另受
 `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` 控制；長工作需在 Client 設為 `600000`，
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS` 不能取代它。`x-claude-code-agent-id` 是 agent，不是人。
 
+Gateway 判定金鑰缺失、無效或已撤銷時，401 回應另帶 `x-should-retry: false`，讓原 Client 停止重送同一個無效金鑰。認證服務暫時故障仍回 503，不帶停止重試提示。Claude Code 2.1.319 的原版對照與驗證邊界見 [傳輸驗收](client-roundtrip-evidence.md)。
+
 ## Codex CLI
+
+本分支已隔離實測 Ollama 0.34.0 的 `qwen3-coder:30b`。不支援推理的模型須在 Client 設定 `model_reasoning_effort = "none"`，模型清單也要如實標示 `supports_reasoning=false`；Gateway 不會替使用者開啟推理。這不代表所有本機模型均可用，`gpt-oss:20b` 的本輪精確回答與工具驗收未過。新版尚未部署。
 
 | 欄位 | 值 |
 | --- | --- |
 | client | Codex CLI |
-| version | 0.153.0（本機） |
-| verification_date | 2026-09-11 |
+| version | 0.166.0（本機） |
+| verification_date | 2026-11-05 |
 | custom_endpoint | `~/.codex/config.toml` 的 `model_provider` 與 `[model_providers.<id>]` |
 | protocol | OpenAI Responses；`wire_api` 唯一支援值為 `responses` |
 | authentication | gateway 用 `env_key` 或可定期更新 bearer 的 `auth` command，且保持 `requires_openai_auth = false`；`requires_openai_auth = true` 會改用 OpenAI 登入，見下方政策 |
 | streaming | supported；可設 `stream_idle_timeout_ms`、`stream_max_retries` |
-| tools | request serialization verified：隔離組態送出非空 typed tools 且含 `function`；tool-call／tool-result response 往返 unknown |
+| tools | 0.166.0 已以本人 ChatGPT 及本機 qwen3-coder:30b 實測工具呼叫、讀取隨機檔案與結果回傳；隔離驗收範圍見 loops/gateway-completion/05-client-onboarding.md |
 | reasoning | request serialization verified：實測送出 `reasoning.effort` 與 `reasoning.encrypted_content` include；reasoning response 往返 unknown |
 | seat_subscription_behavior | OpenAI 路徑以 ChatGPT 登入時使用 ChatGPT plan；自己的 OpenAI API key 使用 API pricing。自訂 gateway credential 由 gateway／上游帳戶計費；官方文件沒有說明此模式是否仍影響 Client 端的 ChatGPT plan meter |
 | configuration_example | 見下方 `config.toml` |
@@ -98,7 +103,12 @@ base_url = "https://aigw.internal.example.com/v1"
 env_key = "AIGW_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
+stream_max_retries = 0
+request_max_retries = 0
+stream_idle_timeout_ms = 600000
 ```
+
+這組設定禁止 Client 自動重送請求，避免已開始的工作再次執行；失敗後由使用者另發新請求。Codex 0.166.0 的本輪原件顯示，未設定時即使上游要求停止重試，仍會把 401 總共送六次；不能只靠 Gateway 的回應提示。設定用途見 [官方說明](https://learn.chatgpt.com/docs/config-file/config-reference)，原件與邊界見 [傳輸驗收](client-roundtrip-evidence.md)。
 
 **實測證據**：0.153.0 指向本機 gateway，再到可控 Responses SSE mock；`codex exec`
 精確輸出 `W06_CODEX_OK`。版本化 capture 顯示 `POST /v1/responses` request 為
@@ -223,3 +233,13 @@ private connectivity 是否能連 custom LLM gateway 沒有官方證據，維持
 `26.429.30905` 的最低版本；但它只證明 Bedrock，不能外推任意 gateway，也不能證明自架
 provider 的 Client 端 plan meter 行為。因此由 unsupported 改為 pending，待安裝後做一次和
 CLI 相同的本機 Responses 往返。
+
+## 2026-11-05 原 Client 版本複核
+
+Claude Code 2.1.318 與 Codex CLI 0.166.0 各經本機 Gateway d7c7cfd 取得固定假串流，完整腳本回報 `client roundtrip ok: all`。去除內容的版本紀錄已保存，供應商收到假供應商憑證且沒有 Gateway 金鑰；工具清單與推理參數僅驗請求格式，沒有工具執行或結果往返。保存功能在本次傳輸測試明確關閉，不能用來證明 P2。
+
+整批檢查原本把 Claude 的模型清單請求誤算給 Codex；現在僅檢查 Codex 執行期間的 Gateway 日誌，仍確認 Codex 沒有查模型清單。未知模型提示保留，不捏造模型能力。新版本紀錄也納入欄位及金鑰隔離檢查；故意把未轉送金鑰的結果改為 false 時，檢查會失敗。真實供應商、多人、跨主機、工具結果與取消仍須各自驗收。
+
+本輪官方設定參考：[Claude Code 設定](https://code.claude.com/docs/en/settings)、[Codex 設定](https://developers.openai.com/codex/config-reference)，於2026-11-05核對；實際版本與行為以本機指令及去除內容的紀錄為準。
+
+2026-11-05 本機 Claude 路線：分支新增 Ollama 原生Messages設定，原Claude Code2.1.318搭配qwen3-coder:30b的短答成功。兩輪Read工具的原訊息、呼叫編號、工具結果及加密讀回用量另已核對；模型最終多加說明，未符合精確答覆要求。金鑰撤銷後Gateway持續拒絕401，但Client重試至逾時，未算完整隔離驗收通過。Client仍提示自訂模型使用預設200k上下文，未驗實際長上下文。正式環境未動。

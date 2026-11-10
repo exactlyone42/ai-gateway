@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM gateway_requests WHERE id = $1) AS \"requests!\", (SELECT count(*) FROM provider_attempts WHERE gateway_request_id = $1) AS \"attempts!\", (SELECT count(*) FROM usage_records WHERE gateway_request_id = $1) AS \"usage!\"\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "requests!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "attempts!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "usage!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c3b2b44d1a00737063d4ebd6d6f683c6571a28b670ad67be0be80b0e5ad7f6ff"
+}

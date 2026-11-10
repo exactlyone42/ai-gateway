@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT erasure_witness.advance($1::uuid, $2::bigint, $3::bytea, $4::bytea) AS \"applied!\";\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "applied!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bd8f0b74d5ff580bac504900cddcd13677bfea8a2a4bf6a54be4877b3b01cece"
+}

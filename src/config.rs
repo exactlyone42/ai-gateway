@@ -43,6 +43,7 @@ pub struct Config {
     pub openai_api_key: String,
     pub codex_auth_file: Option<std::path::PathBuf>,
     pub codex_account_id: String,
+    pub codex_owner_user_id: Option<Uuid>,
     pub openai_provider: String,
     pub openai_request_max_bytes: usize,
     /// Direct Anthropic endpoint used by `/v1/messages`; never sent to clients.
@@ -50,6 +51,7 @@ pub struct Config {
     pub anthropic_api_key: String,
     pub anthropic_auth_token: Option<String>,
     pub anthropic_subscription_token_file: Option<std::path::PathBuf>,
+    pub anthropic_personal_token_dir: Option<std::path::PathBuf>,
     pub anthropic_subscription_token_seed: Option<String>,
     pub anthropic_client_oauth: bool,
     pub anthropic_oauth_credential_id: Option<Uuid>,
@@ -64,6 +66,7 @@ pub struct Config {
     /// Maximum silence between provider response reads. This does not cap the
     /// total lifetime of an active stream.
     pub provider_idle_timeout: Duration,
+    pub local_provider_idle_timeout: Duration,
     pub provider_connect_timeout: Duration,
     pub request_header_max_bytes: usize,
     pub drain_timeout: Duration,
@@ -102,6 +105,14 @@ pub struct Config {
     pub ledger_spool_dir: PathBuf,
     pub ledger_spool_max_bytes: u64,
     pub ledger_spool_entry_max_bytes: u64,
+    pub content_capture_enabled: bool,
+    pub content_capture_spool_dir: PathBuf,
+    pub content_capture_key_dir: PathBuf,
+    pub content_capture_anchor_dir: PathBuf,
+    pub content_capture_erasure_dir: PathBuf,
+    pub content_capture_witness_dir: PathBuf,
+    pub content_capture_remote_witness_url: Option<String>,
+    pub content_capture_test_allow_local_witness: bool,
     pub routing: RoutingConfig,
     pub jev: Option<crate::jev::JevConfig>,
     pub scheduler: SchedulerConfig,
@@ -109,6 +120,10 @@ pub struct Config {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("CONTENT_CAPTURE_ENABLED must be true or false")]
+    InvalidContentCaptureEnabled,
+    #[error("CODEX_OWNER_USER_ID 必須是有效的使用者識別碼（UUID）")]
+    InvalidCodexOwner,
     #[error("invalid Jev configuration")]
     InvalidJev,
     #[error("missing required environment variable {0}")]
@@ -167,6 +182,8 @@ pub enum ConfigError {
     InvalidStreamHeartbeatInterval(String),
     #[error("invalid PROVIDER_IDLE_TIMEOUT_MS: {0}")]
     InvalidProviderIdleTimeout(String),
+    #[error("invalid LOCAL_PROVIDER_IDLE_TIMEOUT_MS: {0}")]
+    InvalidLocalProviderIdleTimeout(String),
     #[error("invalid PROVIDER_CONNECT_TIMEOUT_MS: {0}")]
     InvalidProviderConnectTimeout(String),
     #[error("invalid REQUEST_HEADER_MAX_BYTES: {0}")]
@@ -213,6 +230,14 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from);
         let codex_account_id = setting("CODEX_ACCOUNT_ID").unwrap_or_default();
+        let codex_owner_user_id = setting("CODEX_OWNER_USER_ID")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse().map_err(|_| ConfigError::InvalidCodexOwner))
+            .transpose()?;
+        if codex_auth_file.is_some() && codex_owner_user_id.is_none() {
+            return Err(ConfigError::InvalidCodexOwner);
+        }
         let openai_api_key = setting("OPENAI_API_KEY").unwrap_or_default();
         let openai_provider = provider_name("OPENAI_PROVIDER", "openai")?;
         let openai_request_max_bytes = setting("OPENAI_REQUEST_MAX_BYTES")
@@ -247,7 +272,13 @@ impl Config {
             .ok()
             .map(std::path::PathBuf::from);
         let anthropic_subscription_token_seed = setting("ANTHROPIC_SUBSCRIPTION_TOKEN").ok();
-        if anthropic_subscription_token_file.is_some() && anthropic_client_oauth {
+        let anthropic_personal_token_dir = setting("ANTHROPIC_PERSONAL_TOKEN_DIR")
+            .ok()
+            .map(PathBuf::from);
+        if anthropic_client_oauth
+            && (anthropic_subscription_token_file.is_some()
+                || anthropic_personal_token_dir.is_some())
+        {
             return Err(ConfigError::ConflictingAnthropicSubscription);
         }
         let anthropic_api_key = setting("ANTHROPIC_API_KEY").unwrap_or_default();
@@ -265,6 +296,7 @@ impl Config {
         }
         let extra_provider_profiles = extra_provider_profiles(
             setting("EXTRA_PROVIDER_PROFILES_JSON").unwrap_or_else(|_| "[]".to_owned()),
+            anthropic_personal_token_dir.is_some(),
         )?;
         let stream_event_max_bytes = setting("STREAM_EVENT_MAX_BYTES")
             .unwrap_or_else(|_| (32 * 1024 * 1024).to_string())
@@ -287,6 +319,16 @@ impl Config {
             ));
         }
         let provider_idle_timeout = Duration::from_millis(provider_idle_timeout_ms);
+        let local_provider_idle_timeout_ms = setting("LOCAL_PROVIDER_IDLE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "300000".to_owned())
+            .parse::<u64>()
+            .map_err(|error| ConfigError::InvalidLocalProviderIdleTimeout(error.to_string()))?;
+        if !(1..=600_000).contains(&local_provider_idle_timeout_ms) {
+            return Err(ConfigError::InvalidLocalProviderIdleTimeout(
+                "must be between 1 and 600000".to_owned(),
+            ));
+        }
+        let local_provider_idle_timeout = Duration::from_millis(local_provider_idle_timeout_ms);
         let stream_heartbeat_interval_ms = setting("STREAM_HEARTBEAT_INTERVAL_MS")
             .unwrap_or_else(|_| "30000".to_owned())
             .parse::<u64>()
@@ -506,7 +548,32 @@ impl Config {
                     .to_owned(),
             ));
         }
+        let content_capture_enabled =
+            parse_content_capture_enabled(setting("CONTENT_CAPTURE_ENABLED").ok().as_deref())?;
+        let content_capture_spool_dir = PathBuf::from(
+            setting("CONTENT_CAPTURE_SPOOL_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-spool".to_owned()),
+        );
+        let content_capture_key_dir = PathBuf::from(
+            setting("CONTENT_CAPTURE_KEY_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-keys".to_owned()),
+        );
+        let content_capture_anchor_dir = PathBuf::from(
+            setting("CONTENT_CAPTURE_ANCHOR_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-anchors".to_owned()),
+        );
+        let (content_capture_erasure_dir, content_capture_witness_dir) = capture_erasure_paths();
+        let content_capture_remote_witness_url = setting("CONTENT_CAPTURE_REMOTE_WITNESS_URL").ok();
+        let content_capture_test_allow_local_witness = cfg!(debug_assertions)
+            && credential_environment == "dev"
+            && setting("CONTENT_CAPTURE_TEST_ALLOW_LOCAL_WITNESS").as_deref() == Ok("1");
         let scheduler = scheduler_config()?;
+        validate_capture_pool_budget(
+            database_max_connections,
+            admin_database_max_connections,
+            content_capture_enabled,
+            scheduler.passthrough,
+        )?;
         let routing = routing_config()?;
 
         Ok(Self {
@@ -515,12 +582,14 @@ impl Config {
             openai_api_key,
             codex_auth_file,
             codex_account_id,
+            codex_owner_user_id,
             openai_provider,
             openai_request_max_bytes,
             anthropic_base_url,
             anthropic_api_key,
             anthropic_auth_token,
             anthropic_subscription_token_file,
+            anthropic_personal_token_dir,
             anthropic_subscription_token_seed,
             anthropic_client_oauth,
             anthropic_oauth_credential_id,
@@ -530,6 +599,7 @@ impl Config {
             stream_event_max_bytes,
             stream_heartbeat_interval,
             provider_idle_timeout,
+            local_provider_idle_timeout,
             provider_connect_timeout,
             request_header_max_bytes,
             drain_timeout,
@@ -557,6 +627,14 @@ impl Config {
             ledger_spool_dir,
             ledger_spool_max_bytes,
             ledger_spool_entry_max_bytes,
+            content_capture_enabled,
+            content_capture_spool_dir,
+            content_capture_key_dir,
+            content_capture_anchor_dir,
+            content_capture_erasure_dir,
+            content_capture_witness_dir,
+            content_capture_remote_witness_url,
+            content_capture_test_allow_local_witness,
             jev: load_jev()?,
             routing,
             scheduler,
@@ -572,6 +650,27 @@ impl Config {
     }
 }
 
+pub(crate) fn capture_erasure_paths() -> (PathBuf, PathBuf) {
+    (
+        PathBuf::from(
+            setting("CONTENT_CAPTURE_ERASURE_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-erasure".to_owned()),
+        ),
+        PathBuf::from(
+            setting("CONTENT_CAPTURE_WITNESS_DIR")
+                .unwrap_or_else(|_| "/var/lib/agent-pool-gateway/capture-witness".to_owned()),
+        ),
+    )
+}
+
+fn parse_content_capture_enabled(value: Option<&str>) -> Result<bool, ConfigError> {
+    match value {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(ConfigError::InvalidContentCaptureEnabled),
+    }
+}
+
 fn routing_config() -> Result<RoutingConfig, ConfigError> {
     let defaults = RoutingConfig::default();
     Ok(RoutingConfig {
@@ -583,12 +682,17 @@ fn routing_config() -> Result<RoutingConfig, ConfigError> {
     })
 }
 
-fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, ConfigError> {
+fn extra_provider_profiles(
+    value: String,
+    personal: bool,
+) -> Result<Vec<ExtraProviderProfile>, ConfigError> {
     let raw = serde_json::from_str::<Vec<RawExtraProviderProfile>>(&value)
         .map_err(|error| ConfigError::InvalidExtraProviderProfiles(error.to_string()))?;
     raw.into_iter()
         .map(|profile| {
             let kind = match profile.kind.as_str() {
+                "anthropic" if personal => ProviderKind::Anthropic,
+                "openai" if personal => ProviderKind::OpenAi,
                 "gemini" => ProviderKind::Gemini,
                 "xai" => ProviderKind::Xai,
                 "vllm" => ProviderKind::Vllm,
@@ -614,11 +718,22 @@ fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, C
             let valid_operations = !operations.is_empty()
                 && operations.iter().all(|operation| match kind {
                     ProviderKind::Gemini => *operation == GatewayOperation::GeminiGenerateContent,
+                    ProviderKind::Ollama if operations == [GatewayOperation::AnthropicMessages] => {
+                        true
+                    }
                     ProviderKind::Xai | ProviderKind::Vllm | ProviderKind::Ollama => matches!(
                         operation,
                         GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions
                     ),
-                    ProviderKind::Anthropic | ProviderKind::OpenAi => false,
+                    ProviderKind::Anthropic => matches!(
+                        operation,
+                        GatewayOperation::AnthropicMessages
+                            | GatewayOperation::AnthropicCountTokens
+                    ),
+                    ProviderKind::OpenAi => matches!(
+                        operation,
+                        GatewayOperation::OpenAiResponses | GatewayOperation::OpenAiChatCompletions
+                    ),
                 });
             if !valid_operations
                 || profile.credential_ref.trim().is_empty()
@@ -645,9 +760,17 @@ fn extra_provider_profiles(value: String) -> Result<Vec<ExtraProviderProfile>, C
                     })
                 })
                 .transpose()?;
-            if matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) && secret.is_none() {
+            if matches!(kind, ProviderKind::Gemini | ProviderKind::Xai)
+                && secret.is_none()
+                && !personal
+            {
                 return Err(ConfigError::InvalidExtraProviderProfiles(
                     "gemini and xai require secret_env".to_owned(),
+                ));
+            }
+            if matches!(kind, ProviderKind::Anthropic | ProviderKind::OpenAi) && secret.is_some() {
+                return Err(ConfigError::InvalidExtraProviderProfiles(
+                    "personal provider profiles must not set secret_env".to_owned(),
                 ));
             }
             Ok(ExtraProviderProfile {
@@ -698,6 +821,21 @@ fn valid_origin(value: &str, environment: &str) -> bool {
         && uri.query().is_none()
         && !authority.as_str().contains('@')
         && (secure || development_loopback)
+}
+
+fn validate_capture_pool_budget(
+    total: u32,
+    admin: u32,
+    capture: bool,
+    passthrough: bool,
+) -> Result<(), ConfigError> {
+    let minimum = if passthrough { 3 } else { 4 };
+    if capture && total.saturating_sub(admin) < minimum {
+        return Err(ConfigError::InvalidAdminPoolSize(format!(
+            "content capture requires at least {minimum} data-plane connections"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_pool_budget(total: u32, admin: u32) -> Result<(), ConfigError> {
@@ -1012,6 +1150,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn content_capture_defaults_on_and_requires_explicit_boolean() {
+        assert!(parse_content_capture_enabled(None).unwrap());
+        assert!(parse_content_capture_enabled(Some("true")).unwrap());
+        assert!(!parse_content_capture_enabled(Some("false")).unwrap());
+        assert!(parse_content_capture_enabled(Some("no")).is_err());
+        assert!(parse_content_capture_enabled(Some("")).is_err());
+    }
+
+    #[test]
+    fn content_capture_pool_budget_reserves_scheduler_and_maintenance_connections() {
+        assert!(validate_capture_pool_budget(3, 1, true, false).is_err());
+        assert!(validate_capture_pool_budget(4, 1, true, false).is_err());
+        assert!(validate_capture_pool_budget(5, 1, true, false).is_ok());
+        assert!(validate_capture_pool_budget(3, 1, false, false).is_ok());
+        assert!(validate_capture_pool_budget(3, 1, true, true).is_err());
+        assert!(validate_capture_pool_budget(4, 1, true, true).is_ok());
+    }
+
+    #[test]
     fn optional_provider_keys_in_production() {
         if let Ok(case) = env::var("GATEWAY_CONFIG_TEST_CASE") {
             let parsed = Config::from_env();
@@ -1022,6 +1179,15 @@ mod tests {
                         "OPENAI_API_KEY"
                     ))
                 ));
+            } else if case.starts_with("codex-") {
+                if case == "codex-owner" {
+                    assert_eq!(
+                        parsed.unwrap().codex_owner_user_id,
+                        Some(Uuid::from_u128(1))
+                    );
+                } else {
+                    assert!(matches!(parsed, Err(ConfigError::InvalidCodexOwner)));
+                }
             } else {
                 let mut config = parsed.unwrap();
                 assert_eq!(config.openai_api_key.is_empty(), case != "keys");
@@ -1076,7 +1242,17 @@ mod tests {
             }
             return;
         }
-        for case in ["absent", "blank", "oauth", "token", "keys", "placeholder"] {
+        for case in [
+            "absent",
+            "blank",
+            "oauth",
+            "token",
+            "keys",
+            "placeholder",
+            "codex-missing",
+            "codex-invalid",
+            "codex-owner",
+        ] {
             let spool =
                 std::env::temp_dir().join(format!("gateway-config-{}-{case}", Uuid::new_v4()));
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -1120,6 +1296,14 @@ mod tests {
                 }
                 "placeholder" => {
                     command.env("OPENAI_API_KEY", "replace-me");
+                }
+                "codex-missing" | "codex-invalid" | "codex-owner" => {
+                    command.env("CODEX_AUTH_FILE", "/fixture/auth.json");
+                    if case == "codex-invalid" {
+                        command.env("CODEX_OWNER_USER_ID", "invalid");
+                    } else if case == "codex-owner" {
+                        command.env("CODEX_OWNER_USER_ID", Uuid::from_u128(1).to_string());
+                    }
                 }
                 _ => {}
             }
@@ -1325,9 +1509,27 @@ mod tests {
     }
 
     #[test]
+    fn ollama_native_messages_requires_a_separate_profile() {
+        let native = r#"[{"kind":"ollama","credential_ref":"none://ollama-messages","provider_key":"local-claude","base_url":"http://127.0.0.1:11434","operations":["anthropic_messages"]}]"#;
+        assert!(extra_provider_profiles(native.to_owned(), false).is_ok());
+        for operations in [
+            r#"["anthropic_messages","openai_responses"]"#,
+            r#"["anthropic_count_tokens"]"#,
+        ] {
+            let invalid = native.replace(r#"["anthropic_messages"]"#, operations);
+            assert!(extra_provider_profiles(invalid, false).is_err());
+        }
+        assert!(extra_provider_profiles(native.replace("ollama", "vllm"), false).is_err());
+    }
+
+    #[test]
     fn extra_provider_profiles_are_typed_and_local_auth_is_optional() {
+        let personal_anthropic = r#"[{"kind":"anthropic","credential_ref":"env://ANTHROPIC_PERSONAL_API","provider_key":"anthropic-api","base_url":"https://example.test","operations":["anthropic_messages"]}]"#;
+        assert!(extra_provider_profiles(personal_anthropic.to_owned(), true).is_ok());
+        assert!(extra_provider_profiles(personal_anthropic.to_owned(), false).is_err());
         let profiles = extra_provider_profiles(
             r#"[{"kind":"vllm","credential_ref":"none://vllm","provider_key":"local-vllm","base_url":"http://127.0.0.1:8000/","operations":["openai_responses"],"secret_env":null}]"#.to_owned(),
+            false,
         )
         .unwrap();
         assert_eq!(profiles.len(), 1);
@@ -1336,10 +1538,12 @@ mod tests {
         assert!(profiles[0].secret.is_none());
         assert!(extra_provider_profiles(
             r#"[{"kind":"unknown","credential_ref":"x","provider_key":"x","base_url":"http://localhost","operations":["openai_responses"]}]"#.to_owned(),
+            false,
         )
         .is_err());
         assert!(extra_provider_profiles(
             r#"[{"kind":"gemini","credential_ref":"x","provider_key":"x","base_url":"https://example.test","operations":["openai_responses"]}]"#.to_owned(),
+            false,
         )
         .is_err());
     }

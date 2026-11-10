@@ -2,6 +2,10 @@
 
 用途：`loops/gateway-completion.loop.md` 的各 step 細節。順序與狀態以 loop 為準。
 
+## 新增產品要求（2026-10-27）
+
+自動選模須對齊 Copilot Auto，並以同任務比較證明改善；完整能力清單、實作順序與勝出判準見 [選模要求](routing.md#copilot-auto-對齊與超越目標2026-10-27)。這是新增待交付範圍，既有 S11 的旁路完成及本計畫原有收尾完成都不代表這項要求已完成。先補單模型選擇與比較證據，再接 S07、S08 的分派整合；保留既有未提交工作與安全限制。
+
 ## 前提
 - 線上容器跑 `keyless-c8158e5d2089`，只存在本機分支 `feature/optional-provider-keys`（`a5ea96d`、`c8158e5`，作者 Policy Test）。
 - 遠端沒有 `dev`，以 main 為底。

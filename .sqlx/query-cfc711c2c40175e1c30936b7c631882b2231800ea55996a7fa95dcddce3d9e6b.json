@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH p AS (\n    UPDATE providers SET base_url = $1 WHERE tenant_id = $2 AND provider_key = 'anthropic-test'\n    RETURNING id\n)\nINSERT INTO models (id, tenant_id, provider_id, public_model_id, provider_model_id, display_name, supported_operations, lifecycle_state)\nSELECT '00000000-0000-0000-0000-000000001001', $2, id, 'group-model', 'upstream-model', 'group', ARRAY['anthropic_messages'], 'active' FROM p;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cfc711c2c40175e1c30936b7c631882b2231800ea55996a7fa95dcddce3d9e6b"
+}

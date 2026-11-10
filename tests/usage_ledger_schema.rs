@@ -7,6 +7,13 @@ const REQUEST_TWO: Uuid = Uuid::from_u128(3);
 const ATTEMPT_ONE: Uuid = Uuid::from_u128(4);
 
 #[sqlx::test]
+async fn batched_quota_reconciliation_sums_each_window_once(pool: PgPool) {
+    pool.execute(include_str!("quota_batch_reconciliation.sql"))
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
 async fn ledger_schema_is_tenant_safe_idempotent_and_append_only(pool: PgPool) {
     insert_request(&pool, REQUEST_ONE, "request-one").await;
     insert_request(&pool, REQUEST_TWO, "request-two").await;

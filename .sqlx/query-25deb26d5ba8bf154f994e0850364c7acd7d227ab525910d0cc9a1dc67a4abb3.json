@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (id, tenant_id, display_name) VALUES ($1, $2, 'replay-test')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "25deb26d5ba8bf154f994e0850364c7acd7d227ab525910d0cc9a1dc67a4abb3"
+}
