@@ -21,6 +21,7 @@
 
 | 文件 | 什麼時候讀 | 產出段落 |
 | --- | --- | --- |
+| `docs/directory-structure.md` | 建檔、建資料夾或搬檔之前；`./scripts/check.sh layout` 會擋未登記的頂層目錄 | — |
 | `docs/work-breakdown.md` | 要知道整體切成哪些段落、依賴順序、現在該做哪一段 | — |
 | `docs/engineering-standards.md` | 要動程式碼、寫測試、加指標、開 PR 之前 | — |
 | `docs/feasibility.md` | 有人問「這件事到底做不做得到」、或要新增一個 Client | — |

@@ -2,10 +2,11 @@
 # Quality gates. Run the cheap ones while iterating, the full set before a PR.
 #
 #   ./scripts/check.sh fmt         # rewrite formatting
-#   ./scripts/check.sh gate        # fast: fmt-check + clippy + loops + bans
+#   ./scripts/check.sh gate        # fast: fmt-check + clippy + loops + bans + layout
 #   ./scripts/check.sh loops       # loop-file discipline (sections, 200-line body)
 #   ./scripts/check.sh bans        # banned constructs in production code
 #   ./scripts/check.sh deadfiles   # .rs files no `mod` declaration reaches
+#   ./scripts/check.sh layout      # root / src top-level directory allowlist
 #   ./scripts/check.sh clients     # client compatibility document contract
 #   ./scripts/check.sh frontend    # admin UI lint + types + tests + build
 #   ./scripts/check.sh secrets     # run the gateway and scan its log for secrets
@@ -313,6 +314,60 @@ deadfiles() {
   return "$failed"
 }
 
+in_list() {
+  local want="$1" item
+  shift
+  for item in "$@"; do [ "$item" = "$want" ] && return 0; done
+  return 1
+}
+
+layout() {
+  step "directory layout"
+  local root_dirs=(.github .repo-policy .sqlx deploy docs loops migrations queries scripts src tests web)
+  local root_files=(.dockerignore .env.example .gitattributes .gitignore AGENTS.md CLAUDE.md Cargo.lock Cargo.toml DEVELOPMENT.md Dockerfile LICENSE README.md build.rs)
+  local src_dirs=(adapters admin orchestration routes services)
+  local doc=docs/directory-structure.md
+  local paths kind name failed=0
+
+  if [ -n "${1:-}" ]; then
+    paths="$(cat "$1")"
+  else
+    paths="$(git ls-files -co --exclude-standard | sort -u | grep -vxFf <(git ls-files -d) || true)"
+  fi
+
+  while read -r kind name; do
+    if [ "$kind" = d ] && ! in_list "$name" "${root_dirs[@]}"; then
+      echo "$name/: top-level directory is not on the allowlist -- add it here and to $doc in the same change"
+      failed=1
+    elif [ "$kind" = f ] && ! in_list "$name" "${root_files[@]}"; then
+      echo "$name: file in the repository root is not on the allowlist -- implementation and notes do not go in the root"
+      failed=1
+    fi
+  done < <(printf '%s\n' "$paths" | awk -F/ 'NF>1{print "d", $1} NF==1&&$0!=""{print "f", $1}' | sort -u)
+
+  while read -r name; do
+    if ! in_list "$name" "${src_dirs[@]}"; then
+      echo "src/$name/: src top-level directory is not on the allowlist -- extend an existing module, or add it here and to the document in the same change"
+      failed=1
+    fi
+  done < <(printf '%s\n' "$paths" | awk -F/ '$1=="src"&&NF>2{print $2}' | sort -u)
+
+  while read -r name; do
+    echo "$name: catch-all directory name (misc/temp/tmp/others/helpers/utils/common) -- name the responsibility instead"
+    failed=1
+  done < <(printf '%s\n' "$paths" | grep -E '(^|/)(misc|temp|tmp|others|helpers|utils|common)/' | sed -E 's#((^|.*/)(misc|temp|tmp|others|helpers|utils|common))/.*#\1#' | sort -u || true)
+
+  for name in "${root_dirs[@]}"; do
+    grep -qF "\`$name/\`" "$doc" || { echo "$doc: top-level directory '$name/' is not described"; failed=1; }
+  done
+  for name in "${src_dirs[@]}"; do
+    grep -qF "\`src/$name/\`" "$doc" || { echo "$doc: 'src/$name/' is not described"; failed=1; }
+  done
+
+  [ "$failed" = 0 ] && echo "directory layout ok"
+  return "$failed"
+}
+
 clients() {
   step "client compatibility"
   ./scripts/check-client-compatibility.sh
@@ -321,10 +376,11 @@ clients() {
 case "${1:-gate}" in
   fmt)       fmt ;;
   fmt-check) fmt_check ;;
-  gate)      fmt_check; clippy_fast; loops; bans; deadfiles; clients ;;
+  gate)      fmt_check; clippy_fast; loops; bans; deadfiles; layout; clients ;;
   loops)     loops ;;
   bans)      shift; bans "$@" ;;
   deadfiles) shift; deadfiles "$@" ;;
+  layout)    shift; layout "$@" ;;
   clients)   clients ;;
   frontend)  frontend ;;
   secrets)   step "log secrets"; ./scripts/check-log-secrets.sh ;;
@@ -343,9 +399,9 @@ PY
     python3 -m unittest scripts/test_backup_capture.py scripts/test_backup_docker_orphan.py scripts/test_capture_backup.py scripts/test_capture_backup_freshness.py scripts/test_capture_backup_source_state.py scripts/test_capture_storage_identity.py scripts/test_capture_storage_identity_live.py scripts/test_capture_database_identity_live.py scripts/test_ledger_backup_source.py scripts/test_ledger_backup_source_live.py scripts/test_ledger_watchdog.py scripts/test_legacy_archive_stage.py scripts/test_legacy_backup_source.py scripts/test_legacy_backup_live.py scripts/test_capture_restore.py scripts/test_restore_ledger_backup.py scripts/test_restore_ledger_live.py scripts/test_erasure_witness.py
     if [[ "${RUN_ERASURE_WITNESS_DOCKER:-0}" == "1" ]]; then python3 scripts/test_remote_witness_tls.py; fi
     python3 -m unittest discover -s scripts -p "test_sync_codex_auth.py"
-    frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; clients
+    frontend; fmt_check; clippy_full; test_all; loops; bans; deadfiles; layout; clients
     step "log secrets"; ./scripts/check-log-secrets.sh
     ./scripts/check-selftest.sh
     ;;
-  *) sed -n '2,11p' "$0"; exit 2 ;;
+  *) sed -n '2,14p' "$0"; exit 2 ;;
 esac
