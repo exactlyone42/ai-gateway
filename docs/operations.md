@@ -24,7 +24,7 @@ gateway fails closed at startup when neither is present.
 
 ## Usage ledger migration
 
-用量帳本的九項唯讀驗收查詢放在 [查詢腳本](../scripts/usage-ledger-queries.sql)。可在同一個 `psql` 連線載入後，依腳本標示的參數執行；測試也會載入這份腳本，確認九項查詢可執行。
+用量帳本的九項唯讀驗收查詢放在 [查詢腳本](usage-ledger-queries.sql)。可在同一個 `psql` 連線載入後，依腳本標示的參數執行；測試也會載入這份腳本，確認九項查詢可執行。
 
 `20260910220000_usage_ledger.sql` is expand-only: it adds ledger tables, indexes,
 constraints, append-only triggers, and identity deletion guards. Identity rows
