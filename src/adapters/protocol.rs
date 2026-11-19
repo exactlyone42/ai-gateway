@@ -927,6 +927,7 @@ pub(crate) fn chat_extras(options: &ProviderOptions) -> Option<ChatExtras> {
                     extras.include_usage = flag.as_bool()?;
                 }
             }
+            "top_p" | "stop" | "user" | "seed" | "frequency_penalty" | "presence_penalty" => {}
             _ => return None,
         }
     }

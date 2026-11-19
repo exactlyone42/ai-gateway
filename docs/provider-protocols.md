@@ -155,9 +155,11 @@ operation.
 Chat Completions to Anthropic accepts `messages`, `tools`, `tool_choice`,
 `max_tokens` or `max_completion_tokens` (required, no default is invented),
 `stream`, `temperature` (0 to 1; a larger value is rejected instead of being
-clamped), `n` only when it equals 1, and `stream_options.include_usage`. Every
-other field, including `top_p`, `stop`, `user` and the `developer` role, is
-rejected with 400. Consecutive `tool` messages become one Anthropic user message
+clamped), `n` only when it equals 1, and `stream_options.include_usage`. The
+fields `reasoning_effort`, `top_p`, `stop`, `user`, `seed`, `frequency_penalty`
+and `presence_penalty` are accepted and dropped, never sent upstream, so a
+harness that always sends them keeps working. Every other field, including the
+`developer` role, is rejected with 400. Consecutive `tool` messages become one Anthropic user message
 holding one `tool_result` per call. The response uses `finish_reason`
 `tool_calls`, `stop` or `length` for `tool_use`, `end_turn` or `max_tokens`, and
 reports `prompt_tokens` as input plus cached plus cache-write tokens. Streaming
