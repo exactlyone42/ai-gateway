@@ -1453,6 +1453,86 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn chat_completions_passes_anthropic_rate_limit_through_with_original_status(
+        pool: PgPool,
+    ) {
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "7"), ("content-type", "application/json")],
+                    r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'anthropic-test', 'Anthropic chat target', 'anthropic',
+                    $3, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, supports_streaming,
+                supports_tools, max_output_tokens, lifecycle_state
+            ) SELECT $4, $2, id, 'anthropic-chat', 'provider-anthropic-chat',
+                     'Anthropic chat', ARRAY['anthropic_messages'], true, true, 4096, 'active'
+              FROM inserted_provider
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+
+        for stream in [false, true] {
+            let reply = openai::execute(
+                &state,
+                RequestContext {
+                    principal: principal(tenant_id),
+                    received_at: Utc::now(),
+                    path_and_query: "/v1/chat/completions".to_owned(),
+                    headers: HeaderMap::new(),
+                    body: Bytes::from(format!(
+                        r#"{{"model":"anthropic-chat","max_tokens":16,"stream":{stream},"messages":[{{"role":"user","content":"hi"}}]}}"#
+                    )),
+                    operation: OpenAiOperation::ChatCompletions,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(reply.headers.get("retry-after").unwrap(), "7");
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(reply.body, 64 * 1024).await.unwrap()).unwrap();
+            assert_eq!(body["error"]["type"], "rate_limit_error");
+            assert_eq!(body["error"]["message"], "slow down");
+        }
+
+        upstream_task.abort();
+        let _ = std::fs::remove_dir_all(spool_dir);
+    }
+
+    #[sqlx::test]
     async fn chat_completions_reaches_anthropic_with_tool_calls_streaming_and_clean_errors(
         pool: PgPool,
     ) {
