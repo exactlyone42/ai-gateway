@@ -41,7 +41,7 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
 - 計畫審查裁定：採納 exact target-operation 三方授權、轉譯驗證必須早於 quota、跨 Provider
   header 隔離、嚴格 SSE 狀態機、gateway response ID 與 target usage accounting；W15 v1 對
   reasoning 明確 400，不宣稱可跨協定保留 hidden state。
-- 支援矩陣只含 `Anthropic Messages ↔ OpenAI Responses`。Chat Completions、Count Tokens、
+- 支援矩陣含 `Anthropic Messages ↔ OpenAI Responses`，以及 2026-11-19 新增的 `Chat Completions → Anthropic Messages`（不支援 `n` 大於 1）。Count Tokens、
   background／conversation state、image、opaque/provider extension、未知 JSON Schema keyword
   皆拒絕；不做 silent drop 或 warning-only degradation。
 - 每項先跑精確 contract test；PR 前跑 `./scripts/check.sh all`、loops 與 `git diff --check`。
@@ -69,7 +69,7 @@ Anthropic 協定的 Client 能用 OpenAI 模型，反之亦然——而且能力
   `unreachable!` 後，前端 2、Rust 197、schema 5、bans self-test 29 全數通過。
 
 ## 已確定不可行
-- Chat Completions → Anthropic：其 `n`／choice topology 不可無損映成單一 Messages response。
+- Chat Completions `n` 大於 1 → Anthropic：choice topology 不可無損映成單一 Messages response；`n` 省略或等於 1 時可轉譯（2026-11-19 使用者決定不支援 `n`，只保留 `n` 大於 1 回 400）。
 - Count Tokens → OpenAI：OpenAI Responses 沒有等價 count-only operation。
 - Reasoning／extended thinking：兩邊 hidden continuation/signature 語意不同；W15 v1 一律 400。
 - Anthropic client → OpenAI target 串流：OpenAI 到 terminal 才提供 input usage，無法如實產生

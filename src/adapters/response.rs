@@ -84,6 +84,9 @@ pub fn transcode_buffered_with_outcome(
         GatewayOperation::OpenAiResponses => {
             encode_openai(response, gateway_response_id, public_model, source_request)?
         }
+        GatewayOperation::OpenAiChatCompletions => {
+            encode_chat(response, gateway_response_id, public_model)?
+        }
         _ => return Err(GatewayError::UnsupportedRequest),
     };
     let body = serde_json::to_vec(&value)
@@ -499,6 +502,71 @@ pub(crate) fn openai_response_envelope(
         "user": null,
         "metadata": {}
     })
+}
+
+pub(crate) fn chat_finish_reason(reason: &str) -> &'static str {
+    match reason {
+        "tool_use" => "tool_calls",
+        "max_tokens" | "max_output_tokens" | "length" => "length",
+        _ => "stop",
+    }
+}
+
+pub(crate) fn chat_usage(usage: &CanonicalUsage) -> Value {
+    let prompt_tokens = usage
+        .input_tokens
+        .saturating_add(usage.cached_input_tokens)
+        .saturating_add(usage.cache_write_input_tokens);
+    let completion_tokens = usage.output_tokens.saturating_add(usage.reasoning_tokens);
+    json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens.saturating_add(completion_tokens)
+    })
+}
+
+fn encode_chat(
+    response: CanonicalResponse,
+    response_id: &str,
+    public_model: &str,
+) -> Result<Value, GatewayError> {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    for message in response.messages {
+        for item in message.content {
+            match item {
+                CanonicalContent::Text { text: part, .. } => text.push_str(&part),
+                CanonicalContent::ToolCall(call) => tool_calls.push(json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": complete_arguments(call.arguments)?.to_string()
+                    }
+                })),
+                _ => return Err(GatewayError::UpstreamProtocol),
+            }
+        }
+    }
+    let mut message = json!({
+        "role": "assistant",
+        "content": if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { Value::String(text) }
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+    Ok(json!({
+        "id": response_id,
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": public_model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": chat_finish_reason(response.finish_reason.as_deref().unwrap_or("end_turn"))
+        }],
+        "usage": chat_usage(&response.usage)
+    }))
 }
 
 fn flush_openai_text(
@@ -1035,5 +1103,78 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn anthropic_response_becomes_chat_completion_with_tool_calls_and_usage() {
+        let body = br#"{
+            "id":"msg_target_secret",
+            "type":"message",
+            "role":"assistant",
+            "model":"target-model",
+            "content":[
+                {"type":"text","text":"hello"},
+                {"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"x"}}
+            ],
+            "stop_reason":"tool_use",
+            "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}
+        }"#;
+        let encoded = transcode_buffered(
+            GatewayOperation::AnthropicMessages,
+            GatewayOperation::OpenAiChatCompletions,
+            body,
+            "chatcmpl_apg_public",
+            "public-model",
+            &source_request_from_body(
+                GatewayOperation::OpenAiChatCompletions,
+                br#"{"model":"public","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["object"], "chat.completion");
+        assert_eq!(value["id"], "chatcmpl_apg_public");
+        assert_eq!(value["model"], "public-model");
+        let choice = &value["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert_eq!(choice["message"]["role"], "assistant");
+        assert_eq!(choice["message"]["content"], "hello");
+        let call = &choice["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["type"], "function");
+        assert_eq!(call["function"]["name"], "lookup");
+        assert_eq!(call["function"]["arguments"], r#"{"q":"x"}"#);
+        assert_eq!(value["usage"]["prompt_tokens"], 9);
+        assert_eq!(value["usage"]["completion_tokens"], 3);
+        assert_eq!(value["usage"]["total_tokens"], 12);
+        assert!(
+            !String::from_utf8(encoded.to_vec())
+                .unwrap()
+                .contains("msg_target_secret")
+        );
+    }
+
+    #[test]
+    fn chat_finish_reason_maps_end_turn_to_stop_and_max_tokens_to_length() {
+        for (stop_reason, expected) in [("end_turn", "stop"), ("max_tokens", "length")] {
+            let body = format!(
+                r#"{{"id":"msg_x","type":"message","role":"assistant","model":"m","content":[{{"type":"text","text":"hi"}}],"stop_reason":"{stop_reason}","usage":{{"input_tokens":1,"output_tokens":1}}}}"#
+            );
+            let encoded = transcode_buffered(
+                GatewayOperation::AnthropicMessages,
+                GatewayOperation::OpenAiChatCompletions,
+                body.as_bytes(),
+                "chatcmpl_apg_public",
+                "public-model",
+                &source_request_from_body(
+                    GatewayOperation::OpenAiChatCompletions,
+                    br#"{"model":"public","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}"#,
+                ),
+            )
+            .unwrap();
+            let value: Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(value["choices"][0]["finish_reason"], expected);
+            assert!(value["choices"][0]["message"].get("tool_calls").is_none());
+        }
     }
 }
