@@ -637,12 +637,14 @@ mod tests {
             .is_err()
         );
 
-        for (source, target) in [(
-            GatewayOperation::AnthropicCountTokens,
-            GatewayOperation::OpenAiResponses,
-        )] {
-            assert!(super::validate_cross_request(&vendor, source, target).is_err());
-        }
+        assert!(
+            super::validate_cross_request(
+                &vendor,
+                GatewayOperation::AnthropicCountTokens,
+                GatewayOperation::OpenAiResponses,
+            )
+            .is_err()
+        );
     }
 
     #[test]
