@@ -254,7 +254,16 @@ closed. Optional analytics may fail open. Provider routing fails with a clear
 error when no approved deployment is healthy; it never falls back to an
 unapproved model or credential source.
 
-## 事故判定與搬家驗收
+## 容器連主機上的 ollama
+
+Gateway 沒有把 ollama 位址寫死在程式裡。位址放在兩個設定值，預設都是 `http://127.0.0.1:11434`：環境變數 `EXTRA_PROVIDER_PROFILES_JSON` 內該項目的 `base_url`，以及資料庫 `providers` 表同一個 `provider_key` 的 `base_url`（用 Admin API 改）。兩處要寫成同一個位址。
+
+問題在網路：Gateway 跑在容器裡，容器裡的 `127.0.0.1` 是容器自己，連不到主機。而主機的 ollama 預設只聽主機的 `127.0.0.1:11434`（2026-11-19 以 `ss -ltn` 確認），所以容器就算改了位址也連不上。要連通需要兩件事：
+
+1. 讓主機 ollama 聽容器能到的位址，例如 `OLLAMA_HOST=0.0.0.0:11434`，或只聽 Docker 網橋位址（目前 `agent-pool-gateway_default` 網橋位址是 `172.22.0.1`，重建網路後可能變，用 `docker network inspect` 重查）。
+2. 把上面兩處 `base_url` 改成 `http://172.22.0.1:11434`（或在 `deploy/docker-compose.yml` 為服務加 `extra_hosts: ["host.docker.internal:host-gateway"]` 後用 `http://host.docker.internal:11434`）。
+
+聽 `0.0.0.0` 會讓同網段其他機器也連得到 ollama，沒有金鑰保護；只聽網橋位址則主機上其他程式原本用的 `127.0.0.1:11434` 會連不上。選哪一個、主機防火牆怎麼設，屬於部署決定，本文件不替你改，Gateway 程式也沒有動。
 
 - Gateway 事故以使用者體感判定：連不上、常出錯、變慢、容易中斷，或任何明顯降低使用品質的情況都要記錄；健康頁亮綠燈也不能排除事故。
 - 事故紀錄先用白話交代「原本怎麼運作、哪一步接錯、使用者看到什麼、怎麼處理、如何防止」，讓初階工程師能照著理解與處理；技術名稱與數字只放在後面作查證資料。
