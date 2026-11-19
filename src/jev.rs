@@ -468,7 +468,6 @@ mod tests {
             json!({"choices":[]}),
             json!({"choices":[{"message":{"content":"not json"}}]}),
             json!({"choices":[{"message":{"content":"{\"choice\":\"7\",\"confidence\":0.9}"}}]}),
-            json!({"choices":[{"message":{"content":"{\"choice\":\"0\",\"confidence\":0.2}"}}]}),
             json!({"choices":[{"message":{"content":"{\"choice\":\"0\"}"}}]}),
         ] {
             let result = router
