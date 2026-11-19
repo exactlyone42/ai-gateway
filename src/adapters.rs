@@ -45,7 +45,6 @@ pub fn validate_for_provider(
     if (request.stream && !capabilities.streaming)
         || (!request.tools.is_empty() && !capabilities.tools)
         || (request.structured_output.is_some() && !capabilities.structured_output)
-        || (request.reasoning.is_some() && !capabilities.reasoning)
     {
         return Err(GatewayError::UnsupportedRequest);
     }
@@ -58,6 +57,11 @@ pub fn validate_for_provider(
     };
     if !selection.supports_target_operation(target_operation) {
         return Err(GatewayError::ModelForbidden);
+    }
+    let drops_chat_extras = source_operation == GatewayOperation::OpenAiChatCompletions
+        && target_operation == GatewayOperation::AnthropicMessages;
+    if request.reasoning.is_some() && !capabilities.reasoning && !drops_chat_extras {
+        return Err(GatewayError::UnsupportedRequest);
     }
     let translated = source_operation != target_operation;
     if translated {
@@ -93,7 +97,9 @@ fn validate_cross_request(
             GatewayOperation::OpenAiChatCompletions,
             GatewayOperation::AnthropicMessages
         )
-    ) || request.reasoning.is_some()
+    ) || (request.reasoning.is_some()
+        && !(source == GatewayOperation::OpenAiChatCompletions
+            && target == GatewayOperation::AnthropicMessages))
         || !(options_are_empty(&request.provider_options)
             || (source == GatewayOperation::OpenAiChatCompletions
                 && protocol::chat_extras(&request.provider_options).is_some()))
@@ -1051,10 +1057,15 @@ mod tests {
             )
             .is_ok()
         );
-        let rejected: [&'static [u8]; 5] = [
+        assert!(
+            chat_to_anthropic(
+                br#"{"model":"public","max_tokens":8,"reasoning_effort":"high","top_p":0.9,"stop":["x"],"user":"u","messages":[{"role":"user","content":"x"}]}"#
+            )
+            .is_ok()
+        );
+        let rejected: [&'static [u8]; 4] = [
             br#"{"model":"public","max_tokens":8,"n":2,"messages":[{"role":"user","content":"x"}]}"#,
             br#"{"model":"public","max_tokens":8,"temperature":1.5,"messages":[{"role":"user","content":"x"}]}"#,
-            br#"{"model":"public","max_tokens":8,"top_p":0.9,"messages":[{"role":"user","content":"x"}]}"#,
             br#"{"model":"public","max_tokens":8,"stream_options":{"continuous_usage_stats":true},"messages":[{"role":"user","content":"x"}]}"#,
             br#"{"model":"public","messages":[{"role":"user","content":"x"}]}"#,
         ];

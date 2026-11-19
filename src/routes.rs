@@ -4759,7 +4759,7 @@ mod tests {
         let buffered = openai::execute(
             &state,
             chat(format!(
-                r#"{{"model":"anthropic-chat","max_tokens":64,{tools},"messages":[{{"role":"system","content":"rules"}},{{"role":"user","content":"find it"}},{{"role":"assistant","content":null,"tool_calls":[{{"id":"call_a","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}},{{"id":"call_b","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"call_a","content":"one"}},{{"role":"tool","tool_call_id":"call_b","content":"two"}}]}}"#
+                r#"{{"model":"anthropic-chat","max_tokens":64,"reasoning_effort":"high","top_p":0.9,"stop":["z"],"user":"u",{tools},"messages":[{{"role":"system","content":"rules"}},{{"role":"user","content":"find it"}},{{"role":"assistant","content":null,"tool_calls":[{{"id":"call_a","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}},{{"id":"call_b","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"call_a","content":"one"}},{{"role":"tool","tool_call_id":"call_b","content":"two"}}]}}"#
             )),
         )
         .await
@@ -4826,6 +4826,15 @@ mod tests {
             let (headers, request) = &seen[0];
             assert_eq!(request["model"], "provider-anthropic-chat");
             assert_eq!(request["max_tokens"], 64);
+            for ignored in [
+                "reasoning_effort",
+                "top_p",
+                "stop",
+                "user",
+                "stop_sequences",
+            ] {
+                assert!(request.get(ignored).is_none(), "{ignored}");
+            }
             assert_eq!(request["system"][0]["text"], "rules");
             assert_eq!(request["tools"][0]["name"], "lookup");
             assert_eq!(request["messages"].as_array().unwrap().len(), 3);

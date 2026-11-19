@@ -207,6 +207,7 @@ pub fn parse_decision(
                 streaming: false,
                 tools: false,
                 reasoning: node.reasoning,
+                reasoning_ignored_by_anthropic: false,
                 images: node.images,
                 structured_output: node.structured_output,
             },
