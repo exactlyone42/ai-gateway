@@ -111,7 +111,10 @@ pub async fn admit(
     }
     let original_candidates = candidates.clone();
     let classification_started = std::time::Instant::now();
-    let task_decision = if !subscription_only && operation != GatewayOperation::AnthropicCountTokens
+    let quality_requested = prepared.selector.quality().is_some();
+    let task_decision = if quality_requested
+        && !subscription_only
+        && operation != GatewayOperation::AnthropicCountTokens
     {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -159,26 +162,14 @@ pub async fn admit(
     }
     let mut jev_attempted = false;
     let mut jev_elapsed_ms = None;
-    let routing_reason = if !subscription_only
+    let routing_reason = if quality_requested
+        && !subscription_only
         && operation != GatewayOperation::AnthropicCountTokens
         && let Some(router) = &state.jev
     {
         jev_attempted = true;
         let jev_started = std::time::Instant::now();
-        let mut routing_candidates = if prepared.selector.quality().is_some() {
-            candidates
-        } else {
-            state
-                .models
-                .routing_candidates(
-                    prepared.rejection.principal.tenant_id,
-                    prepared.rejection.principal.is_development_bootstrap(),
-                    operation,
-                    required,
-                )
-                .await
-                .unwrap_or_default()
-        };
+        let mut routing_candidates = candidates;
         routing_candidates.retain(|candidate| {
             prepared.policy.allows_model(&candidate.public_model_id)
                 && validate_for_provider(request, candidate).is_ok()

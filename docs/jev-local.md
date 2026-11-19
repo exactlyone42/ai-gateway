@@ -12,8 +12,8 @@ Gateway 位於 `http://127.0.0.1:18080`，使用獨立資料庫 `gateway_jev_loc
 
 ## Jev 分派
 
-此版呼叫 TypeSafe 官方 API，由 Gateway 把原始模型名稱視為品質要求，再由 Jev 選擇實際模型。
-啟用後，一般模型請求也會先以所有符合能力與政策的模型作為候選，不會因 Client 固定送 Sonnet 就跳過選模。
+此版呼叫 TypeSafe 官方 API。只有請求的模型寫成 `quality:<等級>`（如 `gateway-chat --auto`）時，Gateway 才會讓 Jev 在該等級以下的候選中選模。
+Claude Code、Codex 等直接指定模型名稱的請求不做任何模型判斷，請求什麼就用什麼。
 不應送出禁止外傳的企業資料。TypeSafe 費用不包含於本機推論；本次沒有付費實測。
 
 ## 分派及失敗行為
