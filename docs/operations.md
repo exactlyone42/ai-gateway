@@ -185,6 +185,17 @@ closed. Optional analytics may fail open. Provider routing fails with a clear
 error when no approved deployment is healthy; it never falls back to an
 unapproved model or credential source.
 
+## 容器連主機上的 ollama
+
+Gateway 沒有把 ollama 位址寫死在程式裡。位址放在兩個設定值，預設都是 `http://127.0.0.1:11434`：環境變數 `EXTRA_PROVIDER_PROFILES_JSON` 內該項目的 `base_url`，以及資料庫 `providers` 表同一個 `provider_key` 的 `base_url`（用 Admin API 改）。兩處要寫成同一個位址。
+
+問題在網路：Gateway 跑在容器裡，容器裡的 `127.0.0.1` 是容器自己，連不到主機。而主機的 ollama 預設只聽主機的 `127.0.0.1:11434`（2026-11-19 以 `ss -ltn` 確認），所以容器就算改了位址也連不上。要連通需要兩件事：
+
+1. 讓主機 ollama 聽容器能到的位址，例如 `OLLAMA_HOST=0.0.0.0:11434`，或只聽 Docker 網橋位址（目前 `agent-pool-gateway_default` 網橋位址是 `172.22.0.1`，重建網路後可能變，用 `docker network inspect` 重查）。
+2. 把上面兩處 `base_url` 改成 `http://172.22.0.1:11434`（或在 `deploy/docker-compose.yml` 為服務加 `extra_hosts: ["host.docker.internal:host-gateway"]` 後用 `http://host.docker.internal:11434`）。
+
+聽 `0.0.0.0` 會讓同網段其他機器也連得到 ollama，沒有金鑰保護；只聽網橋位址則主機上其他程式原本用的 `127.0.0.1:11434` 會連不上。選哪一個、主機防火牆怎麼設，屬於部署決定，本文件不替你改，Gateway 程式也沒有動。
+
 ## 供應商金鑰可省略
 
 Gateway 的登入驗證仍然保留。未設定 OpenAI API key 時不建立該供應商路徑；Anthropic 依既有 Client 登入轉送、伺服器 Auth Token、API key 的順序選擇，三者都沒有時不建立該路徑。缺少供應商設定不應讓整台 Gateway 無法啟動。
