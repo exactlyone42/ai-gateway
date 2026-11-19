@@ -224,12 +224,13 @@ impl CapabilityRequirements {
                         CanonicalContent::ToolCall(_) | CanonicalContent::ToolResult { .. }
                     )
                 }),
-            reasoning: request.reasoning.as_ref().is_some_and(|reasoning| {
-                reasoning.enabled == Some(true)
-                    || reasoning.effort.is_some()
-                    || reasoning.budget_tokens.is_some()
-                    || reasoning.summary.is_some()
-            }),
+            reasoning: request.source_operation() != GatewayOperation::OpenAiChatCompletions
+                && request.reasoning.as_ref().is_some_and(|reasoning| {
+                    reasoning.enabled == Some(true)
+                        || reasoning.effort.is_some()
+                        || reasoning.budget_tokens.is_some()
+                        || reasoning.summary.is_some()
+                }),
             images: has_content(|content| matches!(content, CanonicalContent::Image { .. })),
             structured_output: request.structured_output.is_some(),
         }
@@ -1831,12 +1832,19 @@ mod tests {
             GatewayOperation::OpenAiChatCompletions,
             r#"{"model":"public","stream":true,"reasoning_effort":"high","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"https://example.invalid/a.png"}}]}]}"#,
         );
-        for request in [&anthropic, &responses, &chat] {
+        for request in [&anthropic, &responses] {
             assert_eq!(
                 CapabilityRequirements::from_canonical(request),
                 ALL_CAPABILITIES
             );
         }
+        assert_eq!(
+            CapabilityRequirements::from_canonical(&chat),
+            CapabilityRequirements {
+                reasoning: false,
+                ..ALL_CAPABILITIES
+            }
+        );
     }
 
     #[test]
