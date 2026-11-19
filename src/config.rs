@@ -1119,27 +1119,46 @@ fn scheduler_bool(name: &'static str, default: bool) -> Result<bool, ConfigError
 }
 
 fn load_jev() -> Result<Option<crate::jev::JevConfig>, ConfigError> {
+    use crate::jev::JudgeBackend;
     match setting("JEV_ENABLED").as_deref() {
         Err(_) | Ok("false") => return Ok(None),
         Ok("true") => {}
         _ => return Err(ConfigError::InvalidJev),
     }
-    let api_key =
-        setting("TYPESAFE_API_KEY").map_err(|_| ConfigError::Missing("TYPESAFE_API_KEY"))?;
     let model = setting("JEV_MODEL").map_err(|_| ConfigError::Missing("JEV_MODEL"))?;
-    if api_key.trim().is_empty()
-        || model.trim().is_empty()
-        || model.ends_with("latest")
-        || model.ends_with("preview")
-    {
+    if model.trim().is_empty() || model.ends_with("latest") || model.ends_with("preview") {
         return Err(ConfigError::InvalidJev);
     }
+    let backend = match setting("JEV_BACKEND").as_deref() {
+        Err(_) | Ok("typesafe") => {
+            let api_key = setting("TYPESAFE_API_KEY")
+                .map_err(|_| ConfigError::Missing("TYPESAFE_API_KEY"))?;
+            if api_key.trim().is_empty() {
+                return Err(ConfigError::InvalidJev);
+            }
+            JudgeBackend::Typesafe { api_key }
+        }
+        Ok("openai_compatible") => {
+            let base_url =
+                setting("JEV_BASE_URL").map_err(|_| ConfigError::Missing("JEV_BASE_URL"))?;
+            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                return Err(ConfigError::InvalidJev);
+            }
+            JudgeBackend::OpenAiCompatible {
+                base_url,
+                api_key: setting("JEV_API_KEY")
+                    .ok()
+                    .filter(|key| !key.trim().is_empty()),
+            }
+        }
+        _ => return Err(ConfigError::InvalidJev),
+    };
     let descriptions = serde_json::from_str(
         &setting("JEV_MODEL_DESCRIPTIONS_JSON").unwrap_or_else(|_| "{}".into()),
     )
     .map_err(|_| ConfigError::InvalidJev)?;
     Ok(Some(crate::jev::JevConfig {
-        api_key,
+        backend,
         model,
         descriptions,
     }))

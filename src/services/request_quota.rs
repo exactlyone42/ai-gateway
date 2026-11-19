@@ -26,6 +26,8 @@ struct RoutingMeasurement {
     classification_elapsed_us: Option<u64>,
     jev_attempted: bool,
     jev_elapsed_ms: Option<u64>,
+    jev_confidence: Option<f64>,
+    jev_failure: Option<&'static str>,
 }
 
 pub async fn admit(
@@ -110,7 +112,10 @@ pub async fn admit(
     }
     let original_candidates = candidates.clone();
     let classification_started = std::time::Instant::now();
-    let task_decision = if !subscription_only && operation != GatewayOperation::AnthropicCountTokens
+    let quality_requested = prepared.selector.quality().is_some();
+    let task_decision = if quality_requested
+        && !subscription_only
+        && operation != GatewayOperation::AnthropicCountTokens
     {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -158,26 +163,16 @@ pub async fn admit(
     }
     let mut jev_attempted = false;
     let mut jev_elapsed_ms = None;
-    let routing_reason = if !subscription_only
+    let mut jev_confidence = None;
+    let mut jev_failure = None;
+    let routing_reason = if quality_requested
+        && !subscription_only
         && operation != GatewayOperation::AnthropicCountTokens
         && let Some(router) = &state.jev
     {
         jev_attempted = true;
         let jev_started = std::time::Instant::now();
-        let mut routing_candidates = if prepared.selector.quality().is_some() {
-            candidates
-        } else {
-            state
-                .models
-                .routing_candidates(
-                    prepared.rejection.principal.tenant_id,
-                    prepared.rejection.principal.is_development_bootstrap(),
-                    operation,
-                    required,
-                )
-                .await
-                .unwrap_or_default()
-        };
+        let mut routing_candidates = candidates;
         routing_candidates.retain(|candidate| {
             prepared.policy.allows_model(&candidate.public_model_id)
                 && validate_for_provider(request, candidate).is_ok()
@@ -189,13 +184,19 @@ pub async fn admit(
                             .any(|shortlisted| shortlisted.model_id == candidate.model_id)
                 })
         });
-        let reason = if routing_candidates.is_empty() {
-            None
+        let outcome = if routing_candidates.is_empty() {
+            crate::jev::JevOutcome {
+                failure: Some("no_candidates"),
+                ..Default::default()
+            }
         } else {
             router
                 .select(&state.client, body, &mut routing_candidates)
                 .await
         };
+        jev_confidence = outcome.confidence;
+        jev_failure = outcome.failure;
+        let reason = outcome.reason;
         jev_elapsed_ms = Some(jev_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
         if reason.is_some() {
             candidates = routing_candidates;
@@ -210,6 +211,8 @@ pub async fn admit(
         classification_elapsed_us,
         jev_attempted,
         jev_elapsed_ms,
+        jev_confidence,
+        jev_failure,
     };
     let ranked = state.routing.rank(candidates)?;
     let candidates = ranked.candidates.clone();
@@ -414,6 +417,8 @@ fn task_routing_snapshot(
         "original_model": prepared.requested_model,
         "jev_attempted": measurement.jev_attempted,
         "jev_elapsed_ms": measurement.jev_elapsed_ms,
+        "jev_confidence": measurement.jev_confidence,
+        "jev_failure": measurement.jev_failure,
         "jev_opinion": (routing_reason == "jev").then_some(final_model),
         "final_model": final_model,
         "selection_reason": routing_reason,
