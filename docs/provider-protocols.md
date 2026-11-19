@@ -147,8 +147,21 @@ operation.
 | --- | --- | --- | --- | --- | --- | --- |
 | Anthropic Messages | OpenAI Responses | translate | reject before quota | translate | verified subset | reject 400 |
 | OpenAI Responses | Anthropic Messages | translate | strict state machine | translate | verified subset | reject 400 |
-| OpenAI Chat Completions | Anthropic | reject | reject | reject | reject | reject |
+| OpenAI Chat Completions | Anthropic Messages | translate | strict state machine | translate | reject | reject 400 |
 | Anthropic Count Tokens | OpenAI | reject | reject | reject | reject | reject |
+
+Chat Completions to Anthropic accepts `messages`, `tools`, `tool_choice`,
+`max_tokens` or `max_completion_tokens` (required, no default is invented),
+`stream`, `temperature` (0 to 1; a larger value is rejected instead of being
+clamped), `n` only when it equals 1, and `stream_options.include_usage`. Every
+other field, including `top_p`, `stop`, `user` and the `developer` role, is
+rejected with 400. Consecutive `tool` messages become one Anthropic user message
+holding one `tool_result` per call. The response uses `finish_reason`
+`tool_calls`, `stop` or `length` for `tool_use`, `end_turn` or `max_tokens`, and
+reports `prompt_tokens` as input plus cached plus cache-write tokens. Streaming
+sends a role chunk, tool-call deltas, one chunk with `finish_reason`, an optional
+usage chunk when `include_usage` is true, then `data: [DONE]`. `n` greater than 1
+stays unsupported because Anthropic returns one choice only.
 
 The translated request scanner covers root options, messages, content blocks,
 tool definitions, tool calls/results, structured-output schema, and reasoning.

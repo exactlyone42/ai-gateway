@@ -1453,6 +1453,236 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn chat_completions_reaches_anthropic_with_tool_calls_streaming_and_clean_errors(
+        pool: PgPool,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::<(HeaderMap, serde_json::Value)>::new()));
+        let upstream_seen = Arc::clone(&seen);
+        let upstream = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let seen = Arc::clone(&upstream_seen);
+                async move {
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let streaming = request["stream"] == true;
+                    seen.lock().unwrap().push((headers, request));
+                    if streaming {
+                        let wire = concat!(
+                            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_up_stream\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\n",
+                            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_stream\",\"name\":\"lookup\",\"input\":{}}}\n\n",
+                            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}\n\n",
+                            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"stream\\\"}\"}}\n\n",
+                            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":6}}\n\n",
+                            "data: {\"type\":\"message_stop\"}\n\n"
+                        );
+                        ([("content-type", "text/event-stream")], Body::from(wire)).into_response()
+                    } else {
+                        Json(json!({
+                            "id": "msg_up_buffered",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "provider-anthropic-chat",
+                            "content": [
+                                {"type": "text", "text": "checking"},
+                                {"type": "tool_use", "id": "toolu_buffered", "name": "lookup", "input": {"q": "buffered"}}
+                            ],
+                            "stop_reason": "tool_use",
+                            "usage": {"input_tokens": 21, "output_tokens": 8}
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let tenant_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            WITH inserted_provider AS (
+                INSERT INTO providers (
+                    id, tenant_id, provider_key, display_name, provider_type,
+                    base_url, credential_ref, supported_operations, lifecycle_state
+                ) VALUES (
+                    $1, $2, 'anthropic-test', 'Anthropic chat target', 'anthropic',
+                    $3, 'env://ANTHROPIC_API_KEY', ARRAY['anthropic_messages'], 'active'
+                ) RETURNING id
+            )
+            INSERT INTO models (
+                id, tenant_id, provider_id, public_model_id, provider_model_id,
+                display_name, supported_operations, supports_streaming,
+                supports_tools, max_output_tokens, lifecycle_state
+            ) SELECT $4, $2, id, 'anthropic-chat', 'provider-anthropic-chat',
+                     'Anthropic chat', ARRAY['anthropic_messages'], true, true, 4096, 'active'
+              FROM inserted_provider
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(format!("http://{address}"))
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = test_config();
+        config.anthropic_base_url = format!("http://{address}");
+        config.provider_allowed_tenant_ids = vec![tenant_id];
+        let spool_dir = config.ledger_spool_dir.clone();
+        let state = Arc::new(AppState::new(config, pool.clone()).unwrap());
+        let tools = r#""tools":[{"type":"function","function":{"name":"lookup","description":"find","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}]"#;
+        let chat = |body: String| RequestContext {
+            principal: principal(tenant_id),
+            received_at: Utc::now(),
+            path_and_query: "/v1/chat/completions".to_owned(),
+            headers: HeaderMap::new(),
+            body: Bytes::from(body),
+            operation: OpenAiOperation::ChatCompletions,
+        };
+
+        let buffered = openai::execute(
+            &state,
+            chat(format!(
+                r#"{{"model":"anthropic-chat","max_tokens":64,{tools},"messages":[{{"role":"system","content":"rules"}},{{"role":"user","content":"find it"}},{{"role":"assistant","content":null,"tool_calls":[{{"id":"call_a","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}},{{"id":"call_b","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"call_a","content":"one"}},{{"role":"tool","tool_call_id":"call_b","content":"two"}}]}}"#
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(buffered.status, StatusCode::OK);
+        let buffered_body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(buffered.body, 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(buffered_body["object"], "chat.completion");
+        assert_eq!(buffered_body["model"], "anthropic-chat");
+        assert_ne!(buffered_body["id"], "msg_up_buffered");
+        let choice = &buffered_body["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert_eq!(choice["message"]["content"], "checking");
+        assert_eq!(choice["message"]["tool_calls"][0]["id"], "toolu_buffered");
+        assert_eq!(choice["message"]["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["arguments"],
+            r#"{"q":"buffered"}"#
+        );
+        assert_eq!(buffered_body["usage"]["prompt_tokens"], 21);
+        assert_eq!(buffered_body["usage"]["completion_tokens"], 8);
+        assert_eq!(buffered_body["usage"]["total_tokens"], 29);
+
+        let streamed = openai::execute(
+            &state,
+            chat(format!(
+                r#"{{"model":"anthropic-chat","max_tokens":64,"stream":true,{tools},"messages":[{{"role":"user","content":"find it"}}]}}"#
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(streamed.headers["content-type"], "text/event-stream");
+        let wire =
+            String::from_utf8(to_bytes(streamed.body, 64 * 1024).await.unwrap().to_vec()).unwrap();
+        assert!(wire.ends_with("data: [DONE]\n\n"));
+        assert!(!wire.contains("msg_up_stream"));
+        let chunks: Vec<serde_json::Value> = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|line| *line != "[DONE]")
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let call = chunks
+            .iter()
+            .map(|chunk| &chunk["choices"][0]["delta"]["tool_calls"][0])
+            .find(|call| call["id"] == "toolu_stream")
+            .unwrap();
+        assert_eq!(call["function"]["name"], "lookup");
+        let arguments: String = chunks
+            .iter()
+            .filter_map(|chunk| {
+                chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+            })
+            .collect();
+        assert_eq!(arguments, r#"{"q":"stream"}"#);
+        assert_eq!(
+            chunks.last().unwrap()["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
+
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            let (headers, request) = &seen[0];
+            assert_eq!(request["model"], "provider-anthropic-chat");
+            assert_eq!(request["max_tokens"], 64);
+            assert_eq!(request["system"][0]["text"], "rules");
+            assert_eq!(request["tools"][0]["name"], "lookup");
+            assert_eq!(request["messages"].as_array().unwrap().len(), 3);
+            let results = request["messages"][2]["content"].as_array().unwrap();
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0]["tool_use_id"], "call_a");
+            assert_eq!(results[1]["tool_use_id"], "call_b");
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+            assert_eq!(seen[1].1["stream"], true);
+        }
+
+        let malformed = [
+            r#"{"model":"anthropic-chat","max_tokens":8,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":"oops"}]}"#,
+            r#"{"model":"anthropic-chat","max_tokens":8,"messages":[{"role":"user","content":"x"}],"tools":"lookup"}"#,
+            r#"{"model":"anthropic-chat","max_tokens":8,"n":2,"messages":[{"role":"user","content":"x"}]}"#,
+            r#"{"model":"anthropic-chat","messages":[{"role":"user","content":"x"}]}"#,
+        ];
+        for body in malformed {
+            let error = match openai::execute(&state, chat(body.to_owned())).await {
+                Ok(_) => panic!("expected {body} to be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{body}"
+            );
+        }
+        let unknown = match openai::execute(
+            &state,
+            chat(r#"{"model":"no-such-model","max_tokens":8,"messages":[{"role":"user","content":"x"}]}"#.to_owned()),
+        )
+        .await
+        {
+            Ok(_) => panic!("unknown model must fail"),
+            Err(error) => error.into_response().status(),
+        };
+        assert!(unknown.is_client_error(), "{unknown}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        let app = router(Arc::clone(&state));
+        for authorization in [None, Some("Bearer wrong-key")] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json");
+            if let Some(value) = authorization {
+                request = request.header("authorization", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            r#"{"model":"anthropic-chat","max_tokens":8,"messages":[{"role":"user","content":"x"}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        state.ledger.wait_for_idle().await;
+        upstream_task.abort();
+        std::fs::remove_dir_all(spool_dir).unwrap();
+    }
+
+    #[sqlx::test]
     async fn translated_tool_stream_keeps_protocol_order_request_echo_and_target_accounting(
         pool: PgPool,
     ) {
