@@ -15,6 +15,19 @@
 3. 程式識別字不變：`aigw_` 金鑰、`*_API_KEY`、`ANTHROPIC_SUBSCRIPTION_TOKEN_FILE`。
 4. 舊稱「virtual key」「client key」「credential」指 Gateway 金鑰時，改寫為「Gateway 金鑰」。`credentials` 資料表名稱與 `/admin/v1/credentials` 路徑是程式識別字，維持不動。
 
+## Gateway 金鑰在本機的存放（2026-11-06）
+
+舊金鑰遺失過一次：Gateway 資料庫只存雜湊，原文只在發出當下顯示，`aigw` 函式又只放在終端機記憶體。現在固定這樣放：
+
+| 名稱 | 是什麼 | 在哪裡 |
+| --- | --- | --- |
+| `AGENT_POOL_GATEWAY_KEY` | 本機這把 Gateway 金鑰的原文 | `~/.config/agent-pool-gateway/gateway.env`，權限 0600，內容 `export AGENT_POOL_GATEWAY_KEY=aigw_...` |
+| `ANTHROPIC_AUTH_TOKEN` | Claude Code 讀取的變數名稱，值就是 Gateway 金鑰，不是權杖 | 執行 `aigw` 時由 `~/.zshrc` 從上一個檔案設定 |
+
+- 金鑰原文不寫進文件、日誌、`settings.json` 或 git。
+- 部署腳本的原生 Client 探測沿用 `ANTHROPIC_AUTH_TOKEN`；部署前先執行 `aigw`。
+- 要換金鑰：發新的、改寫該檔、撤銷舊的。舊金鑰撤銷前先確認已沒有 Client 在用。
+
 ## 權杖的更新方式
 
 管理者呼叫 `PUT /admin/v1/provider-tokens/anthropic`，內容 `{"token": "sk-ant-oat..."}`。
