@@ -149,8 +149,9 @@ impl StreamObserver for GeminiObserver {
     }
 }
 
-pub struct CrossStreamEncoder {
-    inner: OpenAiResponsesEncoder,
+pub enum CrossStreamEncoder {
+    Responses(Box<OpenAiResponsesEncoder>),
+    Chat(Box<ChatCompletionsEncoder>),
 }
 
 impl CrossStreamEncoder {
@@ -161,9 +162,12 @@ impl CrossStreamEncoder {
         source_request: &CanonicalRequest,
     ) -> Result<Self, ProtocolError> {
         match operation {
-            GatewayOperation::OpenAiResponses => Ok(Self {
-                inner: OpenAiResponsesEncoder::new(response_id, public_model, source_request),
-            }),
+            GatewayOperation::OpenAiResponses => Ok(Self::Responses(Box::new(
+                OpenAiResponsesEncoder::new(response_id, public_model, source_request),
+            ))),
+            GatewayOperation::OpenAiChatCompletions => Ok(Self::Chat(Box::new(
+                ChatCompletionsEncoder::new(response_id, public_model, source_request),
+            ))),
             _ => Err(ProtocolError::Invalid(
                 "cross-provider stream source is unsupported",
             )),
@@ -173,8 +177,188 @@ impl CrossStreamEncoder {
 
 impl StreamEncoder for CrossStreamEncoder {
     fn encode(&mut self, events: &[CanonicalStreamEvent]) -> Result<Vec<Bytes>, ProtocolError> {
-        self.inner.encode(events)
+        match self {
+            Self::Responses(encoder) => encoder.encode(events),
+            Self::Chat(encoder) => encoder.encode(events),
+        }
     }
+}
+
+pub struct ChatCompletionsEncoder {
+    id: String,
+    model: String,
+    created: i64,
+    include_usage: bool,
+    started: bool,
+    terminal: bool,
+    usage: CanonicalUsage,
+    finish_reason: String,
+    tool_slots: HashMap<u32, usize>,
+    tool_has_arguments: HashSet<u32>,
+    text_blocks: HashSet<u32>,
+}
+
+impl ChatCompletionsEncoder {
+    fn new(id: String, model: String, source_request: &CanonicalRequest) -> Self {
+        Self {
+            id,
+            model,
+            created: chrono::Utc::now().timestamp(),
+            include_usage: crate::adapters::protocol::chat_extras(&source_request.provider_options)
+                .is_some_and(|extras| extras.include_usage),
+            started: false,
+            terminal: false,
+            usage: CanonicalUsage::default(),
+            finish_reason: "end_turn".to_owned(),
+            tool_slots: HashMap::new(),
+            tool_has_arguments: HashSet::new(),
+            text_blocks: HashSet::new(),
+        }
+    }
+
+    fn chunk(&self, delta: Value, finish_reason: Value) -> Bytes {
+        chat_sse(&json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+        }))
+    }
+
+    fn finish(&mut self, output: &mut Vec<Bytes>, finish_reason: &str) {
+        self.terminal = true;
+        output.push(self.chunk(
+            json!({}),
+            Value::String(crate::adapters::response::chat_finish_reason(finish_reason).to_owned()),
+        ));
+        if self.include_usage {
+            output.push(chat_sse(&json!({
+                "id": self.id,
+                "object": "chat.completion.chunk",
+                "created": self.created,
+                "model": self.model,
+                "choices": [],
+                "usage": crate::adapters::response::chat_usage(&self.usage)
+            })));
+        }
+        output.push(Bytes::from_static(b"data: [DONE]\n\n"));
+    }
+}
+
+impl StreamEncoder for ChatCompletionsEncoder {
+    fn encode(&mut self, events: &[CanonicalStreamEvent]) -> Result<Vec<Bytes>, ProtocolError> {
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                CanonicalStreamEvent::ResponseStarted(_) => {
+                    if self.started {
+                        return Err(ProtocolError::Invalid("duplicate canonical response start"));
+                    }
+                    self.started = true;
+                    output
+                        .push(self.chunk(json!({"role": "assistant", "content": ""}), Value::Null));
+                }
+                CanonicalStreamEvent::ContentBlockStarted { index, content } => match content {
+                    CanonicalContent::Text { text, .. } => {
+                        if self.tool_slots.contains_key(index) || !self.text_blocks.insert(*index) {
+                            return Err(ProtocolError::Invalid("duplicate canonical block index"));
+                        }
+                        if !text.is_empty() {
+                            output.push(self.chunk(json!({"content": text}), Value::Null));
+                        }
+                    }
+                    CanonicalContent::ToolCall(call) => {
+                        let slot = self.tool_slots.len();
+                        if self.text_blocks.contains(index)
+                            || self.tool_slots.insert(*index, slot).is_some()
+                        {
+                            return Err(ProtocolError::Invalid("duplicate canonical block index"));
+                        }
+                        output.push(self.chunk(
+                            json!({"tool_calls": [{
+                                "index": slot,
+                                "id": call.id,
+                                "type": "function",
+                                "function": {"name": call.name, "arguments": ""}
+                            }]}),
+                            Value::Null,
+                        ));
+                    }
+                    _ => return Err(ProtocolError::Invalid("unsupported canonical block")),
+                },
+                CanonicalStreamEvent::TextDelta { index, text } => {
+                    if !self.text_blocks.contains(index) {
+                        return Err(ProtocolError::Invalid("text delta has no text block"));
+                    }
+                    output.push(self.chunk(json!({"content": text}), Value::Null));
+                }
+                CanonicalStreamEvent::ToolArgumentsDelta { index, delta } => {
+                    let slot = *self
+                        .tool_slots
+                        .get(index)
+                        .ok_or(ProtocolError::Invalid("tool delta has no tool block"))?;
+                    if !delta.is_empty() {
+                        self.tool_has_arguments.insert(*index);
+                    }
+                    output.push(self.chunk(
+                        json!({"tool_calls": [{"index": slot, "function": {"arguments": delta}}]}),
+                        Value::Null,
+                    ));
+                }
+                CanonicalStreamEvent::ContentBlockCompleted { index } => {
+                    if let Some(slot) = self.tool_slots.get(index).copied() {
+                        if !self.tool_has_arguments.contains(index) {
+                            output.push(self.chunk(
+                                json!({"tool_calls": [{"index": slot, "function": {"arguments": "{}"}}]}),
+                                Value::Null,
+                            ));
+                        }
+                    } else if !self.text_blocks.contains(index) {
+                        return Err(ProtocolError::Invalid("completed block does not exist"));
+                    }
+                }
+                CanonicalStreamEvent::Usage(usage) => self.usage = usage.clone(),
+                CanonicalStreamEvent::OutputCompleted { finish_reason, .. } => {
+                    self.finish_reason = finish_reason.clone();
+                }
+                CanonicalStreamEvent::ResponseCompleted => {
+                    if !self.started || self.terminal {
+                        return Err(ProtocolError::Invalid("invalid canonical terminal event"));
+                    }
+                    let reason = self.finish_reason.clone();
+                    self.finish(&mut output, &reason);
+                }
+                CanonicalStreamEvent::Error(error)
+                    if error.error_type == "provider_response_incomplete" =>
+                {
+                    if !self.started || self.terminal {
+                        return Err(ProtocolError::Invalid("invalid canonical terminal event"));
+                    }
+                    self.finish(&mut output, "max_tokens");
+                }
+                CanonicalStreamEvent::Error(_) => {
+                    self.terminal = true;
+                    output.push(chat_sse(
+                        &json!({"error": {"type": "api_error", "message": "upstream stream failed"}}),
+                    ));
+                }
+                CanonicalStreamEvent::MessageStarted { .. }
+                | CanonicalStreamEvent::MessageCompleted
+                | CanonicalStreamEvent::ToolCallStarted { .. }
+                | CanonicalStreamEvent::ToolCallCompleted { .. }
+                | CanonicalStreamEvent::CompletionHint => {}
+                CanonicalStreamEvent::ReasoningDelta { .. } => {
+                    return Err(ProtocolError::Invalid("reasoning cannot be transcoded"));
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+fn chat_sse(value: &Value) -> Bytes {
+    Bytes::from(format!("data: {value}\n\n"))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1729,5 +1913,141 @@ mod tests {
             budget_class: "standard".to_owned(),
             deadline: None,
         })
+    }
+
+    fn chat_source_request(body: &'static [u8]) -> crate::canonical::CanonicalRequest {
+        protocol::decode(
+            GatewayOperation::OpenAiChatCompletions,
+            Bytes::from_static(body),
+        )
+        .unwrap()
+        .enrich(RequestEnrichment {
+            gateway_request_id: Uuid::nil(),
+            trace_id: None,
+            session_id: None,
+            principal: PrincipalRef {
+                tenant_id: Uuid::nil(),
+                credential_id: Uuid::nil(),
+                user_id: None,
+                device_id: None,
+                client_id: None,
+                agent_id: None,
+            },
+            requested_model: "public".to_owned(),
+            requested_quality: None,
+            workload_class: "interactive".to_owned(),
+            urgency: "normal".to_owned(),
+            budget_class: "standard".to_owned(),
+            deadline: None,
+        })
+    }
+
+    fn chat_wire(source: &'static [u8], frames: &[&str]) -> (String, Vec<serde_json::Value>) {
+        let mut observer = CrossStreamObserver::new(GatewayOperation::AnthropicMessages).unwrap();
+        let mut encoder = CrossStreamEncoder::new(
+            GatewayOperation::OpenAiChatCompletions,
+            "chatcmpl_apg_test".to_owned(),
+            "public".to_owned(),
+            &chat_source_request(source),
+        )
+        .unwrap();
+        let mut wire = Vec::new();
+        for frame in frames {
+            let events = observer.observe(frame.as_bytes()).unwrap();
+            wire.extend(encoder.encode(&events).unwrap());
+        }
+        let wire = String::from_utf8(wire.concat()).unwrap();
+        let chunks = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|line| *line != "[DONE]")
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        (wire, chunks)
+    }
+
+    #[test]
+    fn anthropic_tool_stream_becomes_chat_chunks_with_finish_reason_usage_and_done() {
+        let (wire, chunks) = chat_wire(
+            br#"{"model":"public","max_tokens":8,"stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hello"}]}"#,
+            &[
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_target\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{}}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"x\\\"}\"}}\n\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ],
+        );
+        assert!(wire.ends_with("data: [DONE]\n\n"));
+        assert!(!wire.contains("msg_target"));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk["object"] == "chat.completion.chunk"
+                    && chunk["id"] == "chatcmpl_apg_test")
+        );
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+        let text: String = chunks
+            .iter()
+            .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(text, "hi");
+        let start = chunks
+            .iter()
+            .find(|chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["id"] == "call_1")
+            .unwrap();
+        let call = &start["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(call["index"], 0);
+        assert_eq!(call["type"], "function");
+        assert_eq!(call["function"]["name"], "lookup");
+        let arguments: String = chunks
+            .iter()
+            .filter_map(|chunk| {
+                chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+            })
+            .collect();
+        assert_eq!(arguments, r#"{"q":"x"}"#);
+        let finals: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| chunk["choices"][0]["finish_reason"].is_string())
+            .collect();
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0]["choices"][0]["finish_reason"], "tool_calls");
+        let usage = chunks.last().unwrap();
+        assert_eq!(usage["choices"], serde_json::json!([]));
+        assert_eq!(usage["usage"]["prompt_tokens"], 5);
+        assert_eq!(usage["usage"]["completion_tokens"], 4);
+        assert_eq!(usage["usage"]["total_tokens"], 9);
+    }
+
+    #[test]
+    fn chat_stream_maps_end_turn_and_max_tokens_and_omits_usage_unless_requested() {
+        for (stop_reason, expected) in [("end_turn", "stop"), ("max_tokens", "length")] {
+            let message_delta = format!(
+                "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop_reason}\"}},\"usage\":{{\"output_tokens\":1}}}}\n\n"
+            );
+            let (wire, chunks) = chat_wire(
+                br#"{"model":"public","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                &[
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_target\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                    &message_delta,
+                    "data: {\"type\":\"message_stop\"}\n\n",
+                ],
+            );
+            assert!(wire.ends_with("data: [DONE]\n\n"), "{stop_reason}");
+            assert_eq!(
+                chunks.last().unwrap()["choices"][0]["finish_reason"],
+                expected
+            );
+            assert!(chunks.iter().all(|chunk| chunk.get("usage").is_none()));
+        }
     }
 }

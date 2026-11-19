@@ -89,9 +89,14 @@ fn validate_cross_request(
         ) | (
             GatewayOperation::OpenAiResponses,
             GatewayOperation::GeminiGenerateContent
+        ) | (
+            GatewayOperation::OpenAiChatCompletions,
+            GatewayOperation::AnthropicMessages
         )
     ) || request.reasoning.is_some()
-        || !options_are_empty(&request.provider_options)
+        || !(options_are_empty(&request.provider_options)
+            || (source == GatewayOperation::OpenAiChatCompletions
+                && protocol::chat_extras(&request.provider_options).is_some()))
         || request.metadata.contains_key("projection_conflicts")
     {
         return Err(GatewayError::UnsupportedRequest);
@@ -632,18 +637,14 @@ mod tests {
             .is_err()
         );
 
-        for (source, target) in [
-            (
-                GatewayOperation::OpenAiChatCompletions,
-                GatewayOperation::AnthropicMessages,
-            ),
-            (
+        assert!(
+            super::validate_cross_request(
+                &vendor,
                 GatewayOperation::AnthropicCountTokens,
                 GatewayOperation::OpenAiResponses,
-            ),
-        ] {
-            assert!(super::validate_cross_request(&vendor, source, target).is_err());
-        }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -893,6 +894,102 @@ mod tests {
             urgency: "normal".to_owned(),
             budget_class: "standard".to_owned(),
             deadline: None,
+        }
+    }
+
+    fn chat_to_anthropic(body: &'static [u8]) -> Result<Value, crate::error::GatewayError> {
+        let headers = HeaderMap::new();
+        let canonical = protocol::decode(
+            GatewayOperation::OpenAiChatCompletions,
+            Bytes::from_static(body),
+        )
+        .map_err(|_| crate::error::GatewayError::UnsupportedRequest)?
+        .enrich(enrichment());
+        super::validate_cross_request(
+            &canonical,
+            GatewayOperation::OpenAiChatCompletions,
+            GatewayOperation::AnthropicMessages,
+        )?;
+        let prepared = prepare_for_provider(
+            &canonical,
+            &profile(ProviderDialect::Anthropic),
+            "provider-model",
+            cross_plan(
+                GatewayOperation::OpenAiChatCompletions,
+                GatewayOperation::AnthropicMessages,
+            ),
+            input("/v1/chat/completions", &headers),
+        )?;
+        Ok(serde_json::from_slice(prepared.body()).unwrap())
+    }
+
+    #[test]
+    fn chat_request_becomes_anthropic_with_merged_tool_results_and_temperature() {
+        let body = chat_to_anthropic(
+            br#"{
+                "model":"public",
+                "max_tokens":64,
+                "temperature":0.5,
+                "stream":true,
+                "stream_options":{"include_usage":true},
+                "messages":[
+                    {"role":"system","content":"rules"},
+                    {"role":"user","content":"look both up"},
+                    {"role":"assistant","content":null,"tool_calls":[
+                        {"id":"call_a","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"a\"}"}},
+                        {"id":"call_b","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"b\"}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call_a","content":"result a"},
+                    {"role":"tool","tool_call_id":"call_b","content":"result b"}
+                ],
+                "tools":[{"type":"function","function":{"name":"lookup","description":"find","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}],
+                "tool_choice":"auto"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(body["model"], "provider-model");
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["temperature"], 0.5);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("stream_options").is_none());
+        assert_eq!(body["system"][0]["text"], "rules");
+        assert_eq!(body["tools"][0]["name"], "lookup");
+        assert_eq!(body["tools"][0]["input_schema"]["required"][0], "q");
+        assert_eq!(body["tool_choice"]["type"], "auto");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][1]["id"], "call_b");
+        assert_eq!(messages[2]["role"], "user");
+        let results = messages[2]["content"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["type"], "tool_result");
+        assert_eq!(results[0]["tool_use_id"], "call_a");
+        assert_eq!(results[1]["tool_use_id"], "call_b");
+    }
+
+    #[test]
+    fn chat_request_rejects_multiple_choices_hot_temperature_unknown_fields_and_missing_limit() {
+        assert!(
+            chat_to_anthropic(
+                br#"{"model":"public","max_tokens":8,"n":1,"messages":[{"role":"user","content":"x"}]}"#
+            )
+            .is_ok()
+        );
+        let rejected: [&'static [u8]; 5] = [
+            br#"{"model":"public","max_tokens":8,"n":2,"messages":[{"role":"user","content":"x"}]}"#,
+            br#"{"model":"public","max_tokens":8,"temperature":1.5,"messages":[{"role":"user","content":"x"}]}"#,
+            br#"{"model":"public","max_tokens":8,"top_p":0.9,"messages":[{"role":"user","content":"x"}]}"#,
+            br#"{"model":"public","max_tokens":8,"stream_options":{"continuous_usage_stats":true},"messages":[{"role":"user","content":"x"}]}"#,
+            br#"{"model":"public","messages":[{"role":"user","content":"x"}]}"#,
+        ];
+        for body in rejected {
+            assert!(
+                chat_to_anthropic(body).is_err(),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 }
