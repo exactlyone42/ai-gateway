@@ -203,6 +203,7 @@ pub struct CapabilityRequirements {
     pub streaming: bool,
     pub tools: bool,
     pub reasoning: bool,
+    pub reasoning_ignored_by_anthropic: bool,
     pub images: bool,
     pub structured_output: bool,
 }
@@ -215,6 +216,12 @@ impl CapabilityRequirements {
                 .iter()
                 .any(|message| message.content.iter().any(matches))
         };
+        let reasoning = request.reasoning.as_ref().is_some_and(|reasoning| {
+            reasoning.enabled == Some(true)
+                || reasoning.effort.is_some()
+                || reasoning.budget_tokens.is_some()
+                || reasoning.summary.is_some()
+        });
         Self {
             streaming: request.stream,
             tools: !request.tools.is_empty()
@@ -224,13 +231,9 @@ impl CapabilityRequirements {
                         CanonicalContent::ToolCall(_) | CanonicalContent::ToolResult { .. }
                     )
                 }),
-            reasoning: request.source_operation() != GatewayOperation::OpenAiChatCompletions
-                && request.reasoning.as_ref().is_some_and(|reasoning| {
-                    reasoning.enabled == Some(true)
-                        || reasoning.effort.is_some()
-                        || reasoning.budget_tokens.is_some()
-                        || reasoning.summary.is_some()
-                }),
+            reasoning,
+            reasoning_ignored_by_anthropic: reasoning
+                && request.source_operation() == GatewayOperation::OpenAiChatCompletions,
             images: has_content(|content| matches!(content, CanonicalContent::Image { .. })),
             structured_output: request.structured_output.is_some(),
         }
@@ -275,6 +278,8 @@ impl CapabilityRequirements {
             streaming: request.get("stream").and_then(Value::as_bool) == Some(true),
             tools,
             reasoning,
+            reasoning_ignored_by_anthropic: reasoning
+                && operation == GatewayOperation::OpenAiChatCompletions,
             images,
             structured_output,
         }
@@ -1123,7 +1128,12 @@ fn ensure_capabilities(
     let checks = [
         (required.streaming, row.supports_streaming, "streaming"),
         (required.tools, row.supports_tools, "tools"),
-        (required.reasoning, row.supports_reasoning, "reasoning"),
+        (
+            required.reasoning
+                && !(required.reasoning_ignored_by_anthropic && row.provider_type == "anthropic"),
+            row.supports_reasoning,
+            "reasoning",
+        ),
         (required.images, row.supports_images, "images"),
         (
             required.structured_output,
@@ -1373,6 +1383,7 @@ mod tests {
                 streaming: true,
                 tools: true,
                 reasoning: true,
+                reasoning_ignored_by_anthropic: false,
                 images: true,
                 structured_output: true,
             }
@@ -1814,6 +1825,7 @@ mod tests {
         streaming: true,
         tools: true,
         reasoning: true,
+        reasoning_ignored_by_anthropic: false,
         images: true,
         structured_output: true,
     };
@@ -1841,10 +1853,62 @@ mod tests {
         assert_eq!(
             CapabilityRequirements::from_canonical(&chat),
             CapabilityRequirements {
-                reasoning: false,
+                reasoning_ignored_by_anthropic: true,
                 ..ALL_CAPABILITIES
             }
         );
+    }
+
+    fn row_without_reasoning(provider_type: &str) -> SelectionRow {
+        SelectionRow {
+            model_id: Uuid::nil(),
+            model_version: 1,
+            alias_id: None,
+            alias_version: None,
+            quality_tier: None,
+            public_model_id: "public".to_owned(),
+            provider_model_id: "upstream".to_owned(),
+            provider_id: Uuid::nil(),
+            provider_version: 1,
+            provider_key: "key".to_owned(),
+            provider_type: provider_type.to_owned(),
+            base_url: String::new(),
+            credential_ref: String::new(),
+            description: None,
+            context_window: None,
+            latency_class: None,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: false,
+            supports_images: true,
+            supports_structured_output: true,
+            max_output_tokens: None,
+            cost_metadata: Value::Null,
+            model_supported_operations: Vec::new(),
+            provider_supported_operations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn chat_reasoning_is_ignored_only_for_anthropic_rows() {
+        let chat = CapabilityRequirements {
+            reasoning: true,
+            reasoning_ignored_by_anthropic: true,
+            ..CapabilityRequirements::default()
+        };
+        assert!(ensure_capabilities(&row_without_reasoning("anthropic"), chat).is_ok());
+        assert!(matches!(
+            ensure_capabilities(&row_without_reasoning("openai"), chat),
+            Err(RegistryError::CapabilityMismatch("reasoning"))
+        ));
+        let native_anthropic = CapabilityRequirements {
+            reasoning: true,
+            ..CapabilityRequirements::default()
+        };
+        assert!(matches!(
+            ensure_capabilities(&row_without_reasoning("anthropic"), native_anthropic),
+            Err(RegistryError::CapabilityMismatch("reasoning"))
+        ));
     }
 
     #[test]
