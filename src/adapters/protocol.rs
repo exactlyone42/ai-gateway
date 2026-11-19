@@ -888,6 +888,51 @@ fn opaque(provider: &str, value: &Value) -> CanonicalContent {
     }
 }
 
+pub(crate) struct ChatExtras {
+    pub temperature: Option<Value>,
+    pub include_usage: bool,
+}
+
+pub(crate) fn chat_extras(options: &ProviderOptions) -> Option<ChatExtras> {
+    if options.len() != 1 {
+        return None;
+    }
+    let object = options.get("openai")?.as_object()?;
+    let mut extras = ChatExtras {
+        temperature: None,
+        include_usage: false,
+    };
+    for (key, value) in object {
+        match key.as_str() {
+            "temperature" => {
+                if !value
+                    .as_f64()
+                    .is_some_and(|number| (0.0..=1.0).contains(&number))
+                {
+                    return None;
+                }
+                extras.temperature = Some(value.clone());
+            }
+            "n" => {
+                if value.as_u64() != Some(1) {
+                    return None;
+                }
+            }
+            "stream_options" => {
+                let stream_options = value.as_object()?;
+                if stream_options.keys().any(|field| field != "include_usage") {
+                    return None;
+                }
+                if let Some(flag) = stream_options.get("include_usage") {
+                    extras.include_usage = flag.as_bool()?;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(extras)
+}
+
 fn scoped_options(provider: &str, residual: Map<String, Value>) -> ProviderOptions {
     if residual.is_empty() {
         ProviderOptions::new()

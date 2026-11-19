@@ -1130,7 +1130,17 @@ fn encode_anthropic_request(
         match message.role {
             CanonicalRole::System => system.extend(content),
             CanonicalRole::User | CanonicalRole::Tool => {
-                messages.push(json!({"role": "user", "content": content}));
+                match messages
+                    .last_mut()
+                    .filter(|last: &&mut Value| last["role"] == "user")
+                {
+                    Some(last) => {
+                        if let Some(existing) = last["content"].as_array_mut() {
+                            existing.extend(content);
+                        }
+                    }
+                    None => messages.push(json!({"role": "user", "content": content})),
+                }
             }
             CanonicalRole::Assistant => {
                 messages.push(json!({"role": "assistant", "content": content}));
@@ -1154,6 +1164,11 @@ fn encode_anthropic_request(
     ]);
     if !system.is_empty() {
         document.insert("system".to_owned(), Value::Array(system));
+    }
+    if let Some(temperature) = super::protocol::chat_extras(&request.provider_options)
+        .and_then(|extras| extras.temperature)
+    {
+        document.insert("temperature".to_owned(), temperature);
     }
     if !request.tools.is_empty() {
         document.insert(
