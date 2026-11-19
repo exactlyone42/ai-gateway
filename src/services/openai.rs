@@ -713,7 +713,15 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     }
     let client_response = if translation.translated {
         if !status.is_success() {
-            None
+            tracing::warn!(
+                upstream_status = status.as_u16(),
+                provider = %provider,
+                "upstream rejected translated request"
+            );
+            Some(response::TranscodedBufferedResponse {
+                body: translated_error_body(&body),
+                incomplete: false,
+            })
         } else {
             match response::transcode_buffered_with_outcome(
                 translation.target_operation,
@@ -803,8 +811,10 @@ async fn finish_buffered(context: BufferedContext) -> Result<Reply, GatewayError
     }
     Ok(Reply {
         status,
-        headers: if translation.translated {
+        headers: if translation.translated && status.is_success() {
             translated_response_headers()
+        } else if translation.translated {
+            translated_error_headers(&headers)
         } else {
             headers
         },
@@ -820,6 +830,37 @@ fn translated_response_headers() -> HeaderMap {
         HeaderValue::from_static("application/json"),
     );
     headers
+}
+
+fn translated_error_headers(upstream: &HeaderMap) -> HeaderMap {
+    let mut headers = translated_response_headers();
+    for name in [header::RETRY_AFTER, HeaderName::from_static("request-id")] {
+        if let Some(value) = upstream.get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
+    headers
+}
+
+fn translated_error_body(upstream: &[u8]) -> Bytes {
+    let error = serde_json::from_slice::<Value>(upstream)
+        .ok()
+        .and_then(|value| value.get("error").cloned());
+    let text = |key: &str, fallback: &str| {
+        error
+            .as_ref()
+            .and_then(|error| error.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or(fallback)
+            .to_owned()
+    };
+    let kind = text("type", "upstream_error");
+    let body = serde_json::json!({"error": {
+        "message": text("message", "upstream provider rejected the request"),
+        "type": kind,
+        "code": kind,
+    }});
+    Bytes::from(body.to_string())
 }
 
 fn translated_stream_headers() -> HeaderMap {
