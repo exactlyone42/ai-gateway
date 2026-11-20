@@ -12,7 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODELS = ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001']
 CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
 WORK_DIR = os.environ.get('CLAUDE_BRIDGE_CWD', os.path.expanduser('~/.cache/claude-bridge-cwd'))
-TIMEOUT_SECONDS = int(os.environ.get('CLAUDE_BRIDGE_TIMEOUT', '300'))
+TIMEOUT_SECONDS = int(os.environ.get('CLAUDE_BRIDGE_TIMEOUT', '1800'))
+KEEPALIVE_SECONDS = float(os.environ.get('CLAUDE_BRIDGE_KEEPALIVE', '15'))
 SLOTS = threading.BoundedSemaphore(int(os.environ.get('CLAUDE_BRIDGE_CONCURRENCY', '2')))
 UNSUPPORTED_FIELDS = ('functions', 'function_call')
 TOOL_BLOCK = re.compile(r'<tool_calls>(.*?)</tool_calls>', re.S)
@@ -273,13 +274,17 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             SLOTS.release()
 
-    def send_buffered_stream(self, identifier, created, model, text, calls, usage):
+    def start_event_stream(self):
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Cache-Control', 'no-cache')
         self.send_header('Connection', 'close')
         self.end_headers()
         self.close_connection = True
+
+    def send_buffered_stream(self, identifier, created, model, text, calls, usage, started=False):
+        if not started:
+            self.start_event_stream()
         pieces = [chunk(identifier, created, model, {'role': 'assistant', 'content': ''})]
         if text:
             pieces.append(chunk(identifier, created, model, {'content': text}))
@@ -298,14 +303,45 @@ class Handler(BaseHTTPRequestHandler):
         identifier, created = 'chatcmpl-' + uuid.uuid4().hex, int(time.time())
         names = {spec['name'] for spec in tool_specs(body)}
         if names or not body.get('stream'):
-            try:
-                text, usage = complete(model, system, prompt)
-            except BridgeError as error:
-                self.send_error_body(error)
+            streaming = bool(body.get('stream'))
+            outcome = {}
+
+            def work():
+                try:
+                    outcome['value'] = complete(model, system, prompt)
+                except BridgeError as error:
+                    outcome['error'] = error
+
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            started = False
+            worker.join(KEEPALIVE_SECONDS if streaming else None)
+            while worker.is_alive():
+                try:
+                    if not started:
+                        self.start_event_stream()
+                        started = True
+                    self.wfile.write(b': keepalive\n\n')
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    worker.join()
+                    return
+                worker.join(KEEPALIVE_SECONDS)
+            if 'error' in outcome:
+                error = outcome['error']
+                if not started:
+                    self.send_error_body(error)
+                    return
+                try:
+                    self.wfile.write(('data: ' + json.dumps({'error': {'message': str(error), 'type': error.code}}) + '\n\ndata: [DONE]\n\n').encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
                 return
+            text, usage = outcome['value']
             text, calls = extract_tool_calls(text, names) if names else (text, [])
-            if body.get('stream'):
-                self.send_buffered_stream(identifier, created, model, text, calls, usage)
+            if streaming:
+                self.send_buffered_stream(identifier, created, model, text, calls, usage, started)
                 return
             message = {'role': 'assistant', 'content': text or None} if calls else {'role': 'assistant', 'content': text}
             if calls:

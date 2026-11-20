@@ -12,8 +12,10 @@ from unittest.mock import patch
 import claude_bridge
 
 FAKE = '''#!/usr/bin/env python3
-import json, sys
+import json, sys, time
 prompt = sys.stdin.read()
+if 'SLOW' in prompt:
+    time.sleep(1.2)
 args = sys.argv[1:]
 mode = 'stream' if 'stream-json' in args else 'json'
 if 'FAIL' in prompt:
@@ -95,7 +97,7 @@ class ServerTests(unittest.TestCase):
         fake = Path(directory.name) / 'claude'
         fake.write_text(FAKE)
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-        for name, value in [('CLAUDE_BIN', str(fake)), ('WORK_DIR', directory.name)]:
+        for name, value in [('CLAUDE_BIN', str(fake)), ('WORK_DIR', directory.name), ('KEEPALIVE_SECONDS', 0.3)]:
             patcher = patch.object(claude_bridge, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -163,6 +165,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(deltas[0]['tool_calls'][0]['function']['name'], 'draw')
         self.assertEqual(chunks[-1]['choices'][0]['finish_reason'], 'tool_calls')
         self.assertEqual(chunks[-1]['usage']['total_tokens'], 14)
+
+    def test_slow_tool_request_sends_keepalive_then_result(self):
+        status, text = self.request('POST', '/v1/chat/completions', self.chat(tools=TOOLS, stream=True, messages=[{'role': 'user', 'content': 'SLOWCALLTOOL'}]))
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(text.count(': keepalive'), 2)
+        self.assertLess(text.index(': keepalive'), text.index('tool_calls'))
+        self.assertTrue(text.rstrip().endswith('data: [DONE]'))
+
+    def test_slow_failure_is_reported_inside_the_stream(self):
+        status, text = self.request('POST', '/v1/chat/completions', self.chat(tools=TOOLS, stream=True, messages=[{'role': 'user', 'content': 'SLOWFAIL'}]))
+        self.assertEqual(status, 200)
+        self.assertIn('"type": "rate_limit_error"', text)
+        self.assertTrue(text.rstrip().endswith('data: [DONE]'))
 
     def test_unknown_tool_or_plain_answer_stays_text(self):
         for word in ('BADTOOL', 'hello'):
