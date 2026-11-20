@@ -272,6 +272,18 @@ Gateway 沒有把 ollama 位址寫死在程式裡。位址放在兩個設定值�
 3. 部署時用 `scripts/deploy_gateway.py --set-env 'EXTRA_PROVIDER_PROFILES_JSON=[…"base_url":"http://172.22.0.1:11434"…]'` 改環境變數；資料庫 `providers` 表 `provider_key='ollama'` 的 `base_url` 要同時改成同一個位址，否則 Gateway 回 503 `provider is not bound to a trusted server-side profile`。
 4. 退回：`systemctl --user disable --now ollama-bridge`、`sudo ufw delete allow from 172.22.0.0/16 to 172.22.0.1 port 11434 proto tcp`，並用不帶 `--set-env` 的部署把位址改回 `127.0.0.1`。若 Docker 網路重建、網橋位址改變，要同步改服務、防火牆與兩處 `base_url`。
 
+## 透過本機 Claude Code 呼叫 Claude 模型（claude -p 轉接）
+
+為什麼：用訂閱權杖由 Gateway 直接呼叫 Anthropic 時，Sonnet／Opus 回 429，而同一帳號的本機 `claude -p` 成功（2026-11-20 實測；原因推論為 Anthropic 只放行 Claude Code 本身發出的請求，未證實）。不偽裝成 Claude Code，改為讓 Gateway 把純文字請求交給真正的 `claude -p`。放棄的做法：偽裝請求格式（違反供應商限制）、申請 API 金鑰（要另外付費，使用者先選訂閱）。
+
+做法：
+
+1. `scripts/claude_bridge.py` 是只用標準函式庫的小服務，提供 `POST /v1/chat/completions`（含串流）、`GET /v1/models`、`GET /api/version`。每個請求執行一次 `claude -p --tools "" --system-prompt … --setting-sources "" --no-session-persistence`，工作目錄是空資料夾，所以額外提示只有約 570 token，不是預設的約 3 萬。
+2. 主機上以使用者級服務 `claude-bridge` 執行，程式複製在 `~/services/claude-bridge/claude_bridge.py`（改了 repo 內的檔案要重新複製並 `systemctl --user restart claude-bridge`），綁 `172.22.0.1:11435`，同時最多 2 個 `claude`，超過等 30 秒後回 429。使用 `~/.claude` 的登入（目前是 Max 20x 訂閱）。防火牆只放行 Gateway 網段連該位址與埠。
+3. Gateway 側：環境變數 `EXTRA_PROVIDER_PROFILES_JSON` 加一項 `kind=ollama`、`provider_key=claude-code`、`credential_ref=env://LOCAL_CLAUDE_CODE`（兩個上游不能共用同一個 `credential_ref`）、`base_url=http://172.22.0.1:11435`、`operations=["openai_chat_completions"]`；資料庫 `providers` 與 `models` 要有對應資料列，公開名稱 `claude-code/claude-sonnet-5-5`、`claude-code/claude-opus-5-5`、`claude-code/claude-haiku-4-5-20251001`，且 `supports_reasoning=true`（轉接服務收下並忽略 `reasoning_effort`）。
+4. 限制：只支援文字。`tools`、圖片、`tool` 角色會被拒絕（Gateway 回 400 `model_capability_mismatch`）。額度算在該訂閱帳號的 Claude Code 用量裡。
+5. 退回：`systemctl --user disable --now claude-bridge`、`sudo ufw delete allow from 172.22.0.0/16 to 172.22.0.1 port 11435 proto tcp`，把 `claude-code` 的 `providers` 資料列設為 `archived`。
+
 - Gateway 事故以使用者體感判定：連不上、常出錯、變慢、容易中斷，或任何明顯降低使用品質的情況都要記錄；健康頁亮綠燈也不能排除事故。
 - 事故紀錄先用白話交代「原本怎麼運作、哪一步接錯、使用者看到什麼、怎麼處理、如何防止」，讓初階工程師能照著理解與處理；技術名稱與數字只放在後面作查證資料。
 - Gateway 搬家或發版後，必須用原本的 Client 真的送出一次請求；只看服務有啟動、健康頁正常或程式編譯成功，不得宣稱完成。
