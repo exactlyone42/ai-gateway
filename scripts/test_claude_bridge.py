@@ -86,6 +86,9 @@ class ToolPromptTests(unittest.TestCase):
     def test_extract_tool_calls(self):
         text, calls = claude_bridge.extract_tool_calls('hi <tool_calls>[{"name": "draw", "arguments": {"x": 1}}]</tool_calls>', {'draw'})
         self.assertEqual((text, calls[0]['function']), ('hi', {'name': 'draw', 'arguments': '{"x": 1}'}))
+        text, calls = claude_bridge.extract_tool_calls('hi <tool_calls>[{"name": "draw", "arguments": {"x": 1}}]', {'draw'})
+        self.assertEqual((text, calls[0]['function']['name']), ('hi', 'draw'))
+        self.assertEqual(claude_bridge.extract_tool_calls('<tool_calls>[{"name": "draw", "argu', {'draw'})[1], [])
         for raw in ['plain', '<tool_calls>not json</tool_calls>', '<tool_calls>[{"name": "x", "arguments": {}}]</tool_calls>', '<tool_calls>[]</tool_calls>']:
             self.assertEqual(claude_bridge.extract_tool_calls(raw, {'draw'}), (raw, []))
 
