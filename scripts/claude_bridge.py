@@ -73,8 +73,9 @@ def start(model, system, prompt, stream):
     os.makedirs(WORK_DIR, exist_ok=True)
     process = subprocess.Popen(command(model, system, stream), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=WORK_DIR, text=True)
-    process.stdin.write(prompt)
-    process.stdin.close()
+    if stream:
+        process.stdin.write(prompt)
+        process.stdin.close()
     return process
 
 
@@ -95,7 +96,7 @@ def failure(result_text):
 def complete(model, system, prompt):
     process = start(model, system, prompt, False)
     try:
-        out, err = process.communicate(timeout=TIMEOUT_SECONDS)
+        out, err = process.communicate(prompt, timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
