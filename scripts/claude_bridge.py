@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -13,7 +14,8 @@ CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
 WORK_DIR = os.environ.get('CLAUDE_BRIDGE_CWD', os.path.expanduser('~/.cache/claude-bridge-cwd'))
 TIMEOUT_SECONDS = int(os.environ.get('CLAUDE_BRIDGE_TIMEOUT', '300'))
 SLOTS = threading.BoundedSemaphore(int(os.environ.get('CLAUDE_BRIDGE_CONCURRENCY', '2')))
-UNSUPPORTED_FIELDS = ('tools', 'tool_choice', 'functions', 'function_call')
+UNSUPPORTED_FIELDS = ('functions', 'function_call')
+TOOL_BLOCK = re.compile(r'<tool_calls>(.*?)</tool_calls>', re.S)
 
 
 class BridgeError(Exception):
@@ -24,6 +26,8 @@ class BridgeError(Exception):
 
 
 def text_of(content):
+    if content is None:
+        return ''
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -36,28 +40,97 @@ def text_of(content):
     raise BridgeError(400, 'invalid_request', 'message content 格式不正確')
 
 
+def tool_specs(body):
+    if body.get('tool_choice') == 'none':
+        return []
+    specs = []
+    for tool in body.get('tools') or []:
+        function = tool.get('function') if isinstance(tool, dict) else None
+        if not isinstance(function, dict) or not function.get('name'):
+            raise BridgeError(400, 'invalid_request', 'tools 格式不正確')
+        specs.append(function)
+    return specs
+
+
+def tool_instructions(specs, choice):
+    lines = ['You can call the tools below. Tool definitions (JSON):', json.dumps(specs, ensure_ascii=False),
+             'To call tools, reply with only this block and nothing else:',
+             '<tool_calls>[{"name": "<tool name>", "arguments": {<arguments as a JSON object>}}]</tool_calls>',
+             'Put several objects in the array to call several tools at once.',
+             'Tool results come back in later messages labeled [tool result]. When you have enough information, answer in plain text.']
+    if choice == 'required':
+        lines.append('You must call at least one tool in this reply.')
+    elif isinstance(choice, dict) and (choice.get('function') or {}).get('name'):
+        lines.append('You must call the tool ' + choice['function']['name'] + ' in this reply.')
+    return '\n'.join(lines)
+
+
+def render_calls(message, names_by_id):
+    calls = []
+    for call in message.get('tool_calls') or []:
+        function = call.get('function') or {}
+        raw = function.get('arguments')
+        try:
+            arguments = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except ValueError:
+            arguments = raw
+        names_by_id[call.get('id')] = function.get('name')
+        calls.append({'name': function.get('name'), 'arguments': arguments})
+    return '<tool_calls>' + json.dumps(calls, ensure_ascii=False) + '</tool_calls>' if calls else ''
+
+
 def build_prompt(body):
     for field in UNSUPPORTED_FIELDS:
         if body.get(field):
-            raise BridgeError(400, 'unsupported_feature', field + ' 尚未支援（Claude Code 轉接只支援純文字對話）')
-    system, turns = [], []
+            raise BridgeError(400, 'unsupported_feature', field + ' 不支援，請改用 tools／tool_choice')
+    specs = tool_specs(body)
+    system, turns, names_by_id = [], [], {}
     for message in body.get('messages') or []:
         role, text = message.get('role'), text_of(message.get('content'))
         if role in ('system', 'developer'):
             system.append(text)
-        elif role in ('user', 'assistant'):
+        elif role == 'user':
             turns.append((role, text))
+        elif role == 'assistant':
+            turns.append((role, '\n'.join(part for part in (text, render_calls(message, names_by_id)) if part)))
+        elif role == 'tool':
+            identifier = message.get('tool_call_id')
+            turns.append(('tool result', f'name={names_by_id.get(identifier, "")} id={identifier}\n{text}'))
         else:
             raise BridgeError(400, 'unsupported_role', '不支援的 role：' + str(role))
-    if not turns or turns[-1][0] != 'user':
-        raise BridgeError(400, 'invalid_request', '最後一則訊息必須是 user')
-    if len(turns) == 1:
+    if not turns or turns[-1][0] == 'assistant':
+        raise BridgeError(400, 'invalid_request', '最後一則訊息必須是 user 或 tool')
+    if len(turns) == 1 and turns[0][0] == 'user':
         prompt = turns[0][1]
     else:
-        lines = ['Conversation so far. Reply only to the last user message.', '']
+        lines = ['Conversation so far. Continue as the assistant by replying to the last message.', '']
         lines += [f'[{role}]\n{text}\n' for role, text in turns]
         prompt = '\n'.join(lines)
+    if specs:
+        system.append(tool_instructions(specs, body.get('tool_choice')))
     return '\n\n'.join(system) or 'You are a helpful assistant.', prompt
+
+
+def extract_tool_calls(text, names):
+    match = TOOL_BLOCK.search(text)
+    if not match:
+        return text, []
+    try:
+        raw = json.loads(match.group(1))
+    except ValueError:
+        return text, []
+    raw = [raw] if isinstance(raw, dict) else raw
+    calls = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or item.get('name') not in names:
+            return text, []
+        arguments = item.get('arguments', {})
+        calls.append({'id': 'call_' + uuid.uuid4().hex[:24], 'type': 'function',
+                      'function': {'name': item['name'],
+                                   'arguments': arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)}})
+    if not calls:
+        return text, []
+    return (text[:match.start()] + text[match.end():]).strip(), calls
 
 
 def command(model, system, stream):
@@ -200,16 +273,45 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             SLOTS.release()
 
+    def send_buffered_stream(self, identifier, created, model, text, calls, usage):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.close_connection = True
+        pieces = [chunk(identifier, created, model, {'role': 'assistant', 'content': ''})]
+        if text:
+            pieces.append(chunk(identifier, created, model, {'content': text}))
+        if calls:
+            deltas = [{'index': index, **call} for index, call in enumerate(calls)]
+            pieces.append(chunk(identifier, created, model, {'tool_calls': deltas}))
+        pieces.append(chunk(identifier, created, model, {}, 'tool_calls' if calls else 'stop', usage))
+        pieces.append('data: [DONE]\n\n')
+        try:
+            self.wfile.write(''.join(pieces).encode())
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def answer(self, body, model, system, prompt):
         identifier, created = 'chatcmpl-' + uuid.uuid4().hex, int(time.time())
-        if not body.get('stream'):
+        names = {spec['name'] for spec in tool_specs(body)}
+        if names or not body.get('stream'):
             try:
                 text, usage = complete(model, system, prompt)
             except BridgeError as error:
                 self.send_error_body(error)
                 return
+            text, calls = extract_tool_calls(text, names) if names else (text, [])
+            if body.get('stream'):
+                self.send_buffered_stream(identifier, created, model, text, calls, usage)
+                return
+            message = {'role': 'assistant', 'content': text or None} if calls else {'role': 'assistant', 'content': text}
+            if calls:
+                message['tool_calls'] = calls
             self.send_json(200, {'id': identifier, 'object': 'chat.completion', 'created': created, 'model': model,
-                                 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': text}, 'finish_reason': 'stop'}],
+                                 'choices': [{'index': 0, 'message': message, 'finish_reason': 'tool_calls' if calls else 'stop'}],
                                  'usage': usage})
             return
         events = stream_events(model, system, prompt)

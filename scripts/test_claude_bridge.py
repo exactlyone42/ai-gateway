@@ -24,6 +24,10 @@ if 'CRASH' in prompt:
     sys.exit(3)
 usage = {'input_tokens': 2, 'cache_creation_input_tokens': 5, 'cache_read_input_tokens': 3, 'output_tokens': 4}
 text = 'sys=' + args[args.index('--system-prompt') + 1] + '|prompt=' + prompt
+if 'CALLTOOL' in prompt:
+    text = 'ok <tool_calls>[{"name": "draw", "arguments": {"x": 1}}, {"name": "draw", "arguments": "{}"}]</tool_calls>'
+if 'BADTOOL' in prompt:
+    text = '<tool_calls>[{"name": "other", "arguments": {}}]</tool_calls>'
 if mode == 'json':
     print(json.dumps({'type': 'result', 'is_error': False, 'result': text, 'usage': usage}))
 else:
@@ -51,10 +55,37 @@ class BuildPromptTests(unittest.TestCase):
         for body in [{'messages': [user], 'tools': [{'type': 'function'}]},
                      {'messages': [{'role': 'user', 'content': [{'type': 'image_url'}]}]},
                      {'messages': [{'role': 'assistant', 'content': 'x'}]},
-                     {'messages': [{'role': 'tool', 'content': 'x'}, user]}]:
+                     {'messages': [{'role': 'function', 'content': 'x'}, user]}]:
             with self.assertRaises(claude_bridge.BridgeError) as context:
                 claude_bridge.build_prompt(body)
             self.assertEqual(context.exception.status, 400)
+
+
+TOOLS = [{'type': 'function', 'function': {'name': 'draw', 'description': 'draw', 'parameters': {'type': 'object'}}}]
+
+
+class ToolPromptTests(unittest.TestCase):
+    def test_tools_go_into_system_and_history_is_rendered(self):
+        system, prompt = claude_bridge.build_prompt({'tools': TOOLS, 'tool_choice': 'required', 'messages': [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'c1', 'type': 'function', 'function': {'name': 'draw', 'arguments': '{"x": 1}'}}]},
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'done'}]})
+        self.assertIn('"name": "draw"', system)
+        self.assertIn('must call at least one tool', system)
+        self.assertIn('<tool_calls>[{"name": "draw", "arguments": {"x": 1}}]</tool_calls>', prompt)
+        self.assertIn('[tool result]\nname=draw id=c1\ndone', prompt)
+
+    def test_tool_choice_none_hides_tools_and_trailing_assistant_is_rejected(self):
+        system, _ = claude_bridge.build_prompt({'tools': TOOLS, 'tool_choice': 'none', 'messages': [{'role': 'user', 'content': 'q'}]})
+        self.assertNotIn('draw', system)
+        with self.assertRaises(claude_bridge.BridgeError):
+            claude_bridge.build_prompt({'messages': [{'role': 'user', 'content': 'q'}, {'role': 'assistant', 'content': 'a'}]})
+
+    def test_extract_tool_calls(self):
+        text, calls = claude_bridge.extract_tool_calls('hi <tool_calls>[{"name": "draw", "arguments": {"x": 1}}]</tool_calls>', {'draw'})
+        self.assertEqual((text, calls[0]['function']), ('hi', {'name': 'draw', 'arguments': '{"x": 1}'}))
+        for raw in ['plain', '<tool_calls>not json</tool_calls>', '<tool_calls>[{"name": "x", "arguments": {}}]</tool_calls>', '<tool_calls>[]</tool_calls>']:
+            self.assertEqual(claude_bridge.extract_tool_calls(raw, {'draw'}), (raw, []))
 
 
 class ServerTests(unittest.TestCase):
@@ -114,6 +145,30 @@ class ServerTests(unittest.TestCase):
         body = {'model': 'claude-sonnet-5-5', 'messages': [{'role': 'user', 'content': 'CRASH'}]}
         self.assertEqual(self.request('POST', '/v1/chat/completions', body)[0], 502)
         self.assertEqual(self.request('POST', '/v1/chat/completions', {**body, 'stream': True})[0], 502)
+
+    def test_tool_calls_non_stream(self):
+        status, text = self.request('POST', '/v1/chat/completions', self.chat(tools=TOOLS, messages=[{'role': 'user', 'content': 'CALLTOOL'}]))
+        choice = json.loads(text)['choices'][0]
+        self.assertEqual((status, choice['finish_reason'], choice['message']['content']), (200, 'tool_calls', 'ok'))
+        self.assertEqual([c['function'] for c in choice['message']['tool_calls']],
+                         [{'name': 'draw', 'arguments': '{"x": 1}'}, {'name': 'draw', 'arguments': '{}'}])
+
+    def test_tool_calls_stream(self):
+        status, text = self.request('POST', '/v1/chat/completions', self.chat(tools=TOOLS, stream=True, messages=[{'role': 'user', 'content': 'CALLTOOL'}]))
+        events = [line[6:] for line in text.splitlines() if line.startswith('data: ')]
+        chunks = [json.loads(item) for item in events[:-1]]
+        deltas = [c['choices'][0]['delta'] for c in chunks if c['choices'][0]['delta'].get('tool_calls')]
+        self.assertEqual((status, events[-1]), (200, '[DONE]'))
+        self.assertEqual([c['index'] for c in deltas[0]['tool_calls']], [0, 1])
+        self.assertEqual(deltas[0]['tool_calls'][0]['function']['name'], 'draw')
+        self.assertEqual(chunks[-1]['choices'][0]['finish_reason'], 'tool_calls')
+        self.assertEqual(chunks[-1]['usage']['total_tokens'], 14)
+
+    def test_unknown_tool_or_plain_answer_stays_text(self):
+        for word in ('BADTOOL', 'hello'):
+            body = json.loads(self.request('POST', '/v1/chat/completions', self.chat(tools=TOOLS, messages=[{'role': 'user', 'content': word}]))[1])
+            self.assertEqual(body['choices'][0]['finish_reason'], 'stop')
+            self.assertNotIn('tool_calls', body['choices'][0]['message'])
 
     def test_bad_model_tools_and_json_are_client_errors(self):
         self.assertEqual(self.request('POST', '/v1/chat/completions', self.chat(model='gpt-5'))[0], 404)
