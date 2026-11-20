@@ -16,7 +16,7 @@ TIMEOUT_SECONDS = int(os.environ.get('CLAUDE_BRIDGE_TIMEOUT', '1800'))
 KEEPALIVE_SECONDS = float(os.environ.get('CLAUDE_BRIDGE_KEEPALIVE', '15'))
 SLOTS = threading.BoundedSemaphore(int(os.environ.get('CLAUDE_BRIDGE_CONCURRENCY', '2')))
 UNSUPPORTED_FIELDS = ('functions', 'function_call')
-TOOL_BLOCK = re.compile(r'<tool_calls>(.*?)</tool_calls>', re.S)
+TOOL_BLOCK = re.compile(r'<tool_calls>(.*?)(?:</tool_calls>|\Z)', re.S)
 
 
 class BridgeError(Exception):
