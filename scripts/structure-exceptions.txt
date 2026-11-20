@@ -1,0 +1,2 @@
+loops/task-decomposer.checkpoints.jsonl.lock  # 舊的鎖檔誤進 Git，已被 .gitignore 排除，尚未移除
+docs/usage-ledger-queries.sql  # 舊檔，尚未搬到 scripts/
