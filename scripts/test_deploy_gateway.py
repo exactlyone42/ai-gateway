@@ -365,6 +365,13 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(routes[-1], self.previous)
                 self.assertFalse((Path(self.args.evidence) / 'accepted.json').exists())
 
+    def test_set_env_overrides_only_the_named_variables(self):
+        self.args.set_env = ['DATABASE_URL=postgres://gateway@db-alias/gateway', 'EXTRA=a=b']
+        deploy_gateway.deploy(self.args)
+        lines = (Path(self.args.evidence) / 'candidate.env').read_text().splitlines()
+        self.assertIn('EXTRA=a=b', lines)
+        self.assertIn('SCHEDULER_PASSTHROUGH=true', lines)
+
     def test_success_checks_candidate_before_switch_and_keeps_old(self):
         deploy_gateway.deploy(self.args)
         self.assert_old_not_stopped()

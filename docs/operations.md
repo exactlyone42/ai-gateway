@@ -263,7 +263,26 @@ Gateway 沒有把 ollama 位址寫死在程式裡。位址放在兩個設定值�
 1. 讓主機 ollama 聽容器能到的位址，例如 `OLLAMA_HOST=0.0.0.0:11434`，或只聽 Docker 網橋位址（目前 `agent-pool-gateway_default` 網橋位址是 `172.22.0.1`，重建網路後可能變，用 `docker network inspect` 重查）。
 2. 把上面兩處 `base_url` 改成 `http://172.22.0.1:11434`（或在 `deploy/docker-compose.yml` 為服務加 `extra_hosts: ["host.docker.internal:host-gateway"]` 後用 `http://host.docker.internal:11434`）。
 
-聽 `0.0.0.0` 會讓同網段其他機器也連得到 ollama，沒有金鑰保護；只聽網橋位址則主機上其他程式原本用的 `127.0.0.1:11434` 會連不上。選哪一個、主機防火牆怎麼設，屬於部署決定，本文件不替你改，Gateway 程式也沒有動。
+聽 `0.0.0.0` 會讓同網段其他機器也連得到 ollama，沒有金鑰保護；只聽網橋位址則主機上其他程式原本用的 `127.0.0.1:11434` 會連不上。
+
+2026-11-20 正式機實際採用的做法（不動 ollama 本身，仍只聽 `127.0.0.1`）：
+
+1. 使用者級 systemd 服務 `ollama-bridge`（`~/.config/systemd/user/ollama-bridge.service`）用 `socat` 在 `172.22.0.1:11434` 收連線，轉到 `127.0.0.1:11434`。已啟用且使用者帳號開了 linger，重開機後自動起來。
+2. 主機防火牆（ufw）只放行 `172.22.0.0/16` 連 `172.22.0.1` 的 `11434/tcp`，其他來源仍被擋。
+3. 部署時用 `scripts/deploy_gateway.py --set-env 'EXTRA_PROVIDER_PROFILES_JSON=[…"base_url":"http://172.22.0.1:11434"…]'` 改環境變數；資料庫 `providers` 表 `provider_key='ollama'` 的 `base_url` 要同時改成同一個位址，否則 Gateway 回 503 `provider is not bound to a trusted server-side profile`。
+4. 退回：`systemctl --user disable --now ollama-bridge`、`sudo ufw delete allow from 172.22.0.0/16 to 172.22.0.1 port 11434 proto tcp`，並用不帶 `--set-env` 的部署把位址改回 `127.0.0.1`。若 Docker 網路重建、網橋位址改變，要同步改服務、防火牆與兩處 `base_url`。
+
+## 透過本機 Claude Code 呼叫 Claude 模型（claude -p 轉接）
+
+為什麼：用訂閱權杖由 Gateway 直接呼叫 Anthropic 時，Sonnet／Opus 回 429，而同一帳號的本機 `claude -p` 成功（2026-11-20 實測；原因推論為 Anthropic 只放行 Claude Code 本身發出的請求，未證實）。不偽裝成 Claude Code，改為讓 Gateway 把純文字請求交給真正的 `claude -p`。放棄的做法：偽裝請求格式（違反供應商限制）、申請 API 金鑰（要另外付費，使用者先選訂閱）。
+
+做法：
+
+1. `scripts/claude_bridge.py` 是只用標準函式庫的小服務，提供 `POST /v1/chat/completions`（含串流）、`GET /v1/models`、`GET /api/version`。每個請求執行一次 `claude -p --tools "" --system-prompt … --setting-sources "" --no-session-persistence`，工作目錄是空資料夾，所以額外提示只有約 570 token，不是預設的約 3 萬。
+2. 主機上以使用者級服務 `claude-bridge` 執行，程式複製在 `~/services/claude-bridge/claude_bridge.py`（改了 repo 內的檔案要重新複製並 `systemctl --user restart claude-bridge`），綁 `172.22.0.1:11435`，同時最多 2 個 `claude`，超過等 30 秒後回 429。使用 `~/.claude` 的登入（目前是 Max 20x 訂閱）。防火牆只放行 Gateway 網段連該位址與埠。
+3. Gateway 側：環境變數 `EXTRA_PROVIDER_PROFILES_JSON` 加一項 `kind=ollama`、`provider_key=claude-code`、`credential_ref=env://LOCAL_CLAUDE_CODE`（兩個上游不能共用同一個 `credential_ref`）、`base_url=http://172.22.0.1:11435`、`operations=["openai_chat_completions"]`；資料庫 `providers` 與 `models` 要有對應資料列，公開名稱 `claude-code/claude-sonnet-5-5`、`claude-code/claude-opus-5-5`、`claude-code/claude-haiku-4-5-20251001`，且 `supports_reasoning=true`（轉接服務收下並忽略 `reasoning_effort`）。
+4. 限制：圖片、`functions` 會被拒絕。`tools` 用提示轉接：轉接服務把工具定義寫進系統提示，要求模型只回 `<tool_calls>[{"name":…,"arguments":{…}}]</tool_calls>`，再轉成標準 `tool_calls`（`finish_reason` 為 `tool_calls`）；`tool` 角色的結果與先前的 `tool_calls` 會寫回對話。這不是原生 tools，模型偶爾可能不照格式回，這時回傳純文字。有 tools 的請求不逐字串流，整段完成後一次送出。資料庫三個模型的 `supports_tools` 已設為 true，退回 SQL 在 `.artifacts/rollback-claude-bridge.txt`。額度算在該訂閱帳號的 Claude Code 用量裡。
+5. 退回：`systemctl --user disable --now claude-bridge`、`sudo ufw delete allow from 172.22.0.0/16 to 172.22.0.1 port 11435 proto tcp`，把 `claude-code` 的 `providers` 資料列設為 `archived`。
 
 - Gateway 事故以使用者體感判定：連不上、常出錯、變慢、容易中斷，或任何明顯降低使用品質的情況都要記錄；健康頁亮綠燈也不能排除事故。
 - 事故紀錄先用白話交代「原本怎麼運作、哪一步接錯、使用者看到什麼、怎麼處理、如何防止」，讓初階工程師能照著理解與處理；技術名稱與數字只放在後面作查證資料。
