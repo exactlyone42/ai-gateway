@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-EXPECTED_ASSERTS=39
+EXPECTED_ASSERTS=47
 
 ran=0
 failed=0
@@ -384,6 +384,46 @@ reset
 fixture scripts/test_utils_check.py <<'RS'
 RS
 expect_green "catch-all word inside a file name is allowed"
+
+reset
+fixture src/shared/a.rs <<'RS'
+RS
+expect_red "shared directory" "catch-all directory name"
+
+reset
+fixture deploy/run.log <<'RS'
+RS
+expect_red "run-time file in git" "run-time file"
+
+reset
+fixture Cargo.lock <<'RS'
+RS
+expect_green "Cargo.lock is allowed"
+
+reset
+fixture src/run.sh <<'RS'
+RS
+expect_red "script outside its folders" "scripts live in"
+
+reset
+fixture scripts/run.sh <<'RS'
+RS
+expect_green "script inside scripts/"
+
+reset
+fixture src/q.sql <<'RS'
+RS
+expect_red ".sql outside its folders" ".sql lives in"
+
+reset
+fixture docs/x.txt <<'RS'
+RS
+expect_red "docs/ file of a banned type" "docs/ holds"
+
+reset
+fixture docs/evidence/x.txt <<'RS'
+RS
+expect_green "docs/evidence/ is exempt"
 
 if [ "$ran" != "$EXPECTED_ASSERTS" ]; then
   echo "FAIL: $ran assertions ran, expected $EXPECTED_ASSERTS -- the suite did not fully execute"

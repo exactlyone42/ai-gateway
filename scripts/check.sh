@@ -355,7 +355,29 @@ layout() {
   while read -r name; do
     echo "$name: catch-all directory name (misc/temp/tmp/others/helpers/utils/common) -- name the responsibility instead"
     failed=1
-  done < <(printf '%s\n' "$paths" | grep -E '(^|/)(misc|temp|tmp|others|helpers|utils|common)/' | sed -E 's#((^|.*/)(misc|temp|tmp|others|helpers|utils|common))/.*#\1#' | sort -u || true)
+  done < <(printf '%s\n' "$paths" | grep -E '(^|/)(misc|temp|tmp|others|helpers?|utils?|common|shared)/' | sed -E 's#((^|.*/)(misc|temp|tmp|others|helpers?|utils?|common|shared))/.*#\1#' | sort -u || true)
+
+  local known=()
+  [ -f scripts/structure-exceptions.txt ] && mapfile -t known < <(sed -E 's/#.*//; s/[[:space:]]+//g' scripts/structure-exceptions.txt | grep -v '^$' || true)
+  while read -r name; do
+    local skip=0 old
+    for old in "${known[@]}"; do
+      case "$name" in "$old"|"$old"/*) skip=1 ;; esac
+    done
+    [ "$skip" = 1 ] && continue
+    case "$name" in docs/evidence/*) continue ;; esac
+    case "${name##*.}" in
+      log|pid|tmp|out|err|lock)
+        [ "$name" = Cargo.lock ] || { echo "$name: run-time file does not belong in git"; failed=1; } ;;
+      py|sh|ps1|bat)
+        case "$name" in scripts/*|.repo-policy/*|tests/*) ;; *) echo "$name: scripts live in scripts/, .repo-policy/ or tests/"; failed=1 ;; esac ;;
+      sql)
+        case "$name" in migrations/*|queries/*|deploy/*|scripts/*|tests/*) ;; *) echo "$name: .sql lives in migrations/, queries/, deploy/, scripts/ or tests/"; failed=1 ;; esac ;;
+    esac
+    case "$name" in
+      docs/*) case "${name##*.}" in md|pdf|json|png|svg|html) ;; *) echo "$name: docs/ holds md, pdf, json, png, svg and html only"; failed=1 ;; esac ;;
+    esac
+  done <<< "$paths"
 
   for name in "${root_dirs[@]}"; do
     grep -qF "\`$name/\`" "$doc" || { echo "$doc: top-level directory '$name/' is not described"; failed=1; }

@@ -40,6 +40,19 @@
 3. 新的根目錄或 `src/` 第一層目錄：不必等人核准，但同一次修改要改 `scripts/check.sh` 的 `layout` 白名單和本文件，並在交付時列出，寫明為什麼既有目錄不行。
 4. 不開 `misc`、`temp`、`tmp`、`others`、`helpers`、`utils`、`common`；閘門會擋。
 
+## 檔案類型放哪裡
+
+`layout` 也檢查檔案類型的位置（`docs/evidence/` 是存檔，不受限）：
+
+| 類型 | 只能放 |
+| --- | --- |
+| 腳本（`.py`、`.sh`、`.ps1`、`.bat`） | `scripts/`、`.repo-policy/`、`tests/` |
+| `.sql` | `migrations/`、`queries/`、`deploy/`、`scripts/`、`tests/` |
+| `docs/` 的檔案 | `.md`、`.pdf`、`.json`、`.png`、`.svg`、`.html` |
+| `.log`、`.pid`、`.tmp`、`.out`、`.err`、`.lock`（`Cargo.lock` 除外） | 不進 Git；暫存與輸出放 `.artifacts/` |
+
+資料夾名 `shared`、`helper`、`util` 與上面的 `misc` 等同樣禁用。已存在、尚未整理的違規記在 `scripts/structure-exceptions.txt`（一行一條路徑，後面寫原因），檢查時略過；只能因整理而刪條目，不能為了讓新檔通過而新增。
+
 ## 為什麼這樣做
 
 - 只檢查根目錄、`src/` 第一層和禁用名稱：這三處是 AI 最常亂開目錄的地方，且能機械判斷。
