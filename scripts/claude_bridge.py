@@ -16,7 +16,7 @@ TIMEOUT_SECONDS = int(os.environ.get('CLAUDE_BRIDGE_TIMEOUT', '1800'))
 KEEPALIVE_SECONDS = float(os.environ.get('CLAUDE_BRIDGE_KEEPALIVE', '15'))
 SLOTS = threading.BoundedSemaphore(int(os.environ.get('CLAUDE_BRIDGE_CONCURRENCY', '2')))
 UNSUPPORTED_FIELDS = ('functions', 'function_call')
-TOOL_BLOCK = re.compile(r'<tool_calls>(.*?)(?:</tool_calls>|\Z)', re.S)
+TOOL_BLOCK = re.compile(r'<(tool_calls|function_calls)>(.*?)(?:</\1>|\Z)', re.S)
 
 
 class BridgeError(Exception):
@@ -117,7 +117,7 @@ def extract_tool_calls(text, names):
     if not match:
         return text, []
     try:
-        raw = json.loads(match.group(1))
+        raw = json.loads(match.group(2))
     except ValueError:
         return text, []
     raw = [raw] if isinstance(raw, dict) else raw
@@ -131,7 +131,7 @@ def extract_tool_calls(text, names):
                                    'arguments': arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)}})
     if not calls:
         return text, []
-    return (text[:match.start()] + text[match.end():]).strip(), calls
+    return text[:match.start()].strip(), calls
 
 
 def command(model, system, stream):
